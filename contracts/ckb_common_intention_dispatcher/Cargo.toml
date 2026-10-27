@@ -1,0 +1,14 @@
+[package]
+name = "ckb_common_intention_dispatcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ckb-std = "1.1.0"
+ckb-cinnabar-verifier = { workspace = true }
+cid-protocol = { path = "../../protocol" }
+
+[features]
+default = ["mainnet"]
+mainnet = []
+testnet = []
