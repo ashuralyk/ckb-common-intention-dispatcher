@@ -45,8 +45,13 @@ make build     # RISC-V binary → build/release/ckb_common_intention_dispatcher
 make test      # FakeRpc + native CKB-VM, all cases
 ```
 
-Both `make build` and `make test` must exit 0. Tests load this contract from
-`build/release/` and the official xUDT RISC-V binary from `tests/binaries/xudt`.
+Both `make build` and `make test` must exit 0 (verified: **build 0**, **test 0**,
+19 FakeRpc cases). Tests load this contract from `build/release/` and the
+official xUDT RISC-V binary from `tests/binaries/xudt`.
+
+Cargo may print non-fatal parse errors for `ckb-cinnabar`’s
+`templates/contract` placeholders (`{{crate_name}}`). Those files are not
+workspace members; the build still succeeds.
 
 Dry-run deploy (needs a reachable indexer):
 
