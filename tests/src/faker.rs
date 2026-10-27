@@ -6,7 +6,6 @@ use ckb_cinnabar_calculator::{
     instruction::Instruction,
     operation::udt::XUDT_FAKENET_TX_HASH,
     re_exports::{
-        ckb_hash::blake2b_256,
         ckb_types::{
             core::ScriptHashType,
             packed::{OutPoint, Script},
@@ -24,8 +23,10 @@ use ckb_cinnabar_calculator::{
     TransactionCalculator,
 };
 use ckb_common_intention_dispatcher_calculator::{
-    cid_lock, encode_cid_args, CidScript, Payload, CONTRACT_NAME, XUDT_CODE_HASH,
+    cid_lock, encode_cid_args, CidScript, Payload, XUDT_CODE_HASH,
 };
+
+pub use ckb_common_intention_dispatcher_calculator::CONTRACT_NAME;
 
 pub const CONTRACT_BIN: &str = "../build/release";
 pub const XUDT_BIN: &str = "./binaries";
@@ -72,7 +73,7 @@ pub fn user_lock() -> ScriptEx {
 pub fn process_type_script() -> Script {
     Script::new_builder()
         .code_hash(H256([0xABu8; 32]).pack())
-        .hash_type(ScriptHashType::Data1.into())
+        .hash_type(ScriptHashType::Data1)
         .args(b"cid-process-v0".to_vec().pack())
         .build()
 }
@@ -156,7 +157,7 @@ pub fn seed_process_cell(rpc: &mut FakeRpcClient) -> OutPoint {
 pub fn seed_typed_dummy_cell(rpc: &mut FakeRpcClient) -> OutPoint {
     let dummy_type = Script::new_builder()
         .code_hash(H256([0xCDu8; 32]).pack())
-        .hash_type(ScriptHashType::Data1.into())
+        .hash_type(ScriptHashType::Data1)
         .args(b"not-process".to_vec().pack())
         .build();
     let cell = CellOutputEx::new_from_scripts(
@@ -228,7 +229,3 @@ pub fn seed_typed_intention(
     out
 }
 
-pub fn cid_code_hash() -> [u8; 32] {
-    let bin = std::fs::read(format!("{CONTRACT_BIN}/{CONTRACT_NAME}")).expect("cid binary");
-    blake2b_256(&bin)
-}

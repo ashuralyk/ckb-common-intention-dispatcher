@@ -17,7 +17,7 @@ use ckb_cinnabar_calculator::{
     skeleton::ScriptEx,
     types::{DepType, Hash256},
 };
-use cid_protocol::{CidArgs, Payload, Script as CidScript, XUDT_AMOUNT_LEN};
+use cid_protocol::XUDT_AMOUNT_LEN;
 
 /// FakeRpc / skeleton name of this lock binary (`build/release/<name>`).
 pub const CONTRACT_NAME: &str = "ckb_common_intention_dispatcher";
@@ -33,7 +33,7 @@ pub fn encode_cid_args(
     user_lock: CidScript,
     payload: Payload,
 ) -> Vec<u8> {
-    CidArgs::new(process_type_hash, user_lock, payload)
+    cid_protocol::CidArgs::new(process_type_hash, user_lock, payload)
         .encode()
         .expect("cid args encode")
 }

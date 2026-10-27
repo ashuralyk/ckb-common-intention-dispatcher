@@ -12,7 +12,7 @@ use ckb_cinnabar_calculator::{
     re_exports::ckb_types::{
         core::ScriptHashType,
         packed::Script,
-        prelude::{Pack, Unpack},
+        prelude::{Builder, Entity, Pack, Unpack},
         H256,
     },
     simulation::{
@@ -538,7 +538,7 @@ async fn fail_unsupported_type() {
     let args = cid_args(process_type_hash(), b"bad-type");
     let foreign = Script::new_builder()
         .code_hash(H256(blake2b_always_success()).pack())
-        .hash_type(ScriptHashType::Data1.into())
+        .hash_type(ScriptHashType::Data1)
         .args(b"not-xudt".to_vec().pack())
         .build();
     let intention = seed_typed_intention(&mut rpc, &skeleton, args, foreign);
