@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+
+members = [
+  # @@INSERTION_POINT@@
+  "protocol",
+  "calculator",
+  "tests",
+  "contracts/ckb_common_intention_dispatcher",
+]
+
+[workspace.dependencies]
+ckb-cinnabar = { git = "https://github.com/ashuralyk/ckb-cinnabar" }
+ckb-cinnabar-calculator = { git = "https://github.com/ashuralyk/ckb-cinnabar" }
+ckb-cinnabar-verifier = { git = "https://github.com/ashuralyk/ckb-cinnabar" }
+
+[package]
+edition = "2021"
+name = "ckb_common_intention_dispatcher-runner"
+version = "0.1.0"
+
+[dependencies]
+ckb-cinnabar = { workspace = true }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 's'
+overflow-checks = true
+strip = true

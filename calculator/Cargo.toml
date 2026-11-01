@@ -1,0 +1,8 @@
+[package]
+name = "ckb_common_intention_dispatcher-calculator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ckb-cinnabar-calculator = { workspace = true }
+cid-protocol = { path = "../protocol" }
