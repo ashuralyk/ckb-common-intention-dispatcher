@@ -27,6 +27,8 @@ jobs:
       - name: Build RISC-V contract
         run: make build CLANG=clang-18 CARGO_ARGS=--locked
       - name: Lint contract
+        env:
+          TARGET_CC: clang-18
         run: cargo clippy --locked -p ckb_common_intention_dispatcher --target riscv64imac-unknown-none-elf -- -D warnings
       - name: CKB-VM security regression tests
         run: make test CARGO_ARGS=--locked
