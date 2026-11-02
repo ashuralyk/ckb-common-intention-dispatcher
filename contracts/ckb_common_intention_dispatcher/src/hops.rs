@@ -1,8 +1,5 @@
-use ckb_cinnabar_verifier::{
-    re_exports::ckb_std::debug,
-    Result, Verification,
-};
 use cid_protocol::TIMEOUT_BLOCKS;
+use ckb_cinnabar_verifier::{re_exports::ckb_std::debug, Result, Verification};
 
 use crate::{
     context::Context,
@@ -16,7 +13,9 @@ pub struct DigestOk;
 impl Verification<Context> for DigestOk {
     fn verify(&mut self, name: &str, ctx: &mut Context) -> Result<Option<&str>> {
         debug!("Entering [{name}]");
-        if !ctx.process_matched {
+        // The matching CellDep identifies a Process; it does not execute it.
+        // User Lock validation authorizes this entire transaction, including outputs.
+        if !ctx.process_matched || !ctx.user_lock_in_inputs {
             return Err(CidError::ProcessMismatch.into());
         }
         Ok(None)

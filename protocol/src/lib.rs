@@ -130,8 +130,8 @@ pub fn decode_args(args: &[u8]) -> Result<([u8; 32], CidEntry), CodecError> {
     }
     let mut process_type_hash = [0u8; 32];
     process_type_hash.copy_from_slice(&args[..PROCESS_TYPE_HASH_LEN]);
-    let entry: CidEntry =
-        serde_molecule::from_slice(&args[PROCESS_TYPE_HASH_LEN..], false).map_err(|_| CodecError::Decode)?;
+    let entry: CidEntry = serde_molecule::from_slice(&args[PROCESS_TYPE_HASH_LEN..], false)
+        .map_err(|_| CodecError::Decode)?;
     if entry.version != CID_VERSION {
         return Err(CodecError::Version);
     }
@@ -161,7 +161,7 @@ mod tests {
             },
         );
         let bytes = args.encode().unwrap();
-        assert_eq!(bytes.len() > PROCESS_TYPE_HASH_LEN, true);
+        assert!(bytes.len() > PROCESS_TYPE_HASH_LEN);
         let decoded = CidArgs::decode(&bytes).unwrap();
         assert_eq!(args, decoded);
     }

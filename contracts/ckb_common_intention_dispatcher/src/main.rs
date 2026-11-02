@@ -9,8 +9,8 @@
 //! - `digest_ok` — matching Process CellDep; CID does not force a refund
 //! - `timeout_burn` — user in inputs + header delta >= TIMEOUT_BLOCKS + refund
 
-use ckb_cinnabar_verifier::{cinnabar_main, TREE_ROOT};
 use cid_protocol::{HOP_DIGEST_INCOMPATIBLE, HOP_DIGEST_OK, HOP_TIMEOUT_BURN};
+use ckb_cinnabar_verifier::{cinnabar_main, TREE_ROOT};
 
 mod context;
 mod error;

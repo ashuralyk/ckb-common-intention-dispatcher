@@ -5,13 +5,11 @@ use ckb_cinnabar_calculator::{
     address::{Address, AddressPayload},
     instruction::Instruction,
     operation::udt::XUDT_FAKENET_TX_HASH,
-    re_exports::{
-        ckb_types::{
-            core::ScriptHashType,
-            packed::{OutPoint, Script},
-            prelude::{Builder, Entity, Pack, Unpack},
-            H256,
-        },
+    re_exports::ckb_types::{
+        core::ScriptHashType,
+        packed::{OutPoint, Script},
+        prelude::{Builder, Entity, Pack, Unpack},
+        H256,
     },
     rpc::Network,
     simulation::{
@@ -129,8 +127,13 @@ pub fn prepared_skeleton(rpc: &FakeRpcClient) -> TransactionSkeleton {
 
 pub fn seed_fakenet_xudt_cell(rpc: &mut FakeRpcClient) {
     let out = OutPoint::new(H256(XUDT_FAKENET_TX_HASH).pack(), 0);
-    let cell = CellOutputEx::new_from_scripts(user_script(), None, vec![], Some(CKB_CAPACITY))
-        .expect("fakenet xudt placeholder");
+    let cell = CellOutputEx::new_from_scripts(
+        user_script(),
+        None,
+        std::fs::read("./binaries/xudt").unwrap(),
+        None,
+    )
+    .expect("fakenet xudt binary");
     rpc.insert_fake_cell(out, cell, None);
 }
 
@@ -160,13 +163,9 @@ pub fn seed_typed_dummy_cell(rpc: &mut FakeRpcClient) -> OutPoint {
         .hash_type(ScriptHashType::Data1)
         .args(b"not-process".to_vec().pack())
         .build();
-    let cell = CellOutputEx::new_from_scripts(
-        user_script(),
-        Some(dummy_type),
-        vec![],
-        Some(CKB_CAPACITY),
-    )
-    .expect("dummy typed cell");
+    let cell =
+        CellOutputEx::new_from_scripts(user_script(), Some(dummy_type), vec![], Some(CKB_CAPACITY))
+            .expect("dummy typed cell");
     let out = fake_outpoint();
     rpc.insert_fake_cell(out.clone(), cell, Some(fake_header_view(3, 3, 3)));
     out
@@ -228,4 +227,3 @@ pub fn seed_typed_intention(
     rpc.insert_fake_cell(out.clone(), cell, Some(fake_header_view(PACK_BLOCK, 1, 1)));
     out
 }
-

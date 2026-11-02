@@ -1,3 +1,4 @@
+use cid_protocol::{is_standard_xudt, CidArgs, Script as CidScript, XUDT_AMOUNT_LEN};
 use ckb_cinnabar_verifier::{
     re_exports::ckb_std::{
         ckb_constants::Source,
@@ -8,13 +9,12 @@ use ckb_cinnabar_verifier::{
         },
         error::SysError,
         high_level::{
-            load_cell_capacity, load_cell_data, load_cell_lock_hash,
+            load_cell_capacity, load_cell_data, load_cell_lock, load_cell_lock_hash,
             load_cell_occupied_capacity, load_cell_type, load_header, QueryIter,
         },
     },
     Result,
 };
-use cid_protocol::{is_standard_xudt, CidArgs, Script as CidScript, XUDT_AMOUNT_LEN};
 
 use crate::error::CidError;
 
@@ -44,6 +44,30 @@ pub fn find_output_by_lock_hash(lock_hash: &[u8; 32]) -> Option<usize> {
     QueryIter::new(load_cell_lock_hash, Source::Output)
         .enumerate()
         .find_map(|(i, hash)| if &hash == lock_hash { Some(i) } else { None })
+}
+
+/// Refunds cannot share a single output across different CID lock groups.
+/// Until aggregate refunds are defined, allow one Intention per user per transaction.
+pub fn has_shared_refund_user(user_lock_hash: &[u8; 32]) -> Result<bool> {
+    let mut count = 0;
+    for lock in QueryIter::new(load_cell_lock, Source::Input) {
+        // Recognize the argument schema, not code/hash_type: the same binary
+        // can be referenced through Data1, Data2 or a deployment Type ID.
+        // Conservatively count other programs with the same CID argument schema.
+        let Ok(args) = CidArgs::decode(&lock.args().raw_data()) else {
+            continue;
+        };
+        let Ok(user) = packed_script(&args.entry.user_lock) else {
+            continue;
+        };
+        if &script_hash_bytes(&user) == user_lock_hash {
+            count += 1;
+            if count > 1 {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 pub fn has_matching_process_celldep(process_type_hash: &[u8; 32]) -> bool {
@@ -132,6 +156,7 @@ pub fn load_intention_asset(index: usize, source: Source) -> Result<IntentionAss
                 return Err(CidError::ZeroAsset.into());
             }
             Ok(IntentionAsset::Xudt {
+                capacity,
                 amount,
                 type_hash: type_script.calc_script_hash().unpack(),
             })
@@ -141,8 +166,14 @@ pub fn load_intention_asset(index: usize, source: Source) -> Result<IntentionAss
 
 #[derive(Clone, Debug)]
 pub enum IntentionAsset {
-    Ckb { capacity: u64 },
-    Xudt { amount: u128, type_hash: [u8; 32] },
+    Ckb {
+        capacity: u64,
+    },
+    Xudt {
+        capacity: u64,
+        amount: u128,
+        type_hash: [u8; 32],
+    },
 }
 
 pub fn refund_assets_match(index: usize, expected: &IntentionAsset) -> Result<bool> {
@@ -151,13 +182,20 @@ pub fn refund_assets_match(index: usize, expected: &IntentionAsset) -> Result<bo
     let type_script = load_cell_type(index, Source::Output)?;
     match (expected, type_script) {
         (IntentionAsset::Ckb { capacity: want }, None) => Ok(capacity == *want && data.is_empty()),
-        (IntentionAsset::Xudt { amount, type_hash }, Some(type_script)) => {
+        (
+            IntentionAsset::Xudt {
+                capacity: want,
+                amount,
+                type_hash,
+            },
+            Some(type_script),
+        ) => {
             let got_hash: [u8; 32] = type_script.calc_script_hash().unpack();
             if &got_hash != type_hash {
                 return Ok(false);
             }
             let got = parse_xudt_amount(&data)?;
-            Ok(got == *amount)
+            Ok(got == *amount && capacity == *want)
         }
         _ => Ok(false),
     }

@@ -2,8 +2,10 @@
 //!
 //! Calculate assembles; it does not re-implement Verify predicates.
 
+use cid_protocol::XUDT_AMOUNT_LEN;
 use ckb_cinnabar_calculator::{
     address::Address,
+    indexer::{CellQueryOptions, GetCellsIter, SearchMode},
     instruction::Instruction,
     operation::{
         basic::{
@@ -11,13 +13,14 @@ use ckb_cinnabar_calculator::{
             AddInputCellByOutPoint, AddOutputCell,
         },
         udt::AddXudtCelldep,
-        Operation,
+        Log, Operation,
     },
+    re_exports::ckb_types::prelude::Unpack,
     rpc::RPC,
-    skeleton::ScriptEx,
+    skeleton::{CellInputEx, CellOutputEx, ScriptEx, TransactionSkeleton},
     types::{DepType, Hash256},
+    CalculatorError, Result,
 };
-use cid_protocol::XUDT_AMOUNT_LEN;
 
 /// FakeRpc / skeleton name of this lock binary (`build/release/<name>`).
 pub const CONTRACT_NAME: &str = "ckb_common_intention_dispatcher";
@@ -42,6 +45,111 @@ fn xudt_data(amount: u128) -> Vec<u8> {
     amount.to_le_bytes()[..XUDT_AMOUNT_LEN].to_vec()
 }
 
+// Collect by the full type script, not by issuer authority. Never mint tokens.
+struct CollectXudt {
+    payer: ScriptEx,
+    type_script: ScriptEx,
+    amount: u128,
+}
+
+impl<T: RPC> Operation<T> for CollectXudt {
+    fn run(
+        self: Box<Self>,
+        rpc: &T,
+        skeleton: &mut TransactionSkeleton,
+        _: &mut Log,
+    ) -> Result<()> {
+        let typ = self.type_script.to_script(skeleton)?;
+        let code_hash: [u8; 32] = typ.code_hash().unpack();
+        if self.amount == 0 || !cid_protocol::is_standard_xudt(&code_hash, typ.hash_type().into()) {
+            return Err(CalculatorError::Other(
+                "expected nonzero standard xUDT transfer".into(),
+            ));
+        }
+        let payer = self.payer.to_script(skeleton)?;
+        let mut query = CellQueryOptions::new_lock(payer.clone());
+        query.with_data = Some(true);
+        query.script_search_mode = Some(SearchMode::Exact);
+        query.secondary_script = Some(typ.clone());
+        let mut cells = GetCellsIter::new(rpc, query.into());
+        let mut collected = 0u128;
+        let mut inputs = Vec::new();
+        while let Some(cell) = cells.next()? {
+            if skeleton
+                .inputs
+                .iter()
+                .any(|i| i.input.previous_output() == cell.out_point)
+                || inputs
+                    .iter()
+                    .any(|i: &CellInputEx| i.input.previous_output() == cell.out_point)
+            {
+                continue;
+            }
+            // Recheck indexer results locally, including exact type/lock equality.
+            if cell.output.lock() != payer || cell.output.type_().to_opt() != Some(typ.clone()) {
+                continue;
+            }
+            let bytes: [u8; 16] = cell
+                .output_data
+                .as_slice()
+                .try_into()
+                .map_err(|_| CalculatorError::Other("expected 16-byte xUDT amount".into()))?;
+            collected = collected
+                .checked_add(u128::from_le_bytes(bytes))
+                .ok_or_else(|| CalculatorError::Other("xUDT amount overflow".into()))?;
+            inputs.push(CellInputEx::new_from_live_cell(cell, None));
+            if collected >= self.amount {
+                break;
+            }
+        }
+        if collected < self.amount {
+            return Err(CalculatorError::NoAvailableCells(format!(
+                "insufficient xUDT balance: need {}, collected {}",
+                self.amount, collected
+            )));
+        }
+        let change = if collected > self.amount {
+            Some(CellOutputEx::new_from_scripts(
+                payer,
+                Some(typ),
+                xudt_data(collected - self.amount),
+                None,
+            )?)
+        } else {
+            None
+        };
+        for input in inputs {
+            skeleton.input(input)?.witness(Default::default());
+        }
+        if let Some(change) = change {
+            skeleton.output(change);
+        }
+        Ok(())
+    }
+}
+
+// Input assets need their type code even when the recipe emits no output.
+struct AddInputAssetDeps;
+impl<T: RPC> Operation<T> for AddInputAssetDeps {
+    fn run(
+        self: Box<Self>,
+        rpc: &T,
+        skeleton: &mut TransactionSkeleton,
+        log: &mut Log,
+    ) -> Result<()> {
+        let has_xudt = skeleton.inputs.iter().any(|input| {
+            input.output.type_script().is_some_and(|typ| {
+                let hash: [u8; 32] = typ.code_hash().unpack();
+                cid_protocol::is_standard_xudt(&hash, typ.hash_type().into())
+            })
+        });
+        if has_xudt {
+            Box::new(AddXudtCelldep {}).run(rpc, skeleton, log)?;
+        }
+        Ok(())
+    }
+}
+
 /// Create an Intention cell. Lock Create does **not** run CID Verify.
 ///
 /// `xudt`: when set, attach the official xUDT type + 16-byte amount and the
@@ -52,10 +160,17 @@ pub fn create_intention<T: RPC>(
     capacity: u64,
     xudt: Option<(ScriptEx, u128)>,
 ) -> Instruction<T> {
-    let mut ops: Vec<Box<dyn Operation<T>>> = vec![Box::new(AddInputCellByAddress { address: payer })];
+    let mut ops: Vec<Box<dyn Operation<T>>> = vec![Box::new(AddInputCellByAddress {
+        address: payer.clone(),
+    })];
     let (type_script, data) = match xudt {
         Some((type_script, amount)) => {
             ops.push(Box::new(AddXudtCelldep {}));
+            ops.push(Box::new(CollectXudt {
+                payer: payer.payload().into(),
+                type_script: type_script.clone(),
+                amount,
+            }));
             (Some(type_script), xudt_data(amount))
         }
         None => (None, Vec::new()),
@@ -71,8 +186,10 @@ pub fn create_intention<T: RPC>(
     Instruction::new(ops)
 }
 
-/// Destroy the Intention against a matching Process CellDep.
-/// CID does not force a User Lock refund; `asset_output` is optional Process destination.
+/// Assemble a digest against a matching Process CellDep.
+/// The caller MUST also consume an input with the Intention's User Lock and
+/// satisfy that lock (e.g. sign the complete transaction). A CellDep alone
+/// grants no authority. `asset_output` may include partial user proceeds.
 pub fn digest_ok<T: RPC>(
     intention: (Hash256, u32),
     process: (Hash256, u32),
@@ -92,11 +209,7 @@ pub fn digest_ok<T: RPC>(
             with_data: true,
         }),
     ];
-    if let Some(output) = &asset_output {
-        if output.type_script.is_some() {
-            ops.push(Box::new(AddXudtCelldep {}));
-        }
-    }
+    ops.push(Box::new(AddInputAssetDeps));
     if let Some(output) = asset_output {
         ops.push(Box::new(output));
     }
@@ -174,8 +287,8 @@ fn refund_burn<T: RPC>(
 
 pub use cid_protocol::{
     CidArgs, CidEntry, Payload, Script as CidScript, CID_VERSION, ERROR_ARGS_INVALID,
-    ERROR_HEADER_MISSING, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH, ERROR_REFUND_ASSET_MISMATCH,
-    ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED, ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE,
-    ERROR_ZERO_ASSET, HOP_DIGEST_INCOMPATIBLE, HOP_DIGEST_OK, HOP_TIMEOUT_BURN, TIMEOUT_BLOCKS,
-    XUDT_CODE_HASH,
+    ERROR_HEADER_MISSING, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH,
+    ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED,
+    ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET, HOP_DIGEST_INCOMPATIBLE,
+    HOP_DIGEST_OK, HOP_TIMEOUT_BURN, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
 };
