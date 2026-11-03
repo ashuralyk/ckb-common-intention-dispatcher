@@ -72,9 +72,8 @@ pub fn has_shared_refund_user(user_lock_hash: &[u8; 32]) -> Result<bool> {
 
 /// Match the committed Process identity on actual cells, never dependencies.
 pub fn has_matching_process(process_type_hash: &[u8; 32], source: Source) -> bool {
-    QueryIter::new(load_cell_type, source).any(|script| {
-        script.is_some_and(|script| &script_hash_bytes(&script) == process_type_hash)
-    })
+    QueryIter::new(load_cell_type, source)
+        .any(|script| script.is_some_and(|script| &script_hash_bytes(&script) == process_type_hash))
 }
 
 pub fn has_typed_cells(source: Source) -> bool {

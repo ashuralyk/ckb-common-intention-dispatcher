@@ -198,9 +198,12 @@ impl<T: RPC> Operation<T> for ConsumeProcess {
         skeleton: &mut TransactionSkeleton,
         _: &mut Log,
     ) -> Result<()> {
-        let input = CellInputEx::new_from_outpoint(rpc, self.process.0, self.process.1, None, true)?;
+        let input =
+            CellInputEx::new_from_outpoint(rpc, self.process.0, self.process.1, None, true)?;
         if input.output.type_script().is_none() {
-            return Err(CalculatorError::Other("Process cell must have a type script".into()));
+            return Err(CalculatorError::Other(
+                "Process cell must have a type script".into(),
+            ));
         }
         let output = input.output.clone();
         skeleton.input(input)?.witness(Default::default());

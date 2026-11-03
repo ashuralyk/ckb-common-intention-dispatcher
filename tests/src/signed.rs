@@ -140,6 +140,20 @@ async fn signed_paths_balance_change_and_bind_outputs() {
             PACK_BLOCK,
         );
         let process = seed_process_cell(&mut rpc);
+        if path == "digest" {
+            // The Process lock belongs to the server, not the Intention owner.
+            rpc.insert_fake_cell(
+                process.clone(),
+                CellOutputEx::new_from_scripts(
+                    payer_lock.clone(),
+                    Some(process_type_script()),
+                    vec![],
+                    Some(CKB_CAPACITY),
+                )
+                .unwrap(),
+                None,
+            );
+        }
         let mut instructions = Vec::new();
         if path == "digest" || path == "incompatible" {
             let (tx_hash, index) = outpoint_ids(&funding);
@@ -188,7 +202,10 @@ async fn signed_paths_balance_change_and_bind_outputs() {
                 .unwrap();
         }
         if path == "digest" {
-            assert!(skeleton.inputs.iter().all(|i| i.output.lock_script() != owner_lock));
+            assert!(skeleton
+                .inputs
+                .iter()
+                .all(|i| i.output.lock_script() != owner_lock));
         }
         // Explicit fee budget; a separate change output preserves exact refunds.
         let fee = 10_000;

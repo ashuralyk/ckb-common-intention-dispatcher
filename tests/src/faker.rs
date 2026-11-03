@@ -70,9 +70,12 @@ pub fn user_lock() -> ScriptEx {
 
 pub fn process_type_script() -> Script {
     Script::new_builder()
-        .code_hash(ckb_cinnabar_calculator::re_exports::ckb_hash::blake2b_256(
-            std::fs::read(format!("{CONTRACT_BIN}/cid_process_fixture")).unwrap(),
-        ).pack())
+        .code_hash(
+            ckb_cinnabar_calculator::re_exports::ckb_hash::blake2b_256(
+                std::fs::read(format!("{CONTRACT_BIN}/cid_process_fixture")).unwrap(),
+            )
+            .pack(),
+        )
         .hash_type(ScriptHashType::Data1)
         .args(b"cid-process-v0".to_vec().pack())
         .build()
