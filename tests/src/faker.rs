@@ -1,17 +1,15 @@
 //! FakeRpc universe for CID v0.1: always-success user locks, this CID binary,
-//! real xUDT RISC-V, and a hash-mock Process cell (not SSRI).
+//! real xUDT RISC-V, and an executable Process fixture (not production SSRI).
 
 use ckb_cinnabar_calculator::{
     address::{Address, AddressPayload},
     instruction::Instruction,
     operation::udt::XUDT_FAKENET_TX_HASH,
-    re_exports::{
-        ckb_types::{
-            core::ScriptHashType,
-            packed::{OutPoint, Script},
-            prelude::{Builder, Entity, Pack, Unpack},
-            H256,
-        },
+    re_exports::ckb_types::{
+        core::ScriptHashType,
+        packed::{OutPoint, Script},
+        prelude::{Builder, Entity, Pack, Unpack},
+        H256,
     },
     rpc::Network,
     simulation::{
@@ -72,7 +70,12 @@ pub fn user_lock() -> ScriptEx {
 
 pub fn process_type_script() -> Script {
     Script::new_builder()
-        .code_hash(H256([0xABu8; 32]).pack())
+        .code_hash(
+            ckb_cinnabar_calculator::re_exports::ckb_hash::blake2b_256(
+                std::fs::read(format!("{CONTRACT_BIN}/cid_process_fixture")).unwrap(),
+            )
+            .pack(),
+        )
         .hash_type(ScriptHashType::Data1)
         .args(b"cid-process-v0".to_vec().pack())
         .build()
@@ -110,6 +113,11 @@ pub fn prepared_skeleton(rpc: &FakeRpcClient) -> TransactionSkeleton {
     let prepare = Instruction::<FakeRpcClient>::new(vec![
         Box::new(AddFakeAlwaysSuccessCelldep {}),
         Box::new(AddFakeContractCelldepByName {
+            contract: "cid_process_fixture".into(),
+            type_id_args: None,
+            contract_binary_path: CONTRACT_BIN.into(),
+        }),
+        Box::new(AddFakeContractCelldepByName {
             contract: CONTRACT_NAME.into(),
             type_id_args: None,
             contract_binary_path: CONTRACT_BIN.into(),
@@ -129,8 +137,13 @@ pub fn prepared_skeleton(rpc: &FakeRpcClient) -> TransactionSkeleton {
 
 pub fn seed_fakenet_xudt_cell(rpc: &mut FakeRpcClient) {
     let out = OutPoint::new(H256(XUDT_FAKENET_TX_HASH).pack(), 0);
-    let cell = CellOutputEx::new_from_scripts(user_script(), None, vec![], Some(CKB_CAPACITY))
-        .expect("fakenet xudt placeholder");
+    let cell = CellOutputEx::new_from_scripts(
+        user_script(),
+        None,
+        std::fs::read("./binaries/xudt").unwrap(),
+        None,
+    )
+    .expect("fakenet xudt binary");
     rpc.insert_fake_cell(out, cell, None);
 }
 
@@ -143,7 +156,7 @@ pub fn seed_user_cell(rpc: &mut FakeRpcClient, capacity: u64) {
 
 pub fn seed_process_cell(rpc: &mut FakeRpcClient) -> OutPoint {
     let cell = CellOutputEx::new_from_scripts(
-        user_script(),
+        dest_script(),
         Some(process_type_script()),
         vec![],
         Some(CKB_CAPACITY),
@@ -155,18 +168,13 @@ pub fn seed_process_cell(rpc: &mut FakeRpcClient) -> OutPoint {
 }
 
 pub fn seed_typed_dummy_cell(rpc: &mut FakeRpcClient) -> OutPoint {
-    let dummy_type = Script::new_builder()
-        .code_hash(H256([0xCDu8; 32]).pack())
-        .hash_type(ScriptHashType::Data1)
+    let dummy_type = process_type_script()
+        .as_builder()
         .args(b"not-process".to_vec().pack())
         .build();
-    let cell = CellOutputEx::new_from_scripts(
-        user_script(),
-        Some(dummy_type),
-        vec![],
-        Some(CKB_CAPACITY),
-    )
-    .expect("dummy typed cell");
+    let cell =
+        CellOutputEx::new_from_scripts(dest_script(), Some(dummy_type), vec![], Some(CKB_CAPACITY))
+            .expect("dummy typed cell");
     let out = fake_outpoint();
     rpc.insert_fake_cell(out.clone(), cell, Some(fake_header_view(3, 3, 3)));
     out
@@ -228,4 +236,3 @@ pub fn seed_typed_intention(
     rpc.insert_fake_cell(out.clone(), cell, Some(fake_header_view(PACK_BLOCK, 1, 1)));
     out
 }
-

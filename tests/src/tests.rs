@@ -22,18 +22,18 @@ use ckb_cinnabar_calculator::{
     CalculatorError, TransactionCalculator,
 };
 use ckb_common_intention_dispatcher_calculator::{
-    create_intention, digest_incompatible, digest_ok, timeout_burn, cid_lock, ERROR_ARGS_INVALID,
-    ERROR_HEADER_MISSING, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH, ERROR_REFUND_ASSET_MISMATCH,
-    ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED, ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE,
-    ERROR_ZERO_ASSET, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
+    cid_lock, create_intention, digest_incompatible, digest_ok, timeout_burn, ERROR_ARGS_INVALID,
+    ERROR_HEADER_MISSING, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH,
+    ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED,
+    ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
 };
 
 use crate::faker::{
-    cid_args, dest_lock, outpoint_ids, prepared_skeleton, process_type_hash, seed_fakenet_xudt_cell,
-    seed_header, seed_intention, seed_minimal_ckb_intention, seed_process_cell,
-    seed_typed_dummy_cell, seed_typed_intention, seed_user_cell, user_address, user_lock,
-    user_script, xudt_type_script, CKB_CAPACITY, CONTRACT_BIN, CONTRACT_NAME, PACK_BLOCK,
-    USER_CELL_CAPACITY, XUDT_AMOUNT,
+    cid_args, dest_lock, outpoint_ids, prepared_skeleton, process_type_hash,
+    seed_fakenet_xudt_cell, seed_header, seed_intention, seed_minimal_ckb_intention,
+    seed_process_cell, seed_typed_dummy_cell, seed_typed_intention, seed_user_cell, user_address,
+    user_lock, user_script, xudt_type_script, CKB_CAPACITY, CONTRACT_BIN, CONTRACT_NAME,
+    PACK_BLOCK, USER_CELL_CAPACITY, XUDT_AMOUNT,
 };
 
 const MAX_CYCLES: u64 = 50_000_000;
@@ -129,6 +129,17 @@ async fn create_xudt_intention_skeleton() {
     let mut skeleton = prepared_skeleton(&rpc);
     let args = cid_args(process_type_hash(), b"xudt");
     let xudt = xudt_type_script();
+    rpc.insert_fake_cell(
+        ckb_cinnabar_calculator::simulation::fake_outpoint(),
+        ckb_cinnabar_calculator::skeleton::CellOutputEx::new_from_scripts(
+            user_script(),
+            Some(xudt.clone().to_script(&skeleton).unwrap()),
+            XUDT_AMOUNT.to_le_bytes().to_vec(),
+            Some(CKB_CAPACITY),
+        )
+        .unwrap(),
+        None,
+    );
     let ix = create_intention::<FakeRpcClient>(
         user_address(),
         args,
@@ -150,15 +161,15 @@ async fn create_xudt_intention_skeleton() {
 
     verify(&rpc, skeleton, vec![])
         .await
-        .expect("xUDT mint + payer lock succeed; CID lock Create does not run");
+        .expect("xUDT transfer + payer lock succeed; CID lock Create does not run");
 }
 
 #[tokio::test]
-async fn digest_ok_ckb() {
+async fn rejects_process_celldep_only_ckb_theft() {
     require_binary();
     let mut rpc = FakeRpcClient::default();
     seed_fakenet_xudt_cell(&mut rpc);
-    let skeleton = prepared_skeleton(&rpc);
+    let mut skeleton = prepared_skeleton(&rpc);
     let args = cid_args(process_type_hash(), b"ok");
     let intention = seed_intention(&mut rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
     let process = seed_process_cell(&mut rpc);
@@ -175,17 +186,38 @@ async fn digest_ok_ckb() {
             type_id: false,
         }),
     );
-    verify(&rpc, skeleton, vec![ix])
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    // Undo the recipe's Process transfer and reproduce the old CellDep-only spend.
+    skeleton
+        .inputs
+        .retain(|i| i.input.previous_output() != process);
+    skeleton.witnesses.truncate(skeleton.inputs.len());
+    skeleton.outputs.remove(0);
+    let (tx_hash, index) = outpoint_ids(&process);
+    let dep = Instruction::new(vec![Box::new(
+        ckb_cinnabar_calculator::operation::basic::AddCellDep {
+            name: "process".into(),
+            tx_hash,
+            index,
+            dep_type: ckb_cinnabar_calculator::types::DepType::Code,
+            with_data: true,
+        },
+    )]);
+    let err = verify(&rpc, skeleton, vec![dep])
         .await
-        .expect("digest_ok CKB");
+        .expect_err("CellDep cannot authorize CKB theft");
+    assert_eq!(exit(err), ERROR_PROCESS_MISMATCH);
 }
 
 #[tokio::test]
-async fn digest_ok_xudt() {
+async fn rejects_process_celldep_only_xudt_theft() {
     require_binary();
     let mut rpc = FakeRpcClient::default();
     seed_fakenet_xudt_cell(&mut rpc);
-    let skeleton = prepared_skeleton(&rpc);
+    let mut skeleton = prepared_skeleton(&rpc);
     let args = cid_args(process_type_hash(), b"ok-xudt");
     let xudt = xudt_type_script();
     let intention = seed_intention(
@@ -210,9 +242,30 @@ async fn digest_ok_xudt() {
             type_id: false,
         }),
     );
-    verify(&rpc, skeleton, vec![ix])
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    // Undo the recipe's Process transfer and reproduce the old CellDep-only spend.
+    skeleton
+        .inputs
+        .retain(|i| i.input.previous_output() != process);
+    skeleton.witnesses.truncate(skeleton.inputs.len());
+    skeleton.outputs.remove(0);
+    let (tx_hash, index) = outpoint_ids(&process);
+    let dep = Instruction::new(vec![Box::new(
+        ckb_cinnabar_calculator::operation::basic::AddCellDep {
+            name: "process".into(),
+            tx_hash,
+            index,
+            dep_type: ckb_cinnabar_calculator::types::DepType::Code,
+            with_data: true,
+        },
+    )]);
+    let err = verify(&rpc, skeleton, vec![dep])
         .await
-        .expect("digest_ok xUDT");
+        .expect_err("CellDep cannot authorize xUDT theft");
+    assert_eq!(exit(err), ERROR_PROCESS_MISMATCH);
 }
 
 #[tokio::test]
@@ -381,7 +434,14 @@ async fn fail_partial_digest() {
     seed_fakenet_xudt_cell(&mut rpc);
     let skeleton = prepared_skeleton(&rpc);
     let args = cid_args(process_type_hash(), b"partial");
-    let intention = seed_intention(&mut rpc, &skeleton, args.clone(), CKB_CAPACITY, None, PACK_BLOCK);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        args.clone(),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
     let process = seed_process_cell(&mut rpc);
     let ix = digest_ok::<FakeRpcClient>(
         outpoint_ids(&intention),
@@ -550,4 +610,419 @@ async fn fail_unsupported_type() {
 
 fn blake2b_always_success() -> [u8; 32] {
     user_script().code_hash().unpack()
+}
+
+#[tokio::test]
+async fn rejects_xudt_refund_capacity_theft() {
+    for timeout in [false, true] {
+        let mut rpc = FakeRpcClient::default();
+        seed_fakenet_xudt_cell(&mut rpc);
+        let skeleton = prepared_skeleton(&rpc);
+        let xudt = xudt_type_script();
+        let intention = seed_intention(
+            &mut rpc,
+            &skeleton,
+            cid_args(process_type_hash(), b"capacity-theft"),
+            CKB_CAPACITY,
+            Some((xudt.clone(), XUDT_AMOUNT)),
+            PACK_BLOCK,
+        );
+        let ix = if timeout {
+            seed_user_cell(&mut rpc, USER_CELL_CAPACITY);
+            seed_header(&mut rpc, PACK_BLOCK + TIMEOUT_BLOCKS);
+            timeout_burn(
+                outpoint_ids(&intention),
+                user_address(),
+                user_lock(),
+                CKB_CAPACITY - 100_000_000,
+                Some((xudt, XUDT_AMOUNT)),
+                PACK_BLOCK + TIMEOUT_BLOCKS,
+            )
+        } else {
+            digest_incompatible(
+                outpoint_ids(&intention),
+                user_lock(),
+                CKB_CAPACITY - 100_000_000,
+                Some((xudt, XUDT_AMOUNT)),
+            )
+        };
+        let err = verify(&rpc, skeleton, vec![ix])
+            .await
+            .expect_err("must refund CKB as well as tokens");
+        assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
+    }
+}
+
+#[tokio::test]
+async fn create_from_non_issuer_collects_tokens_and_returns_change() {
+    use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
+    for balance in [1500u128, 999] {
+        let mut rpc = FakeRpcClient::default();
+        seed_fakenet_xudt_cell(&mut rpc);
+        seed_user_cell(&mut rpc, CKB_CAPACITY);
+        let mut skeleton = prepared_skeleton(&rpc);
+        // Issuer differs from payer; this cannot exercise xUDT mint mode.
+        let typ = ckb_cinnabar_calculator::skeleton::ScriptEx::new_code(
+            XUDT_CODE_HASH,
+            crate::faker::dest_script()
+                .calc_script_hash()
+                .as_slice()
+                .to_vec(),
+        );
+        let token_input = fake_outpoint();
+        rpc.insert_fake_cell(
+            token_input.clone(),
+            CellOutputEx::new_from_scripts(
+                user_script(),
+                Some(typ.clone().to_script(&skeleton).unwrap()),
+                balance.to_le_bytes().to_vec(),
+                Some(CKB_CAPACITY),
+            )
+            .unwrap(),
+            None,
+        );
+        let result = TransactionCalculator::default()
+            .instruction(create_intention(
+                user_address(),
+                cid_args(process_type_hash(), b"transfer"),
+                CKB_CAPACITY,
+                Some((typ.clone(), 1000)),
+            ))
+            .apply_skeleton(&rpc, &mut skeleton);
+        if balance < 1000 {
+            assert!(
+                result.is_err(),
+                "insufficient tokens must fail during assembly"
+            );
+            continue;
+        }
+        result.unwrap();
+        assert!(skeleton
+            .inputs
+            .iter()
+            .any(|i| i.input.previous_output() == token_input));
+        assert!(skeleton
+            .outputs
+            .iter()
+            .any(|o| o.lock_script() == user_script()
+                && o.type_script() == Some(typ.clone().to_script(&skeleton).unwrap())
+                && o.data == 500u128.to_le_bytes()));
+        verify(&rpc, skeleton, vec![])
+            .await
+            .expect("ordinary token transfer verifies");
+    }
+}
+
+#[test]
+fn digest_adds_xudt_dependency_from_input_without_output() {
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let mut skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"input-dep"),
+        CKB_CAPACITY,
+        Some((xudt_type_script(), XUDT_AMOUNT)),
+        PACK_BLOCK,
+    );
+    let process = seed_process_cell(&mut rpc);
+    skeleton.celldeps.retain(|d| d.name != "xudt");
+    TransactionCalculator::default()
+        .instruction(digest_ok(
+            outpoint_ids(&intention),
+            outpoint_ids(&process),
+            None,
+        ))
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    assert!(skeleton.celldeps.iter().any(|d| d.name == "xudt"));
+}
+
+#[tokio::test]
+async fn process_digest_accepts_partial_user_proceeds_without_user_input() {
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"partial-proceeds"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let process = seed_process_cell(&mut rpc);
+    let digest = digest_ok(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: user_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY / 2,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    verify(&rpc, skeleton, vec![digest])
+        .await
+        .expect("Process-authorized digest without a user input");
+}
+
+#[tokio::test]
+async fn rejects_shared_refund_across_distinct_intentions() {
+    use ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint;
+    for xudt in [None, Some((xudt_type_script(), XUDT_AMOUNT))] {
+        let mut rpc = FakeRpcClient::default();
+        seed_fakenet_xudt_cell(&mut rpc);
+        let skeleton = prepared_skeleton(&rpc);
+        let first = seed_intention(
+            &mut rpc,
+            &skeleton,
+            cid_args(process_type_hash(), b"first"),
+            CKB_CAPACITY,
+            xudt.clone(),
+            PACK_BLOCK,
+        );
+        let second = seed_intention(
+            &mut rpc,
+            &skeleton,
+            cid_args(process_type_hash(), b"second"),
+            CKB_CAPACITY,
+            xudt.clone(),
+            PACK_BLOCK,
+        );
+        let (tx_hash, index) = outpoint_ids(&second);
+        let steal = Instruction::new(vec![
+            Box::new(AddInputCellByOutPoint {
+                tx_hash,
+                index,
+                since: None,
+            }),
+            Box::new(AddOutputCell {
+                lock_script: dest_lock(),
+                type_script: xudt.as_ref().map(|(t, _)| t.clone()),
+                data: xudt
+                    .as_ref()
+                    .map(|(_, a)| a.to_le_bytes().to_vec())
+                    .unwrap_or_default(),
+                capacity: CKB_CAPACITY,
+                absolute_capacity: true,
+                type_id: false,
+            }),
+        ]);
+        let refund = digest_incompatible(outpoint_ids(&first), user_lock(), CKB_CAPACITY, xudt);
+        let err = verify(&rpc, skeleton, vec![steal, refund])
+            .await
+            .expect_err("one refund must not release two intentions");
+        assert_eq!(exit(err), ERROR_PARTIAL_DIGEST);
+    }
+}
+
+#[tokio::test]
+async fn rejects_shared_refund_across_cid_hash_type_aliases() {
+    use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let lock = cid_lock(cid_args(process_type_hash(), b"data2-alias"))
+        .to_script(&skeleton)
+        .unwrap()
+        .as_builder()
+        .hash_type(ScriptHashType::Data2)
+        .build();
+    let intention = fake_outpoint();
+    rpc.insert_fake_cell(
+        intention.clone(),
+        CellOutputEx::new_from_scripts(lock, None, vec![], Some(CKB_CAPACITY)).unwrap(),
+        None,
+    );
+    let first = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"data1-alias"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let (tx_hash, index) = outpoint_ids(&intention);
+    let steal = Instruction::new(vec![
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash,
+                index,
+                since: None,
+            },
+        ),
+        Box::new(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    ]);
+    let refund = digest_incompatible(outpoint_ids(&first), user_lock(), CKB_CAPACITY, None);
+    let err = verify(&rpc, skeleton, vec![steal, refund])
+        .await
+        .expect_err("aliases must not share refunds");
+    assert_eq!(exit(err), ERROR_PARTIAL_DIGEST);
+}
+
+#[tokio::test]
+async fn process_pair_executes_without_user_and_rejects_invalid_transitions() {
+    for xudt in [false, true] {
+        for case in [
+            "valid",
+            "input_only",
+            "output_only",
+            "wrong_input",
+            "wrong_output",
+            "reject",
+        ] {
+            let mut rpc = FakeRpcClient::default();
+            seed_fakenet_xudt_cell(&mut rpc);
+            let mut skeleton = prepared_skeleton(&rpc);
+            let typ = xudt.then(xudt_type_script);
+            let intention = seed_intention(
+                &mut rpc,
+                &skeleton,
+                cid_args(process_type_hash(), b"delegated"),
+                CKB_CAPACITY,
+                typ.clone().map(|t| (t, XUDT_AMOUNT)),
+                PACK_BLOCK,
+            );
+            let process = seed_process_cell(&mut rpc);
+            TransactionCalculator::default()
+                .instruction(digest_ok(
+                    outpoint_ids(&intention),
+                    outpoint_ids(&process),
+                    Some(AddOutputCell {
+                        lock_script: dest_lock(),
+                        type_script: typ,
+                        data: if xudt {
+                            XUDT_AMOUNT.to_le_bytes().to_vec()
+                        } else {
+                            vec![]
+                        },
+                        capacity: CKB_CAPACITY,
+                        absolute_capacity: true,
+                        type_id: false,
+                    }),
+                ))
+                .apply_skeleton(&rpc, &mut skeleton)
+                .unwrap();
+            assert!(skeleton
+                .inputs
+                .iter()
+                .all(|i| i.output.lock_script() != user_script()));
+            assert!(skeleton
+                .celldeps
+                .iter()
+                .all(|d| d.celldep.out_point() != process));
+            assert_eq!(
+                skeleton.outputs[0].type_script(),
+                Some(crate::faker::process_type_script())
+            );
+            assert_eq!(skeleton.outputs[0].capacity_shannons(), CKB_CAPACITY);
+            match case {
+                "input_only" => {
+                    skeleton.outputs.remove(0);
+                }
+                "output_only" => {
+                    skeleton
+                        .inputs
+                        .retain(|i| i.input.previous_output() != process);
+                    skeleton.witnesses.truncate(skeleton.inputs.len());
+                }
+                "wrong_input" => {
+                    skeleton
+                        .inputs
+                        .retain(|i| i.input.previous_output() != process);
+                    skeleton.witnesses.truncate(skeleton.inputs.len());
+                    let dummy = seed_typed_dummy_cell(&mut rpc);
+                    let (tx_hash, index) = outpoint_ids(&dummy);
+                    TransactionCalculator::default()
+                        .instruction(Instruction::new(vec![Box::new(
+                            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                                tx_hash,
+                                index,
+                                since: None,
+                            },
+                        )]))
+                        .apply_skeleton(&rpc, &mut skeleton)
+                        .unwrap();
+                }
+                "wrong_output" => {
+                    let wrong = crate::faker::process_type_script()
+                        .as_builder()
+                        .args(b"wrong-process".to_vec().pack())
+                        .build();
+                    skeleton.outputs[0].output = skeleton.outputs[0]
+                        .output
+                        .clone()
+                        .as_builder()
+                        .type_(Some(wrong).pack())
+                        .build();
+                }
+                "reject" => skeleton.outputs[0].data = b"reject".to_vec(),
+                _ => {}
+            }
+            let result = verify(&rpc, skeleton, vec![]).await;
+            if case == "valid" {
+                result.expect("matching executable Process pair needs no user input/signature");
+            } else if case == "reject" {
+                assert_eq!(
+                    exit(result.expect_err("Process type script must execute")),
+                    42
+                );
+            } else {
+                assert_eq!(exit(result.expect_err(case)), ERROR_PROCESS_MISMATCH);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn process_digest_batches_distinct_intentions_for_same_user() {
+    use ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint;
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let mut skeleton = prepared_skeleton(&rpc);
+    let first = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"batch-first"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let second = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"batch-second"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let process = seed_process_cell(&mut rpc);
+    TransactionCalculator::default()
+        .instruction(digest_ok(
+            outpoint_ids(&first),
+            outpoint_ids(&process),
+            None,
+        ))
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let (tx_hash, index) = outpoint_ids(&second);
+    let extra = Instruction::new(vec![Box::new(AddInputCellByOutPoint {
+        tx_hash,
+        index,
+        since: None,
+    })]);
+    verify(&rpc, skeleton, vec![extra])
+        .await
+        .expect("Process pair can authorize distinct Intention groups; refund guard is separate");
 }

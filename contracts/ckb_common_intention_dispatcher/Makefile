@@ -7,7 +7,7 @@ CARGO_ARGS :=
 MODE := release
 CLANG := $(shell $(TOP)/scripts/find_clang)
 BUILD_DIR :=
-BINARIES := $(notdir $(shell pwd))
+BINARIES := $(notdir $(shell pwd)) cid_process_fixture
 CARGO_TARGET_DIR ?= $(TOP)/target
 
 export CARGO_TARGET_DIR
@@ -33,3 +33,4 @@ prepare:
 	rustup target add riscv64imac-unknown-none-elf
 
 .PHONY: build prepare
+

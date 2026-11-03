@@ -1,8 +1,5 @@
-use ckb_cinnabar_verifier::{
-    re_exports::ckb_std::debug,
-    Result, Verification,
-};
 use cid_protocol::TIMEOUT_BLOCKS;
+use ckb_cinnabar_verifier::{re_exports::ckb_std::debug, Result, Verification};
 
 use crate::{
     context::Context,
@@ -16,6 +13,8 @@ pub struct DigestOk;
 impl Verification<Context> for DigestOk {
     fn verify(&mut self, name: &str, ctx: &mut Context) -> Result<Option<&str>> {
         debug!("Entering [{name}]");
+        // Root requires the committed Process type hash in both inputs and outputs.
+        // CKB executes the Process input lock and type script; no user re-signing.
         if !ctx.process_matched {
             return Err(CidError::ProcessMismatch.into());
         }

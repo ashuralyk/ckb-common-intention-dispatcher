@@ -1,0 +1,42 @@
+name: CID security checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64imac-unknown-none-elf
+          components: rustfmt, clippy
+      - name: Install RISC-V capable clang
+        run: sudo apt-get update && sudo apt-get install -y clang-18
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check bundled xUDT binary
+        run: echo 'e9b92e5783f692f6ee99ca20eeda5f3da282e0f4010eb4fbd3db4e3058239349  tests/binaries/xudt' | sha256sum --check
+      - name: Lint host crates
+        run: cargo clippy --locked -p cid-protocol -p ckb_common_intention_dispatcher-calculator -p ckb_common_intention_dispatcher-tests --all-targets -- -D warnings
+      - name: Protocol tests
+        run: cargo test --locked -p cid-protocol
+      - name: Build RISC-V contract
+        run: make build CLANG=clang-18 CARGO_ARGS=--locked
+      - name: Lint contract
+        env:
+          TARGET_CC: clang-18
+        run: cargo clippy --locked -p ckb_common_intention_dispatcher --target riscv64imac-unknown-none-elf -- -D warnings
+      - name: CKB-VM security regression tests
+        run: make test CARGO_ARGS=--locked
+      - name: Record contract binary hash
+        run: sha256sum build/release/ckb_common_intention_dispatcher > build/release/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cid-contract
+          path: |
+            build/release/ckb_common_intention_dispatcher
+            build/release/SHA256SUMS

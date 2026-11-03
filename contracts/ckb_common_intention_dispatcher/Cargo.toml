@@ -12,3 +12,8 @@ cid-protocol = { path = "../../protocol" }
 default = ["mainnet"]
 mainnet = []
 testnet = []
+
+
+[[bin]]
+name = "cid_process_fixture"
+path = "../../tests/process_fixture.rs"

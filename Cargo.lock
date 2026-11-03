@@ -869,6 +869,7 @@ version = "0.1.0"
 dependencies = [
  "ckb-always-success-script",
  "ckb-cinnabar-calculator",
+ "ckb-system-scripts 0.5.4",
  "ckb_common_intention_dispatcher-calculator",
  "tokio",
 ]

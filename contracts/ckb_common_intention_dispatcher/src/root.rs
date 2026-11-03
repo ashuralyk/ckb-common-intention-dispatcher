@@ -1,20 +1,17 @@
+use cid_protocol::{HOP_DIGEST_INCOMPATIBLE, HOP_DIGEST_OK, HOP_TIMEOUT_BURN};
 use ckb_cinnabar_verifier::{
-    re_exports::ckb_std::{
-        ckb_constants::Source,
-        debug,
-        high_level::load_cell_data,
-    },
+    re_exports::ckb_std::{ckb_constants::Source, debug, high_level::load_cell_data},
     this_script_args, this_script_count, this_script_pattern, Result, ScriptPattern, ScriptPlace,
     Verification,
 };
-use cid_protocol::{HOP_DIGEST_INCOMPATIBLE, HOP_DIGEST_OK, HOP_TIMEOUT_BURN};
 
 use crate::{
     context::Context,
     error::CidError,
     utils::{
-        find_output_by_lock_hash, has_input_lock_hash, has_matching_process_celldep,
-        has_typed_celldep, load_intention_asset, packed_script, parse_args, script_hash_bytes,
+        find_output_by_lock_hash, has_input_lock_hash, has_matching_process,
+        has_shared_refund_user, has_typed_cells, load_intention_asset, packed_script, parse_args,
+        script_hash_bytes,
     },
 };
 
@@ -32,7 +29,8 @@ impl Verification<Context> for Root {
         ctx.user_lock_hash = script_hash_bytes(&user_lock);
         ctx.user_lock_in_inputs = has_input_lock_hash(&ctx.user_lock_hash);
         ctx.refund_output = find_output_by_lock_hash(&ctx.user_lock_hash);
-        ctx.process_matched = has_matching_process_celldep(&args.process_type_hash);
+        ctx.process_matched = has_matching_process(&args.process_type_hash, Source::Input)
+            && has_matching_process(&args.process_type_hash, Source::Output);
         ctx.args = Some(args);
 
         match this_script_pattern(ScriptPlace::Lock)? {
@@ -50,16 +48,25 @@ impl Verification<Context> for Root {
         let _ = load_cell_data(0, Source::GroupInput)?;
         ctx.asset = Some(load_intention_asset(0, Source::GroupInput)?);
 
-        if ctx.refund_output.is_some() && !ctx.user_lock_in_inputs {
-            return Ok(Some(HOP_DIGEST_INCOMPATIBLE));
-        }
+        // Consuming and recreating the matching Process executes its input lock
+        // and type script under CKB. The user delegated at Intention creation.
+        // Process execution takes priority over refund-shaped partial proceeds.
         if ctx.process_matched {
             return Ok(Some(HOP_DIGEST_OK));
+        }
+        if has_shared_refund_user(&ctx.user_lock_hash)? {
+            return Err(CidError::PartialDigest.into());
+        }
+        if ctx.refund_output.is_some() && !ctx.user_lock_in_inputs {
+            return Ok(Some(HOP_DIGEST_INCOMPATIBLE));
         }
         if ctx.user_lock_in_inputs {
             return Ok(Some(HOP_TIMEOUT_BURN));
         }
-        if has_typed_celldep() {
+        if has_typed_cells(Source::Input)
+            || has_typed_cells(Source::Output)
+            || has_typed_cells(Source::CellDep)
+        {
             return Err(CidError::ProcessMismatch.into());
         }
         Err(CidError::UnknownBranch.into())
