@@ -173,7 +173,7 @@ pub fn seed_typed_dummy_cell(rpc: &mut FakeRpcClient) -> OutPoint {
         .args(b"not-process".to_vec().pack())
         .build();
     let cell =
-        CellOutputEx::new_from_scripts(user_script(), Some(dummy_type), vec![], Some(CKB_CAPACITY))
+        CellOutputEx::new_from_scripts(dest_script(), Some(dummy_type), vec![], Some(CKB_CAPACITY))
             .expect("dummy typed cell");
     let out = fake_outpoint();
     rpc.insert_fake_cell(out.clone(), cell, Some(fake_header_view(3, 3, 3)));
