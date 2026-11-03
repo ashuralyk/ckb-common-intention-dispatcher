@@ -70,34 +70,15 @@ pub fn has_shared_refund_user(user_lock_hash: &[u8; 32]) -> Result<bool> {
     Ok(false)
 }
 
-pub fn has_matching_process_celldep(process_type_hash: &[u8; 32]) -> bool {
-    let mut i = 0;
-    loop {
-        match load_cell_type(i, Source::CellDep) {
-            Ok(Some(type_script)) => {
-                let hash: [u8; 32] = type_script.calc_script_hash().unpack();
-                if &hash == process_type_hash {
-                    return true;
-                }
-                i += 1;
-            }
-            Ok(None) => i += 1,
-            Err(SysError::IndexOutOfBound) => return false,
-            Err(_) => return false,
-        }
-    }
+/// Match the committed Process identity on actual cells, never dependencies.
+pub fn has_matching_process(process_type_hash: &[u8; 32], source: Source) -> bool {
+    QueryIter::new(load_cell_type, source).any(|script| {
+        script.is_some_and(|script| &script_hash_bytes(&script) == process_type_hash)
+    })
 }
 
-pub fn has_typed_celldep() -> bool {
-    let mut i = 0;
-    loop {
-        match load_cell_type(i, Source::CellDep) {
-            Ok(Some(_)) => return true,
-            Ok(None) => i += 1,
-            Err(SysError::IndexOutOfBound) => return false,
-            Err(_) => return false,
-        }
-    }
+pub fn has_typed_cells(source: Source) -> bool {
+    QueryIter::new(load_cell_type, source).any(|script| script.is_some())
 }
 
 pub fn load_pack_block_number() -> Result<u64> {

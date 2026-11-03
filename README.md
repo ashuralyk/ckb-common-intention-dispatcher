@@ -3,7 +3,7 @@
 CID is a CKB **lock** that holds a single Intention cell until it is destroyed.
 
 An Intention is a promise of assets (pure CKB or standard xUDT) that a later
-Process / SSRI executor can propose consuming, with explicit User Lock authorization. This repository implements the **first
+Process / SSRI executor can consume by spending and recreating the committed Process cell. This repository implements the **first
 slice only**: the CID lock, Calculate recipes, and FakeRpc tests.
 
 Design notes: [Common Intention Dispatch](https://app.notion.com/p/ckb-devrel/Common-Intention-Dispatch-3de9f5bf382080249b91d32ad72639d9).
@@ -28,23 +28,33 @@ enum:
 
 | Hop | When | What CID checks |
 |-----|------|-----------------|
-| `digest_ok` | Matching Process CellDep **and** User Lock in inputs | Destroy + transaction authorization by that User Lock; partial user proceeds allowed |
-| `digest_incompatible` | User Lock refund present, User Lock absent from inputs | Destroy + exact CKB capacity and token refund |
-| `timeout_burn` | User Lock in inputs, no matching Process, headers prove `judge - pack >= 10800` | Destroy + exact refund + User Lock authorization |
+| `digest_ok` | Committed Process type hash present in **both inputs and outputs** | Destroy; Process scripts enforce execution; no User Lock input/signature required |
+| `digest_incompatible` | No matching Process pair, User Lock refund present, User Lock absent from inputs | Destroy + exact CKB capacity and token refund |
+| `timeout_burn` | User Lock in inputs, no matching Process pair, headers prove `judge - pack >= 10800` | Destroy + exact refund + User Lock authorization |
 
-**Authorization change:** a Process CellDep only identifies a Process; it does
-not execute it. `digest_ok` now requires an input protected by the exact User Lock
-encoded in the Intention. CKB validates that lock in the same transaction. Use a
-lock that authorizes all transaction outputs (such as secp256k1 sighash-all), and
-review those outputs before signing. An always-success User Lock offers no
-protection. This is a user-coauthorized protocol, **not autonomous Process/SSRI
-execution**. A future autonomous mode needs a separately specified and audited
-Process authorization proof. Merely consuming a Process input is not sufficient.
+**Delegated execution:** the user chooses `process_type_hash` when creating
+an Intention. For `digest_ok`, CID finds that exact full type-script hash on
+an input AND an output. The live Process cell is consumed and recreated, not
+added as a CellDep. CKB executes its input lock and its type script as part of
+normal transaction validation; CID only checks the matching Process pair.
+The user does not need another input or signature for execution. The encoded
+User Lock is the refund destination and authorizes the timeout reclaim path.
 
-The authorized digest branch takes precedence over refund-shaped outputs. A
-matching Process without User Lock authorization may only perform a complete
-permissionless refund; it cannot redirect assets. `ProcessMismatch` also denotes
-missing user authorization on the digest path.
+Code cells needed to execute the Process lock/type scripts still belong in
+CellDeps; these are distinct from the live Process state cell. A dependency-only,
+input-only, output-only, or mismatched Process cannot authorize `digest_ok`.
+A type hash identifies a script, not necessarily a globally unique cell: the
+Process scripts must enforce any required singleton/continuity rules and the
+Intention payload, asset destinations, and state transition. CID does not
+implement those application-specific rules. A permissive Process script delegates
+permissive execution; choose and audit the Process accordingly.
+
+The matching Process branch takes precedence over refund-shaped outputs, so
+partial user proceeds are allowed. Multiple distinct Intention lock groups for
+the same User Lock may be digested together with the matching Process pair;
+the one-input/no-output rule still applies to each CID lock group. The shared
+refund guard below applies only to refund paths. Without a matching Process
+pair, exact refund and timeout rules remain available; arbitrary spending fails.
 
 Refunds preserve the Intention's **exact capacity**, and xUDT refunds preserve
 both the full type hash and token amount. Fees come from separate funding inputs.
@@ -100,8 +110,10 @@ cargo run -- --json --dry-run deploy \
 | `src/main.rs` | `ckb_cinnabar::dispatch()` runner |
 
 Most unit scenarios use always-success user locks; the signed integration scenarios
-use the real genesis secp256k1 lock. Process is a **hash mock** cell whose
-type script hash matches args — not a real SSRI binary.
+use the real genesis secp256k1 lock. Process cells use an executable test-only
+type script (`cid_process_fixture`), not a production Process/SSRI contract.
+The fixture rejects a forbidden output state to prove that Process validation
+runs even when CID finds a matching pair. Do not deploy the fixture.
 
 ## Transaction construction and finalization
 
@@ -113,14 +125,17 @@ issuer. It supports standard 16-byte xUDT amounts; extension-bearing cells are
 not collected. Balance the remaining CKB capacity separately.
 
 `digest_ok` loads xUDT dependencies from inputs even when `asset_output` is absent.
-Add the User Lock input explicitly and sign after all outputs/deps/fees are final.
+The recipe consumes and recreates the Process unchanged; customize its output
+state as permitted by the Process scripts, then add their code deps/witnesses.
+There is no Intention User Lock input/signature requirement for digest.
+Sign any server/sponsor input locks after all outputs/deps/fees are final.
 For an incompatible refund, use a **different fee sponsor lock**: adding a User
-Lock input deliberately selects timeout semantics when no Process matches.
+Lock input deliberately selects timeout semantics when no Process pair matches.
 
 A standard secp256k1 integration should:
 
 1. Add CID, xUDT (recipes handle this), and the real secp256k1 code/data deps.
-2. Apply the recipe and any explicit authorization/sponsor inputs.
+2. Apply the recipe, Process code deps/witnesses, and any server/sponsor inputs.
 3. Balance CKB with a separate change output, preserving exact refund outputs.
 4. Sign every input lock group, then check actual fees against the chosen budget
    and the node's fee rate. Do not alter the transaction after signing.
@@ -172,12 +187,15 @@ built CID binary and its SHA-256 are uploaded together. Configure the repository
 branch rules to require the `verify` job before merge; workflow files alone cannot
 enforce branch protection.
 
-Tests include CellDep-only theft, xUDT capacity theft on both refund paths,
+Tests include CKB/xUDT delegation without a User Lock input, Process pair
+presence/mismatch checks, a failing executable Process, authorized batch digest,
+CellDep-only theft, xUDT capacity theft on both refund paths,
 non-issuer token collection/change/insufficient balance, missing output with xUDT
 input dependency, timeout boundaries 10799/10800/10801, partial user proceeds,
 and cross-Intention refund reuse. `tests/src/signed.rs` executes the real genesis
 secp256k1 script and real signatures for create/digest/refund/timeout, checks fee
-and change, and rejects missing signatures and post-signing output mutations.
+and change, and rejects missing funding signatures and post-signing output mutations. Digest
+uses a server/sponsor signer distinct from the Intention owner.
 FakeRpc still supplies chain state; these are not live-network broadcasts or
 an implementation of Process/SSRI. Live-node dry-run/broadcast acceptance remains
 an integration/deployment gate.

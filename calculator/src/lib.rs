@@ -9,7 +9,7 @@ use ckb_cinnabar_calculator::{
     instruction::Instruction,
     operation::{
         basic::{
-            AddCellDep, AddHeaderDepByBlockNumber, AddHeaderDepByInputIndex, AddInputCellByAddress,
+            AddHeaderDepByBlockNumber, AddHeaderDepByInputIndex, AddInputCellByAddress,
             AddInputCellByOutPoint, AddOutputCell,
         },
         udt::AddXudtCelldep,
@@ -18,7 +18,7 @@ use ckb_cinnabar_calculator::{
     re_exports::ckb_types::prelude::Unpack,
     rpc::RPC,
     skeleton::{CellInputEx, CellOutputEx, ScriptEx, TransactionSkeleton},
-    types::{DepType, Hash256},
+    types::Hash256,
     CalculatorError, Result,
 };
 
@@ -186,10 +186,35 @@ pub fn create_intention<T: RPC>(
     Instruction::new(ops)
 }
 
-/// Assemble a digest against a matching Process CellDep.
-/// The caller MUST also consume an input with the Intention's User Lock and
-/// satisfy that lock (e.g. sign the complete transaction). A CellDep alone
-/// grants no authority. `asset_output` may include partial user proceeds.
+// Consume the Process cell and recreate its state, rather than referencing it.
+struct ConsumeProcess {
+    process: (Hash256, u32),
+}
+
+impl<T: RPC> Operation<T> for ConsumeProcess {
+    fn run(
+        self: Box<Self>,
+        rpc: &T,
+        skeleton: &mut TransactionSkeleton,
+        _: &mut Log,
+    ) -> Result<()> {
+        let input = CellInputEx::new_from_outpoint(rpc, self.process.0, self.process.1, None, true)?;
+        if input.output.type_script().is_none() {
+            return Err(CalculatorError::Other("Process cell must have a type script".into()));
+        }
+        let output = input.output.clone();
+        skeleton.input(input)?.witness(Default::default());
+        skeleton.output(output);
+        Ok(())
+    }
+}
+
+/// Consume the Intention and Process, and recreate the Process unchanged.
+/// No input or signature from the Intention's User Lock is required.
+/// The caller supplies code deps and witnesses for the Process lock/type scripts,
+/// and may update the recreated Process state as those scripts permit.
+/// `asset_output` may include partial user proceeds. Process code/data deps
+/// remain ordinary CKB requirements; the live Process state is not a CellDep.
 pub fn digest_ok<T: RPC>(
     intention: (Hash256, u32),
     process: (Hash256, u32),
@@ -201,13 +226,7 @@ pub fn digest_ok<T: RPC>(
             index: intention.1,
             since: None,
         }),
-        Box::new(AddCellDep {
-            name: "process".into(),
-            tx_hash: process.0,
-            index: process.1,
-            dep_type: DepType::Code,
-            with_data: true,
-        }),
+        Box::new(ConsumeProcess { process }),
     ];
     ops.push(Box::new(AddInputAssetDeps));
     if let Some(output) = asset_output {

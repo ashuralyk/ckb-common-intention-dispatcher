@@ -13,9 +13,9 @@ pub struct DigestOk;
 impl Verification<Context> for DigestOk {
     fn verify(&mut self, name: &str, ctx: &mut Context) -> Result<Option<&str>> {
         debug!("Entering [{name}]");
-        // The matching CellDep identifies a Process; it does not execute it.
-        // User Lock validation authorizes this entire transaction, including outputs.
-        if !ctx.process_matched || !ctx.user_lock_in_inputs {
+        // Root requires the committed Process type hash in both inputs and outputs.
+        // CKB executes the Process input lock and type script; no user re-signing.
+        if !ctx.process_matched {
             return Err(CidError::ProcessMismatch.into());
         }
         Ok(None)

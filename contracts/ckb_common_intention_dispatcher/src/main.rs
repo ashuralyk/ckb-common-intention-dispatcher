@@ -5,9 +5,9 @@
 //!
 //! Lock Create does not run this script. Root classifies the three Burn hops
 //! from transaction structure (not a witness enum):
-//! - `digest_incompatible` — refund to User Lock, user not in inputs
-//! - `digest_ok` — matching Process CellDep; CID does not force a refund
-//! - `timeout_burn` — user in inputs + header delta >= TIMEOUT_BLOCKS + refund
+//! - `digest_ok` — matching Process type hash in inputs AND outputs; no user input required
+//! - `digest_incompatible` — no matching Process pair; exact refund, user not in inputs
+//! - `timeout_burn` — no matching Process pair; user input + timeout headers + exact refund
 
 use cid_protocol::{HOP_DIGEST_INCOMPATIBLE, HOP_DIGEST_OK, HOP_TIMEOUT_BURN};
 use ckb_cinnabar_verifier::{cinnabar_main, TREE_ROOT};

@@ -106,7 +106,7 @@ async fn signed_paths_balance_change_and_bind_outputs() {
         secp_deps(&mut skeleton);
         let owner = key(1);
         let sponsor = key(2);
-        let signer = if path == "incompatible" {
+        let signer = if path == "incompatible" || path == "digest" {
             &sponsor
         } else {
             &owner
@@ -165,7 +165,7 @@ async fn signed_paths_balance_change_and_bind_outputs() {
             ),
             "incompatible" => digest_incompatible(
                 outpoint_ids(&intention),
-                owner_lock.into(),
+                owner_lock.clone().into(),
                 CKB_CAPACITY,
                 None,
             ),
@@ -174,7 +174,7 @@ async fn signed_paths_balance_change_and_bind_outputs() {
                 timeout_burn(
                     outpoint_ids(&intention),
                     address,
-                    owner_lock.into(),
+                    owner_lock.clone().into(),
                     CKB_CAPACITY,
                     None,
                     PACK_BLOCK + TIMEOUT_BLOCKS,
@@ -186,6 +186,9 @@ async fn signed_paths_balance_change_and_bind_outputs() {
                 .instruction(ix)
                 .apply_skeleton(&rpc, &mut skeleton)
                 .unwrap();
+        }
+        if path == "digest" {
+            assert!(skeleton.inputs.iter().all(|i| i.output.lock_script() != owner_lock));
         }
         // Explicit fee budget; a separate change output preserves exact refunds.
         let fee = 10_000;
@@ -216,12 +219,12 @@ async fn signed_paths_balance_change_and_bind_outputs() {
             verify(&rpc, skeleton.clone()).await,
             "{path}: signed transaction must verify"
         );
-        // Changing a destination after signature invalidates user authorization.
+        // Changing an output invalidates the funding signer (server for digest).
         skeleton.outputs[0].output = skeleton.outputs[0]
             .output
             .clone()
             .as_builder()
-            .lock(dest_script())
+            .lock(user_script())
             .build();
         assert!(
             !verify(&rpc, skeleton).await,
