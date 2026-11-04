@@ -10,9 +10,12 @@ members = [
 ]
 
 [workspace.dependencies]
-ckb-cinnabar = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "635e32b" }
-ckb-cinnabar-calculator = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "635e32b" }
-ckb-cinnabar-verifier = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "635e32b" }
+# Using local cinnabar with OffchainTransactionDependencyProvider fix
+# (populated with skeleton input cells for FakeRpc signing)
+# TODO: Submit upstream PR or use published version once available
+ckb-cinnabar = { path = "/tmp/ckb-cinnabar-fix" }
+ckb-cinnabar-calculator = { path = "/tmp/ckb-cinnabar-fix/calculate" }
+ckb-cinnabar-verifier = { path = "/tmp/ckb-cinnabar-fix/verify" }
 
 [package]
 edition = "2021"
