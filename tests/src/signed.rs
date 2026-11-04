@@ -1,21 +1,24 @@
 //! Real genesis secp256k1 lock execution; FakeRpc supplies cells only.
+//!
+//! After ashuralyk/ckb-cinnabar#4, `AddSecp256k1SighashSignatures` supports
+//! Data-hash ScriptIds (FakeRpc locks) in addition to official Type-hash locks.
 use crate::faker::*;
 use ckb_cinnabar_calculator::{
     address::{Address, AddressPayload},
     instruction::Instruction,
-    operation::basic::{AddInputCellByOutPoint, AddOutputCell},
+    operation::basic::{AddInputCellByOutPoint, AddOutputCell, AddSecp256k1SighashSignatures},
     re_exports::{
-        ckb_hash::{blake2b_256, new_blake2b},
+        ckb_hash::blake2b_256,
         ckb_types::{
             core::{Capacity, ScriptHashType},
             packed::{CellDep, Script},
             prelude::*,
         },
-        secp256k1::{Message, PublicKey, Secp256k1, SecretKey},
+        secp256k1::{PublicKey, Secp256k1, SecretKey},
     },
     rpc::Network,
     simulation::{fake_outpoint, FakeRpcClient, TransactionSimulator},
-    skeleton::{CellDepEx, CellOutputEx, ChangeReceiver, TransactionSkeleton, WitnessEx},
+    skeleton::{CellDepEx, CellOutputEx, ChangeReceiver, ScriptEx, TransactionSkeleton},
     TransactionCalculator,
 };
 use ckb_common_intention_dispatcher_calculator::{
@@ -48,45 +51,6 @@ fn secp_deps(skeleton: &mut TransactionSkeleton) {
             Some(data),
         ));
     }
-}
-// CKB sighash-all: raw transaction hash + length-prefixed group witnesses.
-fn sign(skeleton: &mut TransactionSkeleton, secret: &SecretKey) {
-    let script = lock(secret);
-    let indices: Vec<usize> = skeleton
-        .inputs
-        .iter()
-        .enumerate()
-        .filter_map(|(i, input)| (input.output.lock_script() == script).then_some(i))
-        .collect();
-    assert!(!indices.is_empty());
-    skeleton
-        .witnesses
-        .resize(skeleton.inputs.len(), WitnessEx::default());
-    skeleton.witnesses[indices[0]] = WitnessEx::new(vec![0; 65], vec![], vec![]);
-    let tx = skeleton.clone().into_transaction_view();
-    let mut hasher = new_blake2b();
-    hasher.update(tx.hash().as_slice());
-    for i in indices
-        .into_iter()
-        .chain(skeleton.inputs.len()..skeleton.witnesses.len())
-    {
-        let witness = tx.witnesses().get(i).unwrap().raw_data();
-        hasher.update(&(witness.len() as u64).to_le_bytes());
-        hasher.update(&witness);
-    }
-    let mut digest = [0; 32];
-    hasher.finalize(&mut digest);
-    let sig = Secp256k1::new()
-        .sign_ecdsa_recoverable(&Message::from_digest_slice(&digest).unwrap(), secret);
-    let (id, compact) = sig.serialize_compact();
-    let mut bytes = compact.to_vec();
-    bytes.push(i32::from(id) as u8);
-    let first = skeleton
-        .inputs
-        .iter()
-        .position(|i| i.output.lock_script() == script)
-        .unwrap();
-    skeleton.witnesses[first].lock = bytes;
 }
 async fn verify(rpc: &FakeRpcClient, skeleton: TransactionSkeleton) -> bool {
     TransactionSimulator::default()
@@ -230,7 +194,16 @@ async fn signed_paths_balance_change_and_bind_outputs() {
             !verify(&rpc, skeleton.clone()).await,
             "{path}: unsigned must fail"
         );
-        sign(&mut skeleton, signer);
+        // Use AddSecp256k1SighashSignatures with FakeRpc Data-hash locks (fixed in cinnabar#4)
+        let signer_lock = ScriptEx::from(lock(signer));
+        let sign_op = AddSecp256k1SighashSignatures {
+            user_lock_scripts: vec![signer_lock],
+            user_private_keys: vec![*signer],
+        };
+        TransactionCalculator::default()
+            .instruction(Instruction::new(vec![Box::new(sign_op)]))
+            .apply_skeleton(&rpc, &mut skeleton)
+            .expect("signing should succeed");
         assert!(skeleton.fee(&rpc, 0).unwrap().as_u64() <= fee);
         assert!(
             verify(&rpc, skeleton.clone()).await,
