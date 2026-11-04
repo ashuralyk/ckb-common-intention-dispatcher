@@ -1,4 +1,10 @@
 //! Real genesis secp256k1 lock execution; FakeRpc supplies cells only.
+//!
+//! Note: While cinnabar's `AddSecp256k1SighashSignatures` now supports Data-hash
+//! ScriptIds (fixed in ashuralyk/ckb-cinnabar#4), it requires network RPC access
+//! via `DefaultTransactionDependencyProvider`. For FakeRpc test environments without
+//! network access, we use direct CKB sighash-all signing. Production code with RPC
+//! access can use `AddSecp256k1SighashSignatures` directly.
 use crate::faker::*;
 use ckb_cinnabar_calculator::{
     address::{Address, AddressPayload},
@@ -49,7 +55,9 @@ fn secp_deps(skeleton: &mut TransactionSkeleton) {
         ));
     }
 }
-// CKB sighash-all: raw transaction hash + length-prefixed group witnesses.
+
+// Direct CKB sighash-all signing for FakeRpc tests (no RPC access needed).
+// Production code with RPC access can use cinnabar's AddSecp256k1SighashSignatures.
 fn sign(skeleton: &mut TransactionSkeleton, secret: &SecretKey) {
     let script = lock(secret);
     let indices: Vec<usize> = skeleton

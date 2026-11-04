@@ -10,9 +10,9 @@ members = [
 ]
 
 [workspace.dependencies]
-ckb-cinnabar = { git = "https://github.com/ashuralyk/ckb-cinnabar" }
-ckb-cinnabar-calculator = { git = "https://github.com/ashuralyk/ckb-cinnabar" }
-ckb-cinnabar-verifier = { git = "https://github.com/ashuralyk/ckb-cinnabar" }
+ckb-cinnabar = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "635e32b" }
+ckb-cinnabar-calculator = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "635e32b" }
+ckb-cinnabar-verifier = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "635e32b" }
 
 [package]
 edition = "2021"

@@ -362,7 +362,7 @@ dependencies = [
 [[package]]
 name = "ckb-cinnabar"
 version = "0.1.0"
-source = "git+https://github.com/ashuralyk/ckb-cinnabar#c6b3edf770e65dc5d61d95714f71faa483a36685"
+source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=635e32b#635e32b7e78b85b683ceee91e9e2e9edcf8cf7c6"
 dependencies = [
  "chrono",
  "ckb-cinnabar-calculator",
@@ -377,7 +377,7 @@ dependencies = [
 [[package]]
 name = "ckb-cinnabar-calculator"
 version = "0.1.0"
-source = "git+https://github.com/ashuralyk/ckb-cinnabar#c6b3edf770e65dc5d61d95714f71faa483a36685"
+source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=635e32b#635e32b7e78b85b683ceee91e9e2e9edcf8cf7c6"
 dependencies = [
  "async-trait",
  "bech32",
@@ -408,12 +408,12 @@ dependencies = [
 [[package]]
 name = "ckb-cinnabar-core"
 version = "0.1.0"
-source = "git+https://github.com/ashuralyk/ckb-cinnabar#c6b3edf770e65dc5d61d95714f71faa483a36685"
+source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=635e32b#635e32b7e78b85b683ceee91e9e2e9edcf8cf7c6"
 
 [[package]]
 name = "ckb-cinnabar-verifier"
 version = "0.1.0"
-source = "git+https://github.com/ashuralyk/ckb-cinnabar#c6b3edf770e65dc5d61d95714f71faa483a36685"
+source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=635e32b#635e32b7e78b85b683ceee91e9e2e9edcf8cf7c6"
 dependencies = [
  "blake2b-ref",
  "ckb-cinnabar-calculator",
@@ -426,7 +426,7 @@ dependencies = [
 [[package]]
 name = "ckb-cinnabar-verifier-macros"
 version = "0.1.0"
-source = "git+https://github.com/ashuralyk/ckb-cinnabar#c6b3edf770e65dc5d61d95714f71faa483a36685"
+source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=635e32b#635e32b7e78b85b683ceee91e9e2e9edcf8cf7c6"
 dependencies = [
  "proc-macro2",
  "quote",
