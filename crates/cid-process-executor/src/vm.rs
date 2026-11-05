@@ -6,13 +6,14 @@ use ckb_vm::registers::{A0, A1, A2, A7};
 use std::sync::{Arc, Mutex};
 use crate::{ExecutorError, CUSTOM_ERROR_START};
 
-const SSRI_VM_VERSION: u64 = u64::MAX;
+pub const SSRI_VM_VERSION: u64 = u64::MAX;
 const MAX_CYCLES: u64 = 70_000_000;
 
 /// Syscall numbers
 const SYS_READ: u64 = 63;
 const SYS_WRITE: u64 = 64;
 const SYS_EXIT: u64 = 93;
+const SYS_CKB_VM_VERSION: u64 = 2041;
 
 /// SSRI stdio syscalls
 struct SsriSyscalls {
@@ -78,6 +79,11 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 let code = machine.registers()[A0].to_i8();
                 *self.exit_code.lock().unwrap() = Some(code);
                 Err(VmError::InvalidEcall(SYS_EXIT))
+            }
+            SYS_CKB_VM_VERSION => {
+                // Return u64::MAX to signal SSRI mode
+                machine.set_register(A0, Mac::REG::from_u64(SSRI_VM_VERSION));
+                Ok(true)
             }
             _ => Ok(false),
         }
