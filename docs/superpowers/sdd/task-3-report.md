@@ -139,7 +139,117 @@ The following tests will be added in Task 4:
 
 ---
 
-**Commit:** c749f05  
+**Initial Commit:** c749f05  
 **Branch:** cursor/cid-process-example-c952  
 **PR:** #6  
 **Base SHA:** 9e723fdf5f00bd7653238c224817639b22880e16  
+
+---
+
+## Task 3 Review Fixes (Nov 5, 03:36 UTC)
+
+**Review Base:** 39b6b67  
+**Fixed Head:** e78f42e
+
+### Changes Made
+
+#### Finding 1: Contract uses `cinnabar_main!` with SSRI door ✅
+
+**Commits:** d686560
+
+Rewrote `contracts/cid_process_example` to use cinnabar verifier API:
+
+**main.rs:**
+- Removed hand-rolled `ckb_std::entry!` + raw `ssri_methods!`
+- Added `define_errors!(ProcessError, { ReadFailed = CUSTOM_ERROR_START, IncompatibleBatch })`
+- Used `cinnabar_main!(Context, (TREE_ROOT, verify::Root), SSRI { "Process.batch" => ssri::batch_handler, "Process.assemble" => ssri::assemble_handler })`
+- Error codes: 20 (ReadFailed), 21 (IncompatibleBatch)
+
+**ssri.rs:**
+- Handler signatures: `fn(_src: &SsriSource, _args: SsriArgs) -> core::result::Result<Vec<u8>, ProcessError>`
+- batch_handler returns 8-byte LE (BATCH_MIN=1, BATCH_MAX=4)
+- assemble_handler reads count from stdin (fd=0), validates bounds, returns Err(ProcessError::IncompatibleBatch) for out-of-range
+
+**verify.rs:**
+- Implemented `Root` struct with `Verification<Context>` trait
+- Stub `verify()` returns Ok(None)
+
+#### Finding 2: Host VM pipe I/O syscalls ⚠️ Partial
+
+**Commits:** d686560
+
+Implemented ckb-std 1.1.0 syscall ABI in `crates/cid-process-executor/src/vm.rs`:
+
+**Added syscalls:**
+- SYS_PIPE (2605): Creates pipe pair, writes [read_fd, write_fd] to pointer
+- SYS_CKB_READ (2607): Reads from fd with length via pointer, a0=0 on success
+- SYS_CKB_WRITE (2608): Writes to fd with length via pointer, a0=0 on success
+- SYS_CLOSE (2609): Closes pipe fd
+- SYS_INHERITED_FD (2606): Stub (returns 0 fds)
+- Syscall 2177 (0x881): Unknown, stubbed to return success
+
+**Pipe state:**
+- HashMap<u64, Pipe> tracks write-end fds
+- Writes to pipe fds captured to output buffer
+- Keep Linux-style SYS_READ (63) / SYS_WRITE (64) for fixture compatibility
+
+**Known Issue - Smoke Test Not Passing:**
+
+Smoke tests added in `src/lib.rs`:
+- `test_real_process_binary_batch_bounds`: Calls Process.batch, expects 8 bytes (1, 4)
+- `test_real_process_binary_assemble_incompatible`: Tests count validation
+
+Current behavior:
+- VM runs successfully (Ok(4), exit_code=None)
+- Only 2 syscalls observed: SYS_CKB_VM_VERSION (2041) + unknown 2177
+- No SYS_PIPE or SYS_CKB_WRITE called
+- Output buffer empty (0 bytes)
+- Binary is correct (47KB, RISC-V ELF, timestamp 03:29)
+
+**Hypothesis:** Contract may be exiting early, taking verification path instead of SSRI, or syscall 2177 is critical and needs correct implementation. The cinnabar SSRI path should call pipe() then write(pipe.1, &bytes), but these are not observed.
+
+**Deferred:** Full pipe I/O integration requires identifying syscall 2177 and ensuring SSRI path executes. Will be completed in next iteration or Task 4.
+
+#### Finding 3: Makefile mkdir ✅
+
+**Commits:** e78f42e
+
+Fixed `contracts/cid_process_example/Makefile`:
+- BUILD_DIR was `../../build/release` (relative to contract dir)
+- Combined with TOP caused mkdir to try `../../../../build` (above repo root)
+- Changed to `BUILD_DIR := build/release` (relative to TOP/repo root)
+- `cd contracts/cid_process_example && make build` now succeeds
+- Binary correctly copied to `build/release/cid_process_example`
+
+### Test Results
+
+**Existing tests (all pass):**
+```
+cargo test -p cid-process-executor
+  9 passed; 0 failed; 1 ignored
+  test_integration_exit21_incompatible still ignored (minimal fixture binary issue)
+```
+
+**New smoke tests (not passing yet):**
+- test_real_process_binary_batch_bounds: Expects 8 bytes, gets 0
+- test_real_process_binary_assemble_incompatible: Expects Incompatible(21), gets empty output
+
+### Summary
+
+| Finding | Status | Notes |
+|---------|--------|-------|
+| 1. cinnabar_main! SSRI | ✅ Complete | Contract uses proper cinnabar API with define_errors! and SSRI arm |
+| 2. Host pipe I/O | ⚠️ Partial | Syscalls implemented but SSRI path not executing; syscall 2177 unidentified |
+| 3. Makefile mkdir | ✅ Complete | Clean `make build` works |
+| 4. Smoke test | ❌ Incomplete | Infrastructure in place, SSRI output not captured |
+
+### Next Steps
+
+To complete Finding 2 & 4:
+1. Identify syscall 2177 (possibly load_cell_by_field, current_cycles, or other CKB syscall)
+2. Verify SSRI code path executes (add debug output to contract or use VM tracing)
+3. Ensure pipe() and write() syscalls are called by cinnabar SSRI machinery
+4. Alternative: Use objdump/readelf to analyze binary entry points and syscall usage
+
+**New Head SHA:** e78f42e  
+**Files Changed:** main.rs, ssri.rs, verify.rs (contract), vm.rs, lib.rs (executor), Makefile  
