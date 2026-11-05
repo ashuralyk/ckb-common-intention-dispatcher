@@ -18,8 +18,7 @@ use ckb_std::{
         prelude::{Builder, Entity, Pack, Unpack},
     },
     high_level::{
-        load_cell_capacity, load_cell_data, load_cell_lock, load_cell_lock_hash, load_cell_type,
-        load_script, QueryIter,
+        load_cell_capacity, load_cell_data, load_cell_lock, load_cell_type, load_script, QueryIter,
     },
 };
 
@@ -100,7 +99,8 @@ fn verify_intention_batch_and_beneficiaries() -> Result<Option<&'static str>> {
         return Err(ProcessError::BatchCountInvalid.into());
     }
     // Transaction-wide unique ownership: DigestOk payments (any Process pair
-    // in this tx) and DigestIncompatible refunds cannot share an output.
+    // in this tx) and DigestIncompatible / TimeoutBurn refunds cannot share
+    // an output.
     verify_unique_outputs(&obligations)?;
     Ok(None)
 }
@@ -147,14 +147,12 @@ fn collect_output_obligations(
             }
             obligations.push(transfer);
         } else {
-            // Refund branch: user_lock output, not payload. Skip timeout
-            // (user unlocking) so we do not demand a refund cell there.
+            // Refund branch (DigestIncompatible and TimeoutBurn): unique-assign
+            // the user_lock output, never the payload. TimeoutBurn still requires
+            // a full refund via refund_assets_match.
             let Ok(user) = packed_script(&cid.entry.user_lock) else {
                 continue;
             };
-            if has_input_lock(&user) {
-                continue;
-            }
             obligations.push(parse_transfer(i, user)?);
         }
     }
@@ -300,11 +298,6 @@ fn is_example_process_cell(type_script: &Option<Script>, ours: &Script) -> bool 
     type_script
         .as_ref()
         .is_some_and(|t| t.code_hash() == ours.code_hash())
-}
-
-fn has_input_lock(script: &Script) -> bool {
-    let want: [u8; 32] = script.calc_script_hash().unpack();
-    QueryIter::new(load_cell_lock_hash, Source::Input).any(|hash| hash == want)
 }
 
 fn packed_script(script: &CidScript) -> core::result::Result<Script, ProcessError> {

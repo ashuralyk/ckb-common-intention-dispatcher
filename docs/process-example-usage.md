@@ -142,11 +142,11 @@ OutPoint is used on the skeleton; the executor `OutPoint` in
    `[1, 4]`. Unique-assign outputs transaction-wide across (a) DigestOk
    payload payments whose Process type hash is in both inputs and outputs
    (any hash_type alias of this example, including Data1/Data2) and
-   (b) DigestIncompatible refunds (user_lock, never the payload). Refunds
-   are not treated as beneficiary payments, but their refund cells cannot
-   be reused by a payment. Payload Script hash types 0/1/2/4
-   (Data/Type/Data1/Data2) are accepted. Matching unused output must have
-   the same lock, capacity, data, and type (CKB or official xUDT).
+   (b) DigestIncompatible and TimeoutBurn refunds (user_lock, never the
+   payload). Refunds are not treated as beneficiary payments, but their
+   refund cells cannot be reused by a payment. Payload Script hash types
+   0/1/2/4 (Data/Type/Data1/Data2) are accepted. Matching unused output
+   must have the same lock, capacity, data, and type (CKB or official xUDT).
 3. **Burn** is rejected (`ProcessPairInvalid`).
 
 | Code | Error |

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use cid_process_example_calculator::{process_digest_ok, IntentionCell, PROCESS_CONTRACT_NAME};
 use ckb_cinnabar_calculator::{
+    address::{Address, AddressPayload},
     instruction::Instruction,
     operation::basic::AddOutputCell,
     re_exports::ckb_hash::blake2b_256,
@@ -12,6 +13,7 @@ use ckb_cinnabar_calculator::{
         packed::{OutPoint, Script},
         prelude::{Builder, Entity, Pack},
     },
+    rpc::Network,
     simulation::{
         always_success_script, fake_header_view, fake_outpoint, AddFakeAlwaysSuccessCelldep,
         AddFakeContractCelldepByName, AddFakeInputCell, FakeRpcClient, TransactionSimulator,
@@ -20,13 +22,13 @@ use ckb_cinnabar_calculator::{
     CalculatorError, TransactionCalculator,
 };
 use ckb_common_intention_dispatcher_calculator::{
-    digest_incompatible, digest_ok, encode_cid_args, Payload,
+    digest_incompatible, digest_ok, encode_cid_args, timeout_burn, Payload, TIMEOUT_BLOCKS,
 };
 
 use crate::faker::{
-    dest_lock, dest_script, outpoint_ids, script_to_cid, seed_fakenet_xudt_cell, seed_intention,
-    user_lock, user_lock_cid, xudt_type_script, CKB_CAPACITY, CONTRACT_BIN, CONTRACT_NAME,
-    PACK_BLOCK, XUDT_AMOUNT,
+    dest_lock, dest_script, outpoint_ids, script_to_cid, seed_fakenet_xudt_cell, seed_header,
+    seed_intention, user_lock, user_lock_cid, xudt_type_script, CKB_CAPACITY, CONTRACT_BIN,
+    CONTRACT_NAME, PACK_BLOCK, USER_CELL_CAPACITY, XUDT_AMOUNT,
 };
 
 const CID_CONTRACT_NAME: &str = "ckb_common_intention_dispatcher";
@@ -605,6 +607,106 @@ async fn digest_beneficiary_and_refund_independent_outputs_succeeds() {
     verify(&rpc, skeleton, vec![])
         .await
         .expect("independent payment and refund outputs to the same lock must succeed");
+}
+
+fn address_of(script: Script) -> Address {
+    Address::new(Network::Fake, AddressPayload::from(script))
+}
+
+fn seed_user_lock_cell(rpc: &mut FakeRpcClient, lock: Script, capacity: u64) {
+    let cell =
+        CellOutputEx::new_from_scripts(lock, None, vec![], Some(capacity)).expect("user cell");
+    rpc.insert_fake_cell(fake_outpoint(), cell, Some(fake_header_view(1, 1, 1)));
+}
+
+/// DigestOk A + TimeoutBurn B. B has user_lock in inputs, pack/judge headers at
+/// TIMEOUT_BLOCKS, and a full user_lock refund. A's beneficiary is B.user_lock.
+fn digest_ok_plus_timeout_burn(
+    independent_payment_output: bool,
+) -> (FakeRpcClient, TransactionSkeleton) {
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_a = seed_process_example_cell(&mut rpc, type_a.clone());
+    let user_b = always_success_script(vec![0xBB]);
+    let payload_v = always_success_script(vec![0xCC]);
+    seed_user_lock_cell(&mut rpc, user_b.clone(), USER_CELL_CAPACITY);
+    let judge = PACK_BLOCK + TIMEOUT_BLOCKS;
+    seed_header(&mut rpc, judge);
+
+    let int_a = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_a), &user_b),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let int_b = seed_intention(
+        &mut rpc,
+        &skeleton,
+        encode_cid_args(
+            [0xAB; 32],
+            script_to_cid(&user_b),
+            Payload::from_script(&script_to_cid(&payload_v)).expect("payload V"),
+        ),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+
+    // TimeoutBurn first so AddHeaderDepByInputIndex(0) is B's pack header.
+    let timeout = timeout_burn::<FakeRpcClient>(
+        outpoint_ids(&int_b),
+        address_of(user_b.clone()),
+        user_b.clone().into(),
+        CKB_CAPACITY,
+        None,
+        judge,
+    );
+    let payment = if independent_payment_output {
+        Some(AddOutputCell {
+            lock_script: user_b.into(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        })
+    } else {
+        None
+    };
+    let digest =
+        digest_ok::<FakeRpcClient>(outpoint_ids(&int_a), outpoint_ids(&process_a), payment);
+    TransactionCalculator::default()
+        .instruction(timeout)
+        .instruction(digest)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    (rpc, skeleton)
+}
+
+/// A's payload beneficiary equals B's TimeoutBurn user_lock. One shared
+/// C-capacity output cannot settle both the payment and the timeout refund.
+#[tokio::test]
+async fn reject_digest_beneficiary_shared_with_timeout_burn() {
+    require_binaries();
+    let (rpc, skeleton) = digest_ok_plus_timeout_burn(false);
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("payment and TimeoutBurn refund must not share one output");
+    assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
+}
+
+/// Same overlap as `reject_digest_beneficiary_shared_with_timeout_burn`, but
+/// two independent C-capacity outputs to B's user_lock settle both obligations.
+#[tokio::test]
+async fn digest_beneficiary_and_timeout_burn_independent_outputs_succeeds() {
+    require_binaries();
+    let (rpc, skeleton) = digest_ok_plus_timeout_burn(true);
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("independent payment and TimeoutBurn refund outputs must succeed");
 }
 
 /// Data1 and Data2 deployments of this binary are not siblings by hash_type,
