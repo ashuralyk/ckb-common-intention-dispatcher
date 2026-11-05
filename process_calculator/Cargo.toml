@@ -1,0 +1,9 @@
+[package]
+name = "cid_process_example-calculator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ckb-cinnabar-calculator = { workspace = true }
+cid-protocol = { path = "../protocol" }
+cid-process-executor = { path = "../crates/cid-process-executor" }

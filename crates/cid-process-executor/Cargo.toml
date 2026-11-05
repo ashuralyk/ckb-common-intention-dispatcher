@@ -1,0 +1,10 @@
+[package]
+name = "cid-process-executor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ckb-vm = "0.24"
+ckb-types = "0.119"
+ckb-ssri-std = { workspace = true }
+anyhow = "1.0"

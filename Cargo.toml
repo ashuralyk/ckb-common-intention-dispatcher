@@ -7,12 +7,15 @@ members = [
   "calculator",
   "tests",
   "contracts/ckb_common_intention_dispatcher",
+  "crates/cid-process-executor",
+  "process_calculator",
 ]
 
 [workspace.dependencies]
 ckb-cinnabar = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "66dbd9a4e1d3d94c9d6f8c5c08ecab700a0f026e" }
 ckb-cinnabar-calculator = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "66dbd9a4e1d3d94c9d6f8c5c08ecab700a0f026e" }
 ckb-cinnabar-verifier = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "66dbd9a4e1d3d94c9d6f8c5c08ecab700a0f026e" }
+ckb-ssri-std = { git = "https://github.com/ashuralyk/ckb-ssri-std", rev = "8c2c245" }
 
 [package]
 edition = "2021"
