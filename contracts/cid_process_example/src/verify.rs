@@ -96,8 +96,9 @@ fn verify_intention_batch_and_beneficiaries() -> Result<Option<&'static str>> {
     if !(BATCH_MIN..=BATCH_MAX).contains(&ours.len()) {
         return Err(ProcessError::BatchCountInvalid.into());
     }
-    // Unique-assign across every example-format CID intention in the tx, not
-    // just this type group, so two Process Type IDs cannot share one output.
+    // Unique-assign across DigestOk intentions of this Process protocol
+    // (same code_hash + hash_type, type hash present in inputs and outputs).
+    // Refund-branch intentions are not payment obligations.
     verify_beneficiaries(&all_example)?;
     Ok(None)
 }
@@ -108,6 +109,7 @@ fn collect_intention_transfers(
         .map_err(|_| ProcessError::ProcessPairInvalid)?
         .calc_script_hash()
         .unpack();
+    let digest_ok_siblings = sibling_digest_ok_type_hashes()?;
 
     let mut ours = Vec::new();
     let mut all_example = Vec::new();
@@ -126,6 +128,12 @@ fn collect_intention_transfers(
             .try_into()
             .map_err(|_| ProcessError::ProcessPairInvalid)?;
         let ours_prefix = prefix == our_type_hash;
+        // DigestOk for this example: prefix is a sibling Process type hash
+        // that appears in both inputs and outputs. Refund / other protocols
+        // are not payment obligations for this group.
+        if !digest_ok_siblings.iter().any(|h| h == &prefix) {
+            continue;
+        }
 
         let transfer = match parse_example_transfer(i, &args) {
             Ok(Some(t)) => t,
@@ -141,6 +149,40 @@ fn collect_intention_transfers(
     }
 
     Ok((ours, all_example))
+}
+
+fn sibling_digest_ok_type_hashes() -> core::result::Result<Vec<[u8; 32]>, ProcessError> {
+    let ours = load_script().map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let input_hashes = sibling_type_hashes(Source::Input, &ours)?;
+    let output_hashes = sibling_type_hashes(Source::Output, &ours)?;
+    Ok(input_hashes
+        .into_iter()
+        .filter(|h| output_hashes.iter().any(|o| o == h))
+        .collect())
+}
+
+fn sibling_type_hashes(
+    source: Source,
+    ours: &Script,
+) -> core::result::Result<Vec<[u8; 32]>, ProcessError> {
+    let mut hashes = Vec::new();
+    for i in 0.. {
+        match load_cell_type(i, source) {
+            Ok(Some(type_script))
+                if type_script.code_hash() == ours.code_hash()
+                    && type_script.hash_type() == ours.hash_type() =>
+            {
+                let hash: [u8; 32] = type_script.calc_script_hash().unpack();
+                if !hashes.contains(&hash) {
+                    hashes.push(hash);
+                }
+            }
+            Ok(_) => {}
+            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
+            Err(_) => return Err(ProcessError::ProcessPairInvalid),
+        }
+    }
+    Ok(hashes)
 }
 
 fn parse_example_transfer(

@@ -139,11 +139,12 @@ OutPoint is used on the skeleton; the executor `OutPoint` in
 1. **Create** (0 type-group inputs, 1 output): Type ID args must be 32 bytes
    and equal `calc_type_id(output_index)`. No intention batch on Create.
 2. **Transfer** (1→1 type-group pair): this group's intention count in
-   `[1, 4]`; unique-assign outputs across **every** example-format CID
-   intention in the transaction (so two Process Type IDs cannot share one
-   beneficiary). Payload Script hash types 0/1/2/4 (Data/Type/Data1/Data2)
-   are accepted. Matching unused output must have the same lock, capacity,
-   data, and type (CKB or official xUDT).
+   `[1, 4]`; unique-assign outputs across DigestOk intentions of this
+   Process protocol (sibling Type IDs whose type hash is in both inputs and
+   outputs). Refund-branch intentions are not payment obligations. Payload
+   Script hash types 0/1/2/4 (Data/Type/Data1/Data2) are accepted. Matching
+   unused output must have the same lock, capacity, data, and type (CKB or
+   official xUDT).
 3. **Burn** is rejected (`ProcessPairInvalid`).
 
 | Code | Error |

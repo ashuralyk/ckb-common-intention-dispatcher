@@ -19,7 +19,9 @@ use ckb_cinnabar_calculator::{
     skeleton::{CellOutputEx, ScriptEx, TransactionSkeleton},
     CalculatorError, TransactionCalculator,
 };
-use ckb_common_intention_dispatcher_calculator::{digest_ok, encode_cid_args, Payload};
+use ckb_common_intention_dispatcher_calculator::{
+    digest_incompatible, digest_ok, encode_cid_args, Payload,
+};
 
 use crate::faker::{
     dest_lock, dest_script, outpoint_ids, script_to_cid, seed_fakenet_xudt_cell, seed_intention,
@@ -424,6 +426,67 @@ async fn reject_two_processes_sharing_one_beneficiary() {
         .await
         .expect_err("two Processes must not share one beneficiary output");
     assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
+}
+
+#[tokio::test]
+async fn digest_ok_plus_unrelated_refund_succeeds() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_a = seed_process_example_cell(&mut rpc, type_a.clone());
+
+    let int_a = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_a), &dest_script()),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+
+    let user_b = always_success_script(vec![0xBB]);
+    let payload_v = always_success_script(vec![0xCC]);
+    let int_b = seed_intention(
+        &mut rpc,
+        &skeleton,
+        encode_cid_args(
+            [0xAB; 32],
+            script_to_cid(&user_b),
+            Payload::from_script(&script_to_cid(&payload_v)).expect("payload V"),
+        ),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+
+    let digest = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&int_a),
+        outpoint_ids(&process_a),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    let refund = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&int_b),
+        user_b.into(),
+        CKB_CAPACITY,
+        None,
+    );
+    TransactionCalculator::default()
+        .instruction(digest)
+        .instruction(refund)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("Process A DigestOk plus unrelated DigestIncompatible refund must succeed");
 }
 
 #[tokio::test]
