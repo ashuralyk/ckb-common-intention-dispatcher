@@ -4,8 +4,8 @@ use cid_process_executor::{IntentionInput, ProcessExecutor};
 use ckb_cinnabar_calculator::{
     instruction::Instruction,
     re_exports::ckb_types::{
-        packed::{CellInput, CellOutput, OutPoint, Uint64},
-        prelude::{Builder, Entity, Pack},
+        packed::{CellInput, CellOutput, OutPoint, Transaction, Uint64},
+        prelude::{Builder, Entity, Pack, Unpack},
     },
     rpc::RPC,
     skeleton::{CellInputEx, CellOutputEx, TransactionSkeleton},
@@ -59,9 +59,9 @@ pub fn load_process_binary(bin_dir: &str) -> Result<Vec<u8>> {
 /// Process digest calculation: validates batch and prepares transaction skeleton
 ///
 /// Builds a skeleton with intention inputs plus beneficiary outputs from
-/// `executor.assemble()`. CellOutput types are bridged across ckb-gen-types
-/// versions via molecule wire bytes (`PartialTx::output_molecule_pairs`).
-/// Process recreate remains deferred (Task 5 carry-forward).
+/// `executor.assemble()`. Assemble returns a packed molecule `Transaction`;
+/// this crate parses it with calculator ckb-types (1.x). Process recreate
+/// remains deferred (Task 5 carry-forward).
 pub fn process_digest_ok<T: RPC>(
     _rpc: &T,
     intentions: Vec<IntentionCell>,
@@ -115,12 +115,19 @@ pub fn process_digest_ok<T: RPC>(
         skeleton.input(input)?.witness(Default::default());
     }
 
-    // Bridge executor CellOutput (ckb-gen-types 0.119) → calculator CellOutput (1.x)
-    // via molecule bytes (wire format is stable across versions)
-    for (output_bytes, data) in partial_tx.output_molecule_pairs() {
-        let calc_output = CellOutput::from_slice(&output_bytes)
-            .map_err(|e| CalculatorError::Other(format!("CellOutput bridge: {:?}", e)))?;
-        skeleton.output(CellOutputEx::new(calc_output, data));
+    // Parse the same molecule Transaction the contract / executor produced.
+    // Wire format is stable across ckb-gen-types 0.119 (executor) and 1.x.
+    let tx = Transaction::from_slice(partial_tx.as_molecule_bytes())
+        .map_err(|e| CalculatorError::Other(format!("Transaction molecule bridge: {:?}", e)))?;
+    let raw = tx.raw();
+    if raw.outputs().len() != raw.outputs_data().len() {
+        return Err(CalculatorError::Other(
+            "assemble Transaction outputs / outputs_data length mismatch".into(),
+        ));
+    }
+    for (output, data) in raw.outputs().into_iter().zip(raw.outputs_data()) {
+        let data_bytes: Vec<u8> = data.unpack();
+        skeleton.output(CellOutputEx::new(output, data_bytes));
     }
 
     let instructions = vec![];
@@ -159,7 +166,7 @@ mod tests {
     fn test_process_digest_beneficiary_outputs() {
         use ckb_cinnabar_calculator::simulation::{fake_outpoint, FakeRpcClient};
 
-        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../build/release");
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
         let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
         if !std::path::Path::new(&bin_path).exists() {
             eprintln!(

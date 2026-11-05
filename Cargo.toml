@@ -4,12 +4,12 @@ resolver = "2"
 members = [
   # @@INSERTION_POINT@@
   "protocol",
-  "calculator",
+  "calculator/intention",
+  "calculator/process",
   "tests",
   "contracts/ckb_common_intention_dispatcher",
   "contracts/cid_process_example",
   "crates/cid-process-executor",
-  "process_calculator",
 ]
 
 [workspace.dependencies]

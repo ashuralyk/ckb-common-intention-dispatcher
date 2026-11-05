@@ -15,7 +15,7 @@ Script / capacity / data / supported assets from each CID payload.
 |------|------|
 | `contracts/cid_process_example/` | RISC-V Process: `Process.batch` / `Process.assemble` + on-chain verify |
 | `crates/cid-process-executor/` | Greenfield offline SSRI host (ckb-vm, argv method id, `vm_version = u64::MAX`) |
-| `process_calculator/` | `process_digest_ok` — batch bounds, assemble, skeleton inputs + beneficiary outputs |
+| `calculator/process/` | `process_digest_ok` — batch bounds, assemble, skeleton inputs + beneficiary outputs |
 | `tests/src/process_example.rs` | FakeRpcClient digest tests (n=1, 2, 4) and batch-boundary negatives |
 
 ## Build
@@ -88,10 +88,11 @@ custom exit ≥ 20 to `ExecutorError::Incompatible` (e.g. 21 for
 - **Process.batch** — 8 LE bytes: `min` then `max` → `(1, 4)`
 - **Process.assemble** — stdin: `count` + length-prefixed intentions
   (`capacity`, `lock_args`, `data`, optional type-script molecule). Returns
-  serialized PartialTx: beneficiary `CellOutput`s. When `lock_args` decode as
-  CID args, the lock is the `CidEntry.payload` Script (including Data2);
-  otherwise a placeholder code hash plus the raw `lock_args` (host unit tests).
-  An official xUDT type on the intention is copied onto the output.
+  a packed molecule `Transaction` with beneficiary `outputs` + `outputs_data`
+  (other fields empty). When `lock_args` decode as CID args, the lock is the
+  `CidEntry.payload` Script (including Data2); otherwise a placeholder code
+  hash plus the raw `lock_args` (host unit tests). An official xUDT type on
+  the intention is copied onto the output.
 
 Host argv[0] is the hex-encoded blake2b method id (not the UTF-8 path).
 
@@ -113,19 +114,19 @@ let partial_tx = executor.assemble(&intentions)?;
   (`estimate_cycles`; default `MAX_CYCLES = 70_000_000`). Host stdout/pipe
   buffers are capped at 1 MiB.
 - `ExecutorError::InvalidResponse` — SSRI payload parse failure (including
-  output-count / byte-budget guards in `PartialTx::from_bytes`)
+  molecule `Transaction` verification and output-count / byte-budget guards
+  in `PartialTx::from_bytes`)
 
-## Calculator and molecule bridge
+## Calculator and molecule Transaction
 
 `process_digest_ok(rpc, intentions, bin_dir)`:
 
 1. Loads `cid_process_example` from `bin_dir`
 2. Checks count against SSRI batch bounds
-3. Calls `assemble`
+3. Calls `assemble`, which returns a packed molecule `Transaction`
 4. Adds intention inputs to a `TransactionSkeleton`
-5. Bridges each executor `CellOutput` (ckb-gen-types 0.119) to calculator
-   types (1.x) via molecule bytes (`PartialTx::output_molecule_pairs` +
-   `CellOutput::from_slice`) and appends beneficiary outputs
+5. Parses that same `Transaction` with calculator ckb-types (1.x) and
+   appends beneficiary outputs
 
 `instructions` is currently an empty `Vec`. Process recreate is **not**
 added to the skeleton (Task 5 carry-forward). The calculator `IntentionCell`
