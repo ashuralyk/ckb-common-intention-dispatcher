@@ -149,4 +149,69 @@ mod tests {
         let output = result.unwrap();
         assert_eq!(output, b"hello", "Expected stdout to capture 'hello'");
     }
+    
+    #[test]
+    fn test_real_process_binary_batch_bounds() {
+        // Smoke test: load real Process binary and call Process.batch
+        let bin_path = "../../build/release/cid_process_example";
+        if let Ok(binary) = std::fs::read(bin_path) {
+            let result = vm::call_ssri_method(&binary, "Process.batch", &[]);
+            
+            match result {
+                Ok(output) => {
+                    assert_eq!(output.len(), 8, "batch output should be 8 bytes");
+                    let min = u32::from_le_bytes(output[0..4].try_into().unwrap());
+                    let max = u32::from_le_bytes(output[4..8].try_into().unwrap());
+                    assert_eq!(min, 1, "BATCH_MIN should be 1");
+                    assert_eq!(max, 4, "BATCH_MAX should be 4");
+                    println!("✓ Process.batch returned ({}, {})", min, max);
+                }
+                Err(e) => panic!("Process.batch failed: {:?}", e),
+            }
+        } else {
+            println!("⊘ Skipping: {} not found (run `make build` in contracts/cid_process_example)", bin_path);
+        }
+    }
+    
+    #[test]
+    fn test_real_process_binary_assemble_incompatible() {
+        // Smoke test: call Process.assemble with out-of-bounds count
+        let bin_path = "../../build/release/cid_process_example";
+        if let Ok(binary) = std::fs::read(bin_path) {
+            // Test count=0 (below BATCH_MIN=1)
+            let input = 0u32.to_le_bytes().to_vec();
+            let result = vm::call_ssri_method(&binary, "Process.assemble", &input);
+            
+            assert!(
+                matches!(result, Err(ExecutorError::Incompatible(21))),
+                "Expected Incompatible(21) for count=0, got {:?}",
+                result
+            );
+            println!("✓ Process.assemble(count=0) returned Incompatible(21)");
+            
+            // Test count=5 (above BATCH_MAX=4)
+            let input = 5u32.to_le_bytes().to_vec();
+            let result = vm::call_ssri_method(&binary, "Process.assemble", &input);
+            
+            assert!(
+                matches!(result, Err(ExecutorError::Incompatible(21))),
+                "Expected Incompatible(21) for count=5, got {:?}",
+                result
+            );
+            println!("✓ Process.assemble(count=5) returned Incompatible(21)");
+            
+            // Test count=2 (valid)
+            let input = 2u32.to_le_bytes().to_vec();
+            let result = vm::call_ssri_method(&binary, "Process.assemble", &input);
+            
+            assert!(
+                result.is_ok(),
+                "Expected Ok for count=2, got {:?}",
+                result
+            );
+            println!("✓ Process.assemble(count=2) succeeded");
+        } else {
+            println!("⊘ Skipping: {} not found (run `make build` in contracts/cid_process_example)", bin_path);
+        }
+    }
 }

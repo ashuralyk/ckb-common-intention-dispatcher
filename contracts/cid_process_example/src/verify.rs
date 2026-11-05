@@ -1,7 +1,13 @@
-use crate::Error;
+use ckb_cinnabar_verifier::{Result, Verification};
+use crate::Context;
 
-pub fn verify_process() -> Result<(), Error> {
-    // On-chain verification (runs in transaction context)
-    // Will implement in Task 6
-    Ok(())
+#[derive(Default)]
+pub struct Root;
+
+impl Verification<Context> for Root {
+    fn verify(&mut self, _name: &str, _ctx: &mut Context) -> Result<Option<&str>> {
+        // On-chain verification (runs in transaction context)
+        // Will implement in Task 6
+        Ok(None)
+    }
 }
