@@ -5,7 +5,7 @@ Task 10 adds empty-batch and n=5>BATCH_MAX rejection tests, plus two `#[ignore]`
 
 ## Git Context
 - **Base SHA**: `e84fea530a2e384e7e2c00688ef2b34ba14dae3d` (Task 9 approved)
-- **Head SHA**: (set after commit)
+- **Head SHA**: `b33766bf5ae170b920f3ec0dc2ae70cd37568aaf`
 - **Branch**: `cursor/cid-process-example-c952`
 - **PR**: #6 targeting `main`
 
