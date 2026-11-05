@@ -6,7 +6,7 @@
 pub mod types;
 pub mod vm;
 
-pub use types::{ExecutorError, IntentionInput, PartialTx, CUSTOM_ERROR_START};
+pub use types::{encode_intentions, ExecutorError, IntentionInput, PartialTx, CUSTOM_ERROR_START};
 
 /// Offline SSRI executor for CID Process contracts
 pub struct ProcessExecutor {
@@ -35,20 +35,14 @@ impl ProcessExecutor {
             return Err(ExecutorError::VmError("empty binary".into()));
         }
         
-        // Encode input: count (u32 LE) + intention data
-        // For Task 4: only send count; full encoding in Task 5
-        let mut input = Vec::new();
-        input.extend_from_slice(&(intentions.len() as u32).to_le_bytes());
+        // Encode full intentions (capacity, lock_args, data for each)
+        let input = encode_intentions(intentions);
         
         // Call SSRI Process.assemble
-        let _response = vm::call_ssri_method(&self.binary, "Process.assemble", &input)?;
+        let response = vm::call_ssri_method(&self.binary, "Process.assemble", &input)?;
         
         // Parse response into PartialTx
-        // Stub for Task 4: full parsing in Task 5+
-        Ok(PartialTx {
-            outputs: vec![],
-            outputs_data: vec![],
-        })
+        PartialTx::from_bytes(&response)
     }
 }
 
@@ -223,5 +217,63 @@ mod tests {
             "should accept count=1: {:?}",
             result
         );
+    }
+    
+    #[test]
+    fn test_assemble_returns_non_empty_partial_tx() {
+        use ckb_types::packed::OutPoint;
+        
+        let bin_path = "../../build/release/cid_process_example";
+        if !std::path::Path::new(bin_path).exists() {
+            eprintln!("Skipping test: binary not built");
+            return;
+        }
+        
+        let binary = std::fs::read(bin_path).expect("read binary");
+        let executor = ProcessExecutor::new(binary);
+        
+        // Create intentions with real data
+        let intentions = vec![
+            IntentionInput {
+                out_point: OutPoint::default(),
+                lock_args: vec![0x01, 0x02, 0x03, 0x04],
+                capacity: 100_000_000_000,
+                data: vec![0xaa, 0xbb],
+            },
+            IntentionInput {
+                out_point: OutPoint::default(),
+                lock_args: vec![0x05, 0x06, 0x07],
+                capacity: 200_000_000_000,
+                data: vec![0xcc, 0xdd, 0xee],
+            },
+        ];
+        
+        let result = executor.assemble(&intentions);
+        assert!(result.is_ok(), "should succeed with valid intentions: {:?}", result);
+        
+        let partial_tx = result.unwrap();
+        
+        // Verify non-empty outputs
+        assert_eq!(partial_tx.outputs.len(), 2, "should have 2 beneficiary outputs");
+        assert_eq!(partial_tx.outputs_data.len(), 2, "should have 2 output data entries");
+        
+        // Verify first output
+        use ckb_types::prelude::Unpack;
+        let output0_capacity: u64 = partial_tx.outputs[0].capacity().unpack();
+        assert_eq!(output0_capacity, 100_000_000_000, "first output capacity should match");
+        
+        let output0_lock_args: Vec<u8> = partial_tx.outputs[0].lock().args().unpack();
+        assert_eq!(output0_lock_args, vec![0x01, 0x02, 0x03, 0x04], "first output lock args should match");
+        
+        assert_eq!(partial_tx.outputs_data[0], vec![0xaa, 0xbb], "first output data should match");
+        
+        // Verify second output
+        let output1_capacity: u64 = partial_tx.outputs[1].capacity().unpack();
+        assert_eq!(output1_capacity, 200_000_000_000, "second output capacity should match");
+        
+        let output1_lock_args: Vec<u8> = partial_tx.outputs[1].lock().args().unpack();
+        assert_eq!(output1_lock_args, vec![0x05, 0x06, 0x07], "second output lock args should match");
+        
+        assert_eq!(partial_tx.outputs_data[1], vec![0xcc, 0xdd, 0xee], "second output data should match");
     }
 }
