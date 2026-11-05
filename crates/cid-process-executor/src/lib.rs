@@ -130,17 +130,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: RISC-V binary execution issue - exits without calling sys_exit
+    #[ignore] // Binary structure issue: VM finishes before reaching sys_exit
+              // SYS_WRITE works (stdout_hello proves it), but simple exit binaries
+              // complete without calling sys_exit. Will be fully tested with Process
+              // contract (Task 3) which uses ckb-ssri-std and proper exit handling.
     fn test_integration_exit21_incompatible() {
         let binary = include_bytes!("../tests/fixtures/exit21.elf");
         let result = vm::call_ssri_method(binary, "test.method", &[]);
         assert!(matches!(result, Err(ExecutorError::Incompatible(21))), 
                 "Expected Incompatible(21), got {:?}", result);
     }
-    
-    // NOTE: Full exit code testing (including Incompatible for >= 20) will be verified
-    // with the actual Process contract binary in Task 3, which uses different code generation
-    // and properly exercises the sys_exit path.
 
     #[test]
     fn test_integration_stdout_capture() {

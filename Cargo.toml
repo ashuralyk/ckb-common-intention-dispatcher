@@ -7,6 +7,7 @@ members = [
   "calculator",
   "tests",
   "contracts/ckb_common_intention_dispatcher",
+  "contracts/cid_process_example",
   "crates/cid-process-executor",
   "process_calculator",
 ]

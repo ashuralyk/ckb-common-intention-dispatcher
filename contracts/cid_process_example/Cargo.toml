@@ -1,0 +1,13 @@
+[package]
+name = "cid_process_example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ckb-std = "1.1.0"
+ckb-cinnabar-verifier = { workspace = true }
+cid-protocol = { path = "../../protocol" }
+ckb-ssri-std = { workspace = true }
+
+[features]
+default = []

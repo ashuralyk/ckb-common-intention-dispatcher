@@ -1,0 +1,13 @@
+#!/bin/sh
+
+# Find suitable clang for RISC-V compilation
+for clang in clang-18 clang-17 clang-16 clang-15 clang-14 clang; do
+    if command -v "$clang" > /dev/null 2>&1; then
+        if "$clang" --version | grep -q "clang version"; then
+            echo "$clang"
+            exit 0
+        fi
+    fi
+done
+
+echo "clang" # fallback
