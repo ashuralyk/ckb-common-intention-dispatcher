@@ -49,61 +49,63 @@ impl PartialTx {
     /// Format: output_count (u32 LE) + for each: output_len (u32 LE) + output_bytes + data_len (u32 LE) + data_bytes
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, super::ExecutorError> {
         let mut pos = 0;
-        
+
         if bytes.len() < 4 {
             return Err(super::ExecutorError::InvalidResponse(
-                "response too short for output count".into()
+                "response too short for output count".into(),
             ));
         }
-        
-        let output_count = u32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap()) as usize;
+
+        let output_count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
-        
+
         let mut outputs = Vec::with_capacity(output_count);
         let mut outputs_data = Vec::with_capacity(output_count);
-        
+
         for _ in 0..output_count {
             // Read output length
             if pos + 4 > bytes.len() {
                 return Err(super::ExecutorError::InvalidResponse(
-                    "truncated output length".into()
+                    "truncated output length".into(),
                 ));
             }
-            let output_len = u32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap()) as usize;
+            let output_len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
-            
+
             // Read output bytes
             if pos + output_len > bytes.len() {
                 return Err(super::ExecutorError::InvalidResponse(
-                    "truncated output bytes".into()
+                    "truncated output bytes".into(),
                 ));
             }
-            let output = CellOutput::from_slice(&bytes[pos..pos+output_len])
-                .map_err(|e| super::ExecutorError::InvalidResponse(
-                    format!("invalid CellOutput molecule: {:?}", e)
-                ))?;
+            let output = CellOutput::from_slice(&bytes[pos..pos + output_len]).map_err(|e| {
+                super::ExecutorError::InvalidResponse(format!(
+                    "invalid CellOutput molecule: {:?}",
+                    e
+                ))
+            })?;
             pos += output_len;
             outputs.push(output);
-            
+
             // Read data length
             if pos + 4 > bytes.len() {
                 return Err(super::ExecutorError::InvalidResponse(
-                    "truncated data length".into()
+                    "truncated data length".into(),
                 ));
             }
-            let data_len = u32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap()) as usize;
+            let data_len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
-            
+
             // Read data bytes
             if pos + data_len > bytes.len() {
                 return Err(super::ExecutorError::InvalidResponse(
-                    "truncated data bytes".into()
+                    "truncated data bytes".into(),
                 ));
             }
-            outputs_data.push(bytes[pos..pos+data_len].to_vec());
+            outputs_data.push(bytes[pos..pos + data_len].to_vec());
             pos += data_len;
         }
-        
+
         Ok(PartialTx {
             outputs,
             outputs_data,
@@ -137,7 +139,9 @@ pub enum ExecutorError {
 impl std::fmt::Display for ExecutorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExecutorError::Incompatible(code) => write!(f, "Process rejected batch (exit {})", code),
+            ExecutorError::Incompatible(code) => {
+                write!(f, "Process rejected batch (exit {})", code)
+            }
             ExecutorError::VmError(msg) => write!(f, "VM error: {}", msg),
             ExecutorError::InvalidResponse(msg) => write!(f, "Invalid SSRI response: {}", msg),
         }

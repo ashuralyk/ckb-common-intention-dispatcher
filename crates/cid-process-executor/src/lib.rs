@@ -1,5 +1,5 @@
 //! Greenfield offline SSRI host for CID Process contracts
-//! 
+//!
 //! Implements minimal CKB-VM runner with argv-based SSRI method invocation.
 //! vm_version = u64::MAX convention for SSRI mode.
 
@@ -24,7 +24,7 @@ impl ProcessExecutor {
         if self.binary.is_empty() {
             return Err(ExecutorError::VmError("empty binary".into()));
         }
-        
+
         vm::call_ssri_method(&self.binary, "Process.batch", &[])
             .and_then(|response| parse_batch_bounds(&response))
     }
@@ -34,13 +34,13 @@ impl ProcessExecutor {
         if self.binary.is_empty() {
             return Err(ExecutorError::VmError("empty binary".into()));
         }
-        
+
         // Encode full intentions (capacity, lock_args, data for each)
         let input = encode_intentions(intentions);
-        
+
         // Call SSRI Process.assemble
         let response = vm::call_ssri_method(&self.binary, "Process.assemble", &input)?;
-        
+
         // Parse response into PartialTx
         PartialTx::from_bytes(&response)
     }
@@ -53,10 +53,10 @@ fn parse_batch_bounds(response: &[u8]) -> Result<(u32, u32), ExecutorError> {
             response.len()
         )));
     }
-    
+
     let min = u32::from_le_bytes(response[0..4].try_into().unwrap());
     let max = u32::from_le_bytes(response[4..8].try_into().unwrap());
-    
+
     Ok((min, max))
 }
 
@@ -88,10 +88,10 @@ mod tests {
     }
 
     // Test syscall 2041 implementation and exit code handling
-    // Full integration tests (argv routing, stdout capture, exit 0 success path, 
+    // Full integration tests (argv routing, stdout capture, exit 0 success path,
     // and actual RISC-V binary execution) will be added in Task 3 when the Process
     // contract binary is available for testing.
-    
+
     #[test]
     fn test_syscall_2041_returns_ssri_version() {
         // Verify syscall 2041 (CKB_VM_VERSION) constant is u64::MAX
@@ -132,7 +132,11 @@ mod tests {
         let result = vm::call_ssri_method(binary, "test.method", &[]);
         assert!(result.is_ok(), "Expected Ok, got {:?}", result);
         let output = result.unwrap();
-        assert_eq!(output, Vec::<u8>::new(), "Expected empty output for exit(0)");
+        assert_eq!(
+            output,
+            Vec::<u8>::new(),
+            "Expected empty output for exit(0)"
+        );
     }
 
     #[test]
@@ -143,8 +147,11 @@ mod tests {
     fn test_integration_exit21_incompatible() {
         let binary = include_bytes!("../tests/fixtures/exit21.elf");
         let result = vm::call_ssri_method(binary, "test.method", &[]);
-        assert!(matches!(result, Err(ExecutorError::Incompatible(21))), 
-                "Expected Incompatible(21), got {:?}", result);
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(21))),
+            "Expected Incompatible(21), got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -155,7 +162,7 @@ mod tests {
         let output = result.unwrap();
         assert_eq!(output, b"hello", "Expected stdout to capture 'hello'");
     }
-    
+
     #[test]
     fn test_real_binary_batch_bounds() {
         let bin_path = "../../build/release/cid_process_example";
@@ -163,18 +170,18 @@ mod tests {
             eprintln!("Skipping test: binary not built (run 'cd contracts/cid_process_example && make build')");
             return;
         }
-        
+
         let binary = std::fs::read(bin_path).expect("read binary");
         let executor = ProcessExecutor::new(binary);
-        
+
         let result = executor.get_batch_bounds();
         assert!(result.is_ok(), "should query batch bounds: {:?}", result);
-        
+
         let (min, max) = result.unwrap();
         assert_eq!(min, 1, "BATCH_MIN should be 1");
         assert_eq!(max, 4, "BATCH_MAX should be 4");
     }
-    
+
     #[test]
     fn test_assemble_validates_count() {
         let bin_path = "../../build/release/cid_process_example";
@@ -182,10 +189,10 @@ mod tests {
             eprintln!("Skipping test: binary not built");
             return;
         }
-        
+
         let binary = std::fs::read(bin_path).expect("read binary");
         let executor = ProcessExecutor::new(binary);
-        
+
         // Empty intentions (< BATCH_MIN)
         let result = executor.assemble(&[]);
         assert!(
@@ -193,7 +200,7 @@ mod tests {
             "should reject empty batch: {:?}",
             result
         );
-        
+
         // Count=5 (> BATCH_MAX)
         let intentions = vec![
             IntentionInput::default(),
@@ -208,30 +215,26 @@ mod tests {
             "should reject count=5: {:?}",
             result
         );
-        
+
         // Count=1 (valid, at BATCH_MIN)
         let intentions = vec![IntentionInput::default()];
         let result = executor.assemble(&intentions);
-        assert!(
-            result.is_ok(),
-            "should accept count=1: {:?}",
-            result
-        );
+        assert!(result.is_ok(), "should accept count=1: {:?}", result);
     }
-    
+
     #[test]
     fn test_assemble_returns_non_empty_partial_tx() {
         use ckb_types::packed::OutPoint;
-        
+
         let bin_path = "../../build/release/cid_process_example";
         if !std::path::Path::new(bin_path).exists() {
             eprintln!("Skipping test: binary not built");
             return;
         }
-        
+
         let binary = std::fs::read(bin_path).expect("read binary");
         let executor = ProcessExecutor::new(binary);
-        
+
         // Create intentions with real data
         let intentions = vec![
             IntentionInput {
@@ -247,33 +250,67 @@ mod tests {
                 data: vec![0xcc, 0xdd, 0xee],
             },
         ];
-        
+
         let result = executor.assemble(&intentions);
-        assert!(result.is_ok(), "should succeed with valid intentions: {:?}", result);
-        
+        assert!(
+            result.is_ok(),
+            "should succeed with valid intentions: {:?}",
+            result
+        );
+
         let partial_tx = result.unwrap();
-        
+
         // Verify non-empty outputs
-        assert_eq!(partial_tx.outputs.len(), 2, "should have 2 beneficiary outputs");
-        assert_eq!(partial_tx.outputs_data.len(), 2, "should have 2 output data entries");
-        
+        assert_eq!(
+            partial_tx.outputs.len(),
+            2,
+            "should have 2 beneficiary outputs"
+        );
+        assert_eq!(
+            partial_tx.outputs_data.len(),
+            2,
+            "should have 2 output data entries"
+        );
+
         // Verify first output
         use ckb_types::prelude::Unpack;
         let output0_capacity: u64 = partial_tx.outputs[0].capacity().unpack();
-        assert_eq!(output0_capacity, 100_000_000_000, "first output capacity should match");
-        
+        assert_eq!(
+            output0_capacity, 100_000_000_000,
+            "first output capacity should match"
+        );
+
         let output0_lock_args: Vec<u8> = partial_tx.outputs[0].lock().args().unpack();
-        assert_eq!(output0_lock_args, vec![0x01, 0x02, 0x03, 0x04], "first output lock args should match");
-        
-        assert_eq!(partial_tx.outputs_data[0], vec![0xaa, 0xbb], "first output data should match");
-        
+        assert_eq!(
+            output0_lock_args,
+            vec![0x01, 0x02, 0x03, 0x04],
+            "first output lock args should match"
+        );
+
+        assert_eq!(
+            partial_tx.outputs_data[0],
+            vec![0xaa, 0xbb],
+            "first output data should match"
+        );
+
         // Verify second output
         let output1_capacity: u64 = partial_tx.outputs[1].capacity().unpack();
-        assert_eq!(output1_capacity, 200_000_000_000, "second output capacity should match");
-        
+        assert_eq!(
+            output1_capacity, 200_000_000_000,
+            "second output capacity should match"
+        );
+
         let output1_lock_args: Vec<u8> = partial_tx.outputs[1].lock().args().unpack();
-        assert_eq!(output1_lock_args, vec![0x05, 0x06, 0x07], "second output lock args should match");
-        
-        assert_eq!(partial_tx.outputs_data[1], vec![0xcc, 0xdd, 0xee], "second output data should match");
+        assert_eq!(
+            output1_lock_args,
+            vec![0x05, 0x06, 0x07],
+            "second output lock args should match"
+        );
+
+        assert_eq!(
+            partial_tx.outputs_data[1],
+            vec![0xcc, 0xdd, 0xee],
+            "second output data should match"
+        );
     }
 }

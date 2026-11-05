@@ -1,12 +1,12 @@
-use ckb_vm::{
-    Bytes, CoreMachine, DefaultCoreMachine, DefaultMachineBuilder, Error as VmError, Memory, Register,
-    SparseMemory, SupportMachine, Syscalls, ISA_A, ISA_B, ISA_IMC, ISA_MOP,
-};
-use ckb_vm::registers::{A0, A1, A2, A7};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use crate::{ExecutorError, CUSTOM_ERROR_START};
 use ckb_hash::blake2b_256;
+use ckb_vm::registers::{A0, A1, A2, A7};
+use ckb_vm::{
+    Bytes, CoreMachine, DefaultCoreMachine, DefaultMachineBuilder, Error as VmError, Memory,
+    Register, SparseMemory, SupportMachine, Syscalls, ISA_A, ISA_B, ISA_IMC, ISA_MOP,
+};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 pub const SSRI_VM_VERSION: u64 = u64::MAX;
 const MAX_CYCLES: u64 = 70_000_000;
@@ -62,14 +62,14 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
 
     fn ecall(&mut self, machine: &mut Mac) -> Result<bool, VmError> {
         let syscall_num = machine.registers()[A7].to_u64();
-        
+
         match syscall_num {
             // Linux-style read (for fixture tests)
             SYS_READ => {
                 let fd = machine.registers()[A0].to_u64();
                 let buf_addr = machine.registers()[A1].to_u64();
                 let len = machine.registers()[A2].to_u64() as usize;
-                
+
                 if fd == 0 {
                     // stdin
                     let mut input = self.input.lock().unwrap();
@@ -89,7 +89,7 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 let fd = machine.registers()[A0].to_u64();
                 let buf_addr = machine.registers()[A1].to_u64();
                 let len = machine.registers()[A2].to_u64();
-                
+
                 if fd == 1 {
                     // stdout
                     let buf = machine.memory_mut().load_bytes(buf_addr, len)?;
@@ -103,22 +103,23 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
             // ckb-std pipe(): create pipe pair, write [read_fd, write_fd] to pointer
             SYS_PIPE => {
                 let fds_ptr = machine.registers()[A0].to_u64();
-                
+
                 let read_fd = *self.next_fd.lock().unwrap();
                 let write_fd = read_fd + 1;
                 *self.next_fd.lock().unwrap() = write_fd + 1;
-                
+
                 // Store pipe for write_fd (writes to this fd append to pipe buffer)
-                self.pipes.lock().unwrap().insert(write_fd, Pipe {
-                    buffer: Vec::new(),
-                });
-                
+                self.pipes
+                    .lock()
+                    .unwrap()
+                    .insert(write_fd, Pipe { buffer: Vec::new() });
+
                 // Write [read_fd, write_fd] as two u64s at fds_ptr
                 let mut fds_bytes = Vec::with_capacity(16);
                 fds_bytes.extend_from_slice(&read_fd.to_le_bytes());
                 fds_bytes.extend_from_slice(&write_fd.to_le_bytes());
                 machine.memory_mut().store_bytes(fds_ptr, &fds_bytes)?;
-                
+
                 // Success: a0 = 0
                 machine.set_register(A0, Mac::REG::from_u64(0));
                 Ok(true)
@@ -129,13 +130,13 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 let fd = machine.registers()[A0].to_u64();
                 let buf_ptr = machine.registers()[A1].to_u64();
                 let len_ptr = machine.registers()[A2].to_u64();
-                
+
                 // Read length from pointer
                 let len_bytes = machine.memory_mut().load_bytes(len_ptr, 8)?;
                 let len = u64::from_le_bytes(len_bytes.as_ref().try_into().unwrap()) as usize;
-                
+
                 let data = machine.memory_mut().load_bytes(buf_ptr, len as u64)?;
-                
+
                 // Check if fd is a pipe write-end
                 if let Some(pipe) = self.pipes.lock().unwrap().get_mut(&fd) {
                     pipe.buffer.extend_from_slice(&data);
@@ -145,10 +146,12 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                     // stdout
                     self.output.lock().unwrap().extend_from_slice(&data);
                 }
-                
+
                 // Write back length
-                machine.memory_mut().store_bytes(len_ptr, &(len as u64).to_le_bytes())?;
-                
+                machine
+                    .memory_mut()
+                    .store_bytes(len_ptr, &(len as u64).to_le_bytes())?;
+
                 // Success: a0 = 0
                 machine.set_register(A0, Mac::REG::from_u64(0));
                 Ok(true)
@@ -159,11 +162,11 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 let fd = machine.registers()[A0].to_u64();
                 let buf_ptr = machine.registers()[A1].to_u64();
                 let len_ptr = machine.registers()[A2].to_u64();
-                
+
                 // Read length from pointer
                 let len_bytes = machine.memory_mut().load_bytes(len_ptr, 8)?;
                 let len = u64::from_le_bytes(len_bytes.as_ref().try_into().unwrap()) as usize;
-                
+
                 let bytes_read = if fd == 0 {
                     // stdin
                     let mut input = self.input.lock().unwrap();
@@ -176,10 +179,12 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 } else {
                     0 // Other fds not supported
                 };
-                
+
                 // Write back length
-                machine.memory_mut().store_bytes(len_ptr, &(bytes_read as u64).to_le_bytes())?;
-                
+                machine
+                    .memory_mut()
+                    .store_bytes(len_ptr, &(bytes_read as u64).to_le_bytes())?;
+
                 // Success: a0 = 0
                 machine.set_register(A0, Mac::REG::from_u64(0));
                 Ok(true)
@@ -188,7 +193,7 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
             SYS_CLOSE => {
                 let fd = machine.registers()[A0].to_u64();
                 self.pipes.lock().unwrap().remove(&fd);
-                
+
                 // Success: a0 = 0
                 machine.set_register(A0, Mac::REG::from_u64(0));
                 Ok(true)
@@ -210,7 +215,7 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 Ok(true)
             }
             SYS_LOAD_CELL_DATA => {
-                // Cell data loading not supported in offline mode  
+                // Cell data loading not supported in offline mode
                 machine.set_register(A0, Mac::REG::from_u64(1)); // error
                 Ok(true)
             }
@@ -229,7 +234,7 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 machine.set_register(A0, Mac::REG::from_u64(0)); // success, 0 fds
                 Ok(true)
             }
-            _ if syscall_num >= 2041 && syscall_num <= 3000 => {
+            _ if (2041..=3000).contains(&syscall_num) => {
                 // CKB syscall range - return error for unsupported ones
                 machine.set_register(A0, Mac::REG::from_u64(1)); // error
                 Ok(true)
@@ -255,29 +260,26 @@ pub fn call_ssri_method(
     let syscalls = SsriSyscalls::new(input.to_vec());
     let output_handle = syscalls.output.clone();
     let exit_handle = syscalls.exit_code.clone();
-    
+
     let isa = ISA_IMC | ISA_A | ISA_B | ISA_MOP;
-    let core_machine = DefaultCoreMachine::<u64, SparseMemory<u64>>::new(
-        isa,
-        SSRI_VM_VERSION as u32,
-        MAX_CYCLES,
-    );
-    
+    let core_machine =
+        DefaultCoreMachine::<u64, SparseMemory<u64>>::new(isa, SSRI_VM_VERSION as u32, MAX_CYCLES);
+
     let mut machine = DefaultMachineBuilder::new(core_machine)
         .syscall(Box::new(syscalls))
         .build();
-    
+
     // Load program with argv[0] = hex-encoded method ID
     let code = Bytes::from(binary.to_vec());
     let method_id_hex = ssri_method_argv0(method_path);
     let args = vec![Bytes::from(method_id_hex.as_bytes().to_vec())];
-    machine.load_program(&code, args.into_iter().map(Ok)).map_err(|e| {
-        ExecutorError::VmError(format!("failed to load program: {:?}", e))
-    })?;
-    
+    machine
+        .load_program(&code, args.into_iter().map(Ok))
+        .map_err(|e| ExecutorError::VmError(format!("failed to load program: {:?}", e)))?;
+
     // Run
     let result = machine.run();
-    
+
     // Check if exit was called via syscall, or get return value from a0
     let final_code = if let Some(code) = exit_handle.lock().unwrap().as_ref() {
         *code
@@ -285,7 +287,7 @@ pub fn call_ssri_method(
         // VM completed naturally - check register a0 for return value
         machine.registers()[A0].to_i8()
     };
-    
+
     // Check result and exit code
     match result {
         Ok(_) | Err(VmError::InvalidEcall(SYS_EXIT)) => {

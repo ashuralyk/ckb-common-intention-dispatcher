@@ -4,9 +4,7 @@
 mod ssri;
 mod verify;
 
-use ckb_cinnabar_verifier::{
-    cinnabar_main, define_errors, CUSTOM_ERROR_START, TREE_ROOT,
-};
+use ckb_cinnabar_verifier::{cinnabar_main, define_errors, CUSTOM_ERROR_START, TREE_ROOT};
 
 // Error code constants for verification (30-32)
 const ERROR_PROCESS_PAIR_INVALID: i8 = 30;

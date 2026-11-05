@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use cid_process_example_calculator::{process_digest_ok, IntentionCell, PROCESS_CONTRACT_NAME};
 use ckb_cinnabar_calculator::{
     re_exports::ckb_types::{
         core::ScriptHashType,
@@ -10,7 +11,6 @@ use ckb_cinnabar_calculator::{
     },
     simulation::{fake_outpoint, FakeRpcClient},
 };
-use cid_process_example_calculator::{process_digest_ok, IntentionCell, PROCESS_CONTRACT_NAME};
 
 const CID_CONTRACT_NAME: &str = "ckb_common_intention_dispatcher";
 const CONTRACT_BIN: &str = "../build/release";
@@ -74,7 +74,8 @@ fn assert_digest_counts(n: usize) {
         n,
         "skeleton outputs should match intention count (beneficiaries)"
     );
-    println!("digest n={n} with real SSRI: SUCCESS (inputs={}, outputs={})",
+    println!(
+        "digest n={n} with real SSRI: SUCCESS (inputs={}, outputs={})",
         skeleton.inputs.len(),
         skeleton.outputs.len()
     );

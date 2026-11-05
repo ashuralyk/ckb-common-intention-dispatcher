@@ -29,11 +29,11 @@ impl IntentionCell {
         // Serialize calculator's OutPoint to bytes and deserialize in executor's version
         use ckb_cinnabar_calculator::re_exports::ckb_types::prelude::Entity;
         let _out_point_bytes = self.out_point.as_slice();
-        
+
         // Both ckb-gen-types versions use same molecule wire format
         // Deserialize bytes into executor's OutPoint type
         let executor_out_point: cid_process_executor::IntentionInput = IntentionInput::default();
-        
+
         // Build input with raw fields, OutPoint will use default (can't easily convert between versions)
         // This is acceptable since the skeleton uses the calculator's OutPoint directly
         Ok(IntentionInput {
@@ -67,12 +67,12 @@ pub fn process_digest_ok<T: RPC>(
     // Load Process binary and create executor
     let binary = load_process_binary(bin_dir)?;
     let executor = ProcessExecutor::new(binary);
-    
+
     // Validate batch bounds
-    let (min, max) = executor.get_batch_bounds().map_err(|e| {
-        CalculatorError::Other(format!("failed to get batch bounds: {}", e))
-    })?;
-    
+    let (min, max) = executor
+        .get_batch_bounds()
+        .map_err(|e| CalculatorError::Other(format!("failed to get batch bounds: {}", e)))?;
+
     let count = intentions.len() as u32;
     if count < min || count > max {
         return Err(CalculatorError::Other(format!(
@@ -80,19 +80,21 @@ pub fn process_digest_ok<T: RPC>(
             count, min, max
         )));
     }
-    
+
     // Convert to executor inputs
-    let inputs: Vec<IntentionInput> = intentions.iter().map(|c| c.to_intention_input())
+    let inputs: Vec<IntentionInput> = intentions
+        .iter()
+        .map(|c| c.to_intention_input())
         .collect::<Result<Vec<_>>>()?;
-    
+
     // Call executor assemble to get beneficiary outputs
-    let partial_tx = executor.assemble(&inputs).map_err(|e| {
-        CalculatorError::Other(format!("executor assemble failed: {}", e))
-    })?;
-    
+    let partial_tx = executor
+        .assemble(&inputs)
+        .map_err(|e| CalculatorError::Other(format!("executor assemble failed: {}", e)))?;
+
     // Build skeleton with intention inputs
     let mut skeleton = TransactionSkeleton::default();
-    
+
     // Add intention inputs
     for intention in &intentions {
         let input = CellInputEx {
@@ -109,7 +111,7 @@ pub fn process_digest_ok<T: RPC>(
         };
         skeleton.input(input)?.witness(Default::default());
     }
-    
+
     // Bridge executor CellOutput (ckb-gen-types 0.119) → calculator CellOutput (1.x)
     // via molecule bytes (wire format is stable across versions)
     for (output_bytes, data) in partial_tx.output_molecule_pairs() {
@@ -117,7 +119,7 @@ pub fn process_digest_ok<T: RPC>(
             .map_err(|e| CalculatorError::Other(format!("CellOutput bridge: {:?}", e)))?;
         skeleton.output(CellOutputEx::new(calc_output, data));
     }
-    
+
     let instructions = vec![];
     Ok((skeleton, instructions))
 }
@@ -141,13 +143,13 @@ mod tests {
             capacity: 100_000_000_000,
             data: vec![4, 5, 6],
         };
-        
+
         let input = cell.to_intention_input().expect("conversion");
         assert_eq!(input.lock_args, vec![1, 2, 3]);
         assert_eq!(input.capacity, 100_000_000_000);
         assert_eq!(input.data, vec![4, 5, 6]);
     }
-    
+
     #[test]
     fn test_process_digest_beneficiary_outputs() {
         use ckb_cinnabar_calculator::simulation::{fake_outpoint, FakeRpcClient};

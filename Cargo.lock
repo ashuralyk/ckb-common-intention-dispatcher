@@ -1050,6 +1050,7 @@ dependencies = [
 name = "ckb_common_intention_dispatcher-tests"
 version = "0.1.0"
 dependencies = [
+ "cid_process_example-calculator",
  "ckb-always-success-script",
  "ckb-cinnabar-calculator",
  "ckb-system-scripts 0.5.4",
