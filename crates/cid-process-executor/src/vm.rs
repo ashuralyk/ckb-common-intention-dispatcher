@@ -1,11 +1,12 @@
 use ckb_vm::{
-    Bytes, DefaultCoreMachine, DefaultMachineBuilder, Error as VmError, Memory, Register,
+    Bytes, CoreMachine, DefaultCoreMachine, DefaultMachineBuilder, Error as VmError, Memory, Register,
     SparseMemory, SupportMachine, Syscalls, ISA_A, ISA_B, ISA_IMC, ISA_MOP,
 };
 use ckb_vm::registers::{A0, A1, A2, A7};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use crate::{ExecutorError, CUSTOM_ERROR_START};
+use ckb_hash::blake2b_256;
 
 pub const SSRI_VM_VERSION: u64 = u64::MAX;
 const MAX_CYCLES: u64 = 70_000_000;
@@ -16,15 +17,16 @@ const SYS_WRITE: u64 = 64;
 const SYS_EXIT: u64 = 93;
 const SYS_CKB_VM_VERSION: u64 = 2041;
 
-/// Syscall numbers (ckb-std 1.1.0)
+/// Syscall numbers (ckb-std 1.1.0 from ckb_constants.rs)
 const SYS_SPAWN: u64 = 2049;
 const SYS_LOAD_CELL_DATA: u64 = 2081;
 const SYS_LOAD_BLOCK_EXTENSION: u64 = 2137;
-const SYS_INHERITED_FD: u64 = 2606;
-const SYS_PIPE: u64 = 2605;
-const SYS_CKB_READ: u64 = 2607;
-const SYS_CKB_WRITE: u64 = 2608;
-const SYS_CLOSE: u64 = 2609;
+const SYS_DEBUG: u64 = 2177;
+const SYS_PIPE: u64 = 2604;
+const SYS_CKB_WRITE: u64 = 2605;
+const SYS_CKB_READ: u64 = 2606;
+const SYS_INHERITED_FDS: u64 = 2607;
+const SYS_CLOSE: u64 = 2608;
 
 /// Pipe pair (read_fd, write_fd)
 #[derive(Clone, Debug)]
@@ -117,8 +119,6 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 fds_bytes.extend_from_slice(&write_fd.to_le_bytes());
                 machine.memory_mut().store_bytes(fds_ptr, &fds_bytes)?;
                 
-                eprintln!("SYS_PIPE created: read_fd={}, write_fd={}", read_fd, write_fd);
-                
                 // Success: a0 = 0
                 machine.set_register(A0, Mac::REG::from_u64(0));
                 Ok(true)
@@ -136,20 +136,14 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 
                 let data = machine.memory_mut().load_bytes(buf_ptr, len as u64)?;
                 
-                eprintln!("SYS_CKB_WRITE: fd={}, len={}", fd, len);
-                
                 // Check if fd is a pipe write-end
                 if let Some(pipe) = self.pipes.lock().unwrap().get_mut(&fd) {
                     pipe.buffer.extend_from_slice(&data);
                     // Capture pipe output as SSRI stdout
                     self.output.lock().unwrap().extend_from_slice(&data);
-                    eprintln!("  -> wrote to pipe, total output now: {}", self.output.lock().unwrap().len());
                 } else if fd == 1 {
                     // stdout
                     self.output.lock().unwrap().extend_from_slice(&data);
-                    eprintln!("  -> wrote to stdout, total output now: {}", self.output.lock().unwrap().len());
-                } else {
-                    eprintln!("  -> fd {} not found in pipes!", fd);
                 }
                 
                 // Write back length
@@ -201,13 +195,11 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
             }
             SYS_EXIT => {
                 let code = machine.registers()[A0].to_i8();
-                eprintln!("SYS_EXIT called with code {}", code);
                 *self.exit_code.lock().unwrap() = Some(code);
                 Err(VmError::InvalidEcall(SYS_EXIT))
             }
             SYS_CKB_VM_VERSION => {
                 // Return u64::MAX to signal SSRI mode
-                eprintln!("SYS_CKB_VM_VERSION called, returning {}", SSRI_VM_VERSION);
                 machine.set_register(A0, Mac::REG::from_u64(SSRI_VM_VERSION));
                 Ok(true)
             }
@@ -227,29 +219,32 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 machine.set_register(A0, Mac::REG::from_u64(1)); // error
                 Ok(true)
             }
-            2177 => {
-                // Unknown syscall - return success
-                eprintln!("Syscall 2177 returning success (0)");
+            SYS_DEBUG => {
+                // debug! macro - no-op success
                 machine.set_register(A0, Mac::REG::from_u64(0));
                 Ok(true)
             }
-            SYS_INHERITED_FD => {
+            SYS_INHERITED_FDS => {
                 // Return no inherited fds
                 machine.set_register(A0, Mac::REG::from_u64(0)); // success, 0 fds
                 Ok(true)
             }
             _ if syscall_num >= 2041 && syscall_num <= 3000 => {
                 // CKB syscall range - return error for unsupported ones
-                eprintln!("Unsupported CKB syscall: {} (0x{:x})", syscall_num, syscall_num);
                 machine.set_register(A0, Mac::REG::from_u64(1)); // error
                 Ok(true)
             }
-            _ => {
-                eprintln!("Unknown syscall: {} (0x{:x})", syscall_num, syscall_num);
-                Ok(false)
-            }
+            _ => Ok(false),
         }
     }
+}
+
+/// Convert method path to hex-encoded method ID for argv[0]
+/// ssri_methods! expects argv[0] to be hex of u64::from_le_bytes(blake2b_256(path)[0..8])
+fn ssri_method_argv0(method_path: &str) -> String {
+    let hash = blake2b_256(method_path.as_bytes());
+    let id_bytes = &hash[0..8];
+    hex::encode(id_bytes)
 }
 
 pub fn call_ssri_method(
@@ -272,9 +267,10 @@ pub fn call_ssri_method(
         .syscall(Box::new(syscalls))
         .build();
     
-    // Load program with argv[0] = method path
+    // Load program with argv[0] = hex-encoded method ID
     let code = Bytes::from(binary.to_vec());
-    let args = vec![Bytes::from(method_path.as_bytes().to_vec())];
+    let method_id_hex = ssri_method_argv0(method_path);
+    let args = vec![Bytes::from(method_id_hex.as_bytes().to_vec())];
     machine.load_program(&code, args.into_iter().map(Ok)).map_err(|e| {
         ExecutorError::VmError(format!("failed to load program: {:?}", e))
     })?;
@@ -282,24 +278,26 @@ pub fn call_ssri_method(
     // Run
     let result = machine.run();
     
-    eprintln!("VM run result: {:?}", result);
-    eprintln!("Exit code: {:?}", exit_handle.lock().unwrap());
-    eprintln!("Output buffer length: {}", output_handle.lock().unwrap().len());
+    // Check if exit was called via syscall, or get return value from a0
+    let final_code = if let Some(code) = exit_handle.lock().unwrap().as_ref() {
+        *code
+    } else {
+        // VM completed naturally - check register a0 for return value
+        machine.registers()[A0].to_i8()
+    };
     
     // Check result and exit code
     match result {
         Ok(_) | Err(VmError::InvalidEcall(SYS_EXIT)) => {
-            // Program exited (either normally or via sys_exit)
-            // Check exit code
-            if let Some(code) = exit_handle.lock().unwrap().as_ref() {
-                if *code != 0 {
-                    if *code >= CUSTOM_ERROR_START {
-                        return Err(ExecutorError::Incompatible(*code));
-                    }
-                    return Err(ExecutorError::VmError(format!("exit code {}", code)));
+            // Program exited (either via sys_exit or naturally)
+            // Use final_code which is either from SYS_EXIT or from register a0
+            if final_code != 0 {
+                if final_code >= CUSTOM_ERROR_START {
+                    return Err(ExecutorError::Incompatible(final_code));
                 }
+                return Err(ExecutorError::VmError(format!("exit code {}", final_code)));
             }
-            // Exit code 0 or not set - success
+            // Exit code 0 - success
             let output = output_handle.lock().unwrap().clone();
             Ok(output)
         }

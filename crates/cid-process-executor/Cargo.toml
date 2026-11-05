@@ -7,4 +7,6 @@ edition = "2021"
 ckb-vm = "0.24"
 ckb-types = "0.119"
 ckb-ssri-std = { workspace = true }
+ckb-hash = "1.1.1"
+hex = "0.4"
 anyhow = "1.0"
