@@ -1,6 +1,4 @@
 //! Process example integration tests with real SSRI invocation.
-//!
-//! Task 8: helpers and constants only. Digest cases land in Task 9+.
 
 use std::path::Path;
 
@@ -8,17 +6,17 @@ use ckb_cinnabar_calculator::{
     re_exports::ckb_types::{
         core::ScriptHashType,
         packed::Script,
-        prelude::{Builder, Pack},
+        prelude::{Builder, Entity, Pack},
     },
+    simulation::{fake_outpoint, FakeRpcClient},
 };
-use cid_process_example_calculator::PROCESS_CONTRACT_NAME;
+use cid_process_example_calculator::{process_digest_ok, IntentionCell, PROCESS_CONTRACT_NAME};
 
 const CID_CONTRACT_NAME: &str = "ckb_common_intention_dispatcher";
 const CONTRACT_BIN: &str = "../build/release";
 #[allow(dead_code)]
 const MAX_CYCLES: u64 = 50_000_000;
 
-#[allow(dead_code)]
 fn require_binaries() {
     let cid_path = format!("{CONTRACT_BIN}/{CID_CONTRACT_NAME}");
     let process_path = format!("{CONTRACT_BIN}/{PROCESS_CONTRACT_NAME}");
@@ -45,4 +43,54 @@ fn process_type_script() -> Script {
         .hash_type(ScriptHashType::Data1)
         .args(b"process-type-id-v0".to_vec().pack())
         .build()
+}
+
+fn mock_intention(i: u32) -> IntentionCell {
+    IntentionCell {
+        out_point: fake_outpoint(),
+        lock_args: {
+            let mut args = vec![0u8; 32];
+            args.extend_from_slice(format!("mock_payload_{i}").as_bytes());
+            args
+        },
+        capacity: 100_000_000_000,
+        data: vec![],
+    }
+}
+
+fn assert_digest_counts(n: usize) {
+    require_binaries();
+    let intentions: Vec<IntentionCell> = (0..n as u32).map(mock_intention).collect();
+    let rpc = FakeRpcClient::default();
+    let (skeleton, _instructions) = process_digest_ok(&rpc, intentions, CONTRACT_BIN)
+        .unwrap_or_else(|e| panic!("should assemble skeleton for {n} intention(s): {e}"));
+    assert_eq!(
+        skeleton.inputs.len(),
+        n,
+        "skeleton inputs should match intention count"
+    );
+    assert_eq!(
+        skeleton.outputs.len(),
+        n,
+        "skeleton outputs should match intention count (beneficiaries)"
+    );
+    println!("digest n={n} with real SSRI: SUCCESS (inputs={}, outputs={})",
+        skeleton.inputs.len(),
+        skeleton.outputs.len()
+    );
+}
+
+#[tokio::test]
+async fn single_intention_digest_real_ssri() {
+    assert_digest_counts(1);
+}
+
+#[tokio::test]
+async fn multi_intention_digest_n2_real_ssri() {
+    assert_digest_counts(2);
+}
+
+#[tokio::test]
+async fn multi_intention_digest_n4_real_ssri() {
+    assert_digest_counts(4);
 }
