@@ -120,23 +120,20 @@ pub fn call_ssri_method(
     // Run
     let result = machine.run();
     
-    // Check exit code
-    if let Some(code) = exit_handle.lock().unwrap().as_ref() {
-        if *code != 0 {
-            if *code >= CUSTOM_ERROR_START {
-                return Err(ExecutorError::Incompatible(*code));
-            }
-            return Err(ExecutorError::VmError(format!("exit code {}", code)));
-        }
-    }
-    
+    // Check result and exit code
     match result {
-        Ok(_) => {
-            let output = output_handle.lock().unwrap().clone();
-            Ok(output)
-        }
-        Err(VmError::InvalidEcall(SYS_EXIT)) => {
-            // Normal exit via sys_exit
+        Ok(_) | Err(VmError::InvalidEcall(SYS_EXIT)) => {
+            // Program exited (either normally or via sys_exit)
+            // Check exit code
+            if let Some(code) = exit_handle.lock().unwrap().as_ref() {
+                if *code != 0 {
+                    if *code >= CUSTOM_ERROR_START {
+                        return Err(ExecutorError::Incompatible(*code));
+                    }
+                    return Err(ExecutorError::VmError(format!("exit code {}", code)));
+                }
+            }
+            // Exit code 0 or not set - success
             let output = output_handle.lock().unwrap().clone();
             Ok(output)
         }
