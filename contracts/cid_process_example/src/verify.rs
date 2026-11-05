@@ -18,7 +18,8 @@ use ckb_std::{
         prelude::{Builder, Entity, Pack, Unpack},
     },
     high_level::{
-        load_cell_capacity, load_cell_data, load_cell_lock, load_cell_type, load_script, QueryIter,
+        load_cell_capacity, load_cell_data, load_cell_lock, load_cell_lock_hash, load_cell_type,
+        load_script, QueryIter,
     },
 };
 
@@ -83,36 +84,40 @@ fn verify_type_id_pair() -> Result<Option<&'static str>> {
     Ok(None)
 }
 
+/// One uniquely owned output: a DigestOk payload payment or a DigestIncompatible
+/// refund. Refunds use `user_lock`, never the payload beneficiary.
 #[derive(Clone)]
-struct IntentionTransfer {
-    beneficiary: Script,
+struct OutputObligation {
+    lock: Script,
     capacity: u64,
     data: Vec<u8>,
     type_script: Option<Script>,
 }
 
 fn verify_intention_batch_and_beneficiaries() -> Result<Option<&'static str>> {
-    let (ours, all_example) = collect_intention_transfers()?;
+    let (ours, obligations) = collect_output_obligations()?;
     if !(BATCH_MIN..=BATCH_MAX).contains(&ours.len()) {
         return Err(ProcessError::BatchCountInvalid.into());
     }
-    // Unique-assign across DigestOk intentions of this Process protocol
-    // (same code_hash + hash_type, type hash present in inputs and outputs).
-    // Refund-branch intentions are not payment obligations.
-    verify_beneficiaries(&all_example)?;
+    // Transaction-wide unique ownership: DigestOk payments (any Process pair
+    // in this tx) and DigestIncompatible refunds cannot share an output.
+    verify_unique_outputs(&obligations)?;
     Ok(None)
 }
 
-fn collect_intention_transfers(
-) -> core::result::Result<(Vec<IntentionTransfer>, Vec<IntentionTransfer>), ProcessError> {
+fn collect_output_obligations(
+) -> core::result::Result<(Vec<OutputObligation>, Vec<OutputObligation>), ProcessError> {
     let our_type_hash: [u8; 32] = load_script()
         .map_err(|_| ProcessError::ProcessPairInvalid)?
         .calc_script_hash()
         .unpack();
-    let digest_ok_siblings = sibling_digest_ok_type_hashes()?;
+    // CID DigestOk: committed Process type hash is present in both I/O.
+    // Not filtered by this binary's code_hash/hash_type, so Data1/Data2/Type
+    // deployments of the same example are obligations of one claimed set.
+    let digest_ok_hashes = type_hashes_in_both_io()?;
 
     let mut ours = Vec::new();
-    let mut all_example = Vec::new();
+    let mut obligations = Vec::new();
     for i in 0.. {
         let lock = match load_cell_lock(i, Source::Input) {
             Ok(lock) => lock,
@@ -124,60 +129,59 @@ fn collect_intention_transfers(
         if args.len() <= PROCESS_TYPE_HASH_LEN {
             continue;
         }
-        let prefix: [u8; 32] = args[..PROCESS_TYPE_HASH_LEN]
-            .try_into()
-            .map_err(|_| ProcessError::ProcessPairInvalid)?;
-        let ours_prefix = prefix == our_type_hash;
-        // DigestOk for this example: prefix is a sibling Process type hash
-        // that appears in both inputs and outputs. Refund / other protocols
-        // are not payment obligations for this group.
-        if !digest_ok_siblings.iter().any(|h| h == &prefix) {
+        let Ok(cid) = CidArgs::decode(&args) else {
             continue;
-        }
-
-        let transfer = match parse_example_transfer(i, &args) {
-            Ok(Some(t)) => t,
-            Ok(None) if ours_prefix => return Err(ProcessError::BeneficiaryMissing),
-            Ok(None) => continue,
-            Err(e) => return Err(e),
         };
+        let ours_prefix = cid.process_type_hash == our_type_hash;
+        let digest_ok = digest_ok_hashes.iter().any(|h| h == &cid.process_type_hash);
 
-        if ours_prefix {
-            ours.push(transfer.clone());
+        if digest_ok {
+            let transfer = match parse_payment(i, &cid) {
+                Ok(Some(t)) => t,
+                Ok(None) if ours_prefix => return Err(ProcessError::BeneficiaryMissing),
+                Ok(None) => continue,
+                Err(e) => return Err(e),
+            };
+            if ours_prefix {
+                ours.push(transfer.clone());
+            }
+            obligations.push(transfer);
+        } else {
+            // Refund branch: user_lock output, not payload. Skip timeout
+            // (user unlocking) so we do not demand a refund cell there.
+            let Ok(user) = packed_script(&cid.entry.user_lock) else {
+                continue;
+            };
+            if has_input_lock(&user) {
+                continue;
+            }
+            obligations.push(parse_transfer(i, user)?);
         }
-        all_example.push(transfer);
     }
 
-    Ok((ours, all_example))
+    Ok((ours, obligations))
 }
 
-fn sibling_digest_ok_type_hashes() -> core::result::Result<Vec<[u8; 32]>, ProcessError> {
-    let ours = load_script().map_err(|_| ProcessError::ProcessPairInvalid)?;
-    let input_hashes = sibling_type_hashes(Source::Input, &ours)?;
-    let output_hashes = sibling_type_hashes(Source::Output, &ours)?;
+fn type_hashes_in_both_io() -> core::result::Result<Vec<[u8; 32]>, ProcessError> {
+    let input_hashes = type_hashes(Source::Input)?;
+    let output_hashes = type_hashes(Source::Output)?;
     Ok(input_hashes
         .into_iter()
         .filter(|h| output_hashes.iter().any(|o| o == h))
         .collect())
 }
 
-fn sibling_type_hashes(
-    source: Source,
-    ours: &Script,
-) -> core::result::Result<Vec<[u8; 32]>, ProcessError> {
+fn type_hashes(source: Source) -> core::result::Result<Vec<[u8; 32]>, ProcessError> {
     let mut hashes = Vec::new();
     for i in 0.. {
         match load_cell_type(i, source) {
-            Ok(Some(type_script))
-                if type_script.code_hash() == ours.code_hash()
-                    && type_script.hash_type() == ours.hash_type() =>
-            {
+            Ok(Some(type_script)) => {
                 let hash: [u8; 32] = type_script.calc_script_hash().unpack();
                 if !hashes.contains(&hash) {
                     hashes.push(hash);
                 }
             }
-            Ok(_) => {}
+            Ok(None) => {}
             Err(ckb_std::error::SysError::IndexOutOfBound) => break,
             Err(_) => return Err(ProcessError::ProcessPairInvalid),
         }
@@ -185,17 +189,21 @@ fn sibling_type_hashes(
     Ok(hashes)
 }
 
-fn parse_example_transfer(
+fn parse_payment(
     index: usize,
-    args: &[u8],
-) -> core::result::Result<Option<IntentionTransfer>, ProcessError> {
-    let Ok(cid) = CidArgs::decode(args) else {
-        return Ok(None);
-    };
+    cid: &CidArgs,
+) -> core::result::Result<Option<OutputObligation>, ProcessError> {
     let Ok(beneficiary_cid) = cid.entry.payload.to_script() else {
         return Ok(None);
     };
-    let beneficiary = packed_script(&beneficiary_cid)?;
+    let lock = packed_script(&beneficiary_cid)?;
+    Ok(Some(parse_transfer(index, lock)?))
+}
+
+fn parse_transfer(
+    index: usize,
+    lock: Script,
+) -> core::result::Result<OutputObligation, ProcessError> {
     let capacity =
         load_cell_capacity(index, Source::Input).map_err(|_| ProcessError::ProcessPairInvalid)?;
     let data =
@@ -203,12 +211,12 @@ fn parse_example_transfer(
     let type_script =
         load_cell_type(index, Source::Input).map_err(|_| ProcessError::ProcessPairInvalid)?;
     validate_supported_asset(&type_script, &data)?;
-    Ok(Some(IntentionTransfer {
-        beneficiary,
+    Ok(OutputObligation {
+        lock,
         capacity,
         data,
         type_script,
-    }))
+    })
 }
 
 fn validate_supported_asset(
@@ -231,20 +239,20 @@ fn validate_supported_asset(
     }
 }
 
-fn verify_beneficiaries(intentions: &[IntentionTransfer]) -> Result<Option<&'static str>> {
+fn verify_unique_outputs(obligations: &[OutputObligation]) -> Result<Option<&'static str>> {
     let process_script = load_script().map_err(|_| ProcessError::ProcessPairInvalid)?;
     let output_count = QueryIter::new(load_cell_lock, Source::Output).count();
     let mut claimed = vec![false; output_count];
 
-    for intention in intentions {
-        claim_beneficiary(intention, &process_script, &mut claimed)?;
+    for obligation in obligations {
+        claim_output(obligation, &process_script, &mut claimed)?;
     }
 
     Ok(None)
 }
 
-fn claim_beneficiary(
-    intention: &IntentionTransfer,
+fn claim_output(
+    obligation: &OutputObligation,
     process_script: &Script,
     claimed: &mut [bool],
 ) -> core::result::Result<(), ProcessError> {
@@ -259,10 +267,10 @@ fn claim_beneficiary(
             load_cell_lock(i, Source::Output).map_err(|_| ProcessError::ProcessPairInvalid)?;
         let type_script =
             load_cell_type(i, Source::Output).map_err(|_| ProcessError::ProcessPairInvalid)?;
-        if is_sibling_process(&type_script, process_script) {
+        if is_example_process_cell(&type_script, process_script) {
             continue;
         }
-        if lock != intention.beneficiary {
+        if lock != obligation.lock {
             continue;
         }
 
@@ -271,9 +279,9 @@ fn claim_beneficiary(
             load_cell_capacity(i, Source::Output).map_err(|_| ProcessError::ProcessPairInvalid)?;
         let data =
             load_cell_data(i, Source::Output).map_err(|_| ProcessError::ProcessPairInvalid)?;
-        if capacity == intention.capacity
-            && data.as_slice() == intention.data.as_slice()
-            && type_script == intention.type_script
+        if capacity == obligation.capacity
+            && data.as_slice() == obligation.data.as_slice()
+            && type_script == obligation.type_script
         {
             *claimed_flag = true;
             return Ok(());
@@ -287,10 +295,16 @@ fn claim_beneficiary(
     }
 }
 
-fn is_sibling_process(type_script: &Option<Script>, ours: &Script) -> bool {
+/// Skip Process recreate cells of this binary (any hash_type alias).
+fn is_example_process_cell(type_script: &Option<Script>, ours: &Script) -> bool {
     type_script
         .as_ref()
-        .is_some_and(|t| t.code_hash() == ours.code_hash() && t.hash_type() == ours.hash_type())
+        .is_some_and(|t| t.code_hash() == ours.code_hash())
+}
+
+fn has_input_lock(script: &Script) -> bool {
+    let want: [u8; 32] = script.calc_script_hash().unpack();
+    QueryIter::new(load_cell_lock_hash, Source::Input).any(|hash| hash == want)
 }
 
 fn packed_script(script: &CidScript) -> core::result::Result<Script, ProcessError> {

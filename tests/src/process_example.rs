@@ -55,9 +55,13 @@ fn process_example_binary() -> Vec<u8> {
 }
 
 fn process_example_type_script(args: Vec<u8>) -> Script {
+    process_example_type_script_with(args, ScriptHashType::Data1)
+}
+
+fn process_example_type_script_with(args: Vec<u8>, hash_type: ScriptHashType) -> Script {
     Script::new_builder()
         .code_hash(blake2b_256(process_example_binary()).pack())
-        .hash_type(ScriptHashType::Data1)
+        .hash_type(hash_type)
         .args(args.pack())
         .build()
 }
@@ -487,6 +491,175 @@ async fn digest_ok_plus_unrelated_refund_succeeds() {
     verify(&rpc, skeleton, vec![])
         .await
         .expect("Process A DigestOk plus unrelated DigestIncompatible refund must succeed");
+}
+
+/// A's payload beneficiary equals B's refund user_lock. One shared C-capacity
+/// output cannot settle both the DigestOk payment and the DigestIncompatible refund.
+#[tokio::test]
+async fn reject_digest_beneficiary_shared_with_refund() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_a = seed_process_example_cell(&mut rpc, type_a.clone());
+    let user_b = always_success_script(vec![0xBB]);
+    let payload_v = always_success_script(vec![0xCC]);
+
+    let int_a = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_a), &user_b),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let int_b = seed_intention(
+        &mut rpc,
+        &skeleton,
+        encode_cid_args(
+            [0xAB; 32],
+            script_to_cid(&user_b),
+            Payload::from_script(&script_to_cid(&payload_v)).expect("payload V"),
+        ),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+
+    let digest = digest_ok::<FakeRpcClient>(outpoint_ids(&int_a), outpoint_ids(&process_a), None);
+    let refund = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&int_b),
+        user_b.into(),
+        CKB_CAPACITY,
+        None,
+    );
+    TransactionCalculator::default()
+        .instruction(digest)
+        .instruction(refund)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("payment and refund must not share one output");
+    assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
+}
+
+/// Same overlap as `reject_digest_beneficiary_shared_with_refund`, but two
+/// independent C-capacity outputs to B's user_lock settle both obligations.
+#[tokio::test]
+async fn digest_beneficiary_and_refund_independent_outputs_succeeds() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_a = seed_process_example_cell(&mut rpc, type_a.clone());
+    let user_b = always_success_script(vec![0xBB]);
+    let payload_v = always_success_script(vec![0xCC]);
+
+    let int_a = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_a), &user_b),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let int_b = seed_intention(
+        &mut rpc,
+        &skeleton,
+        encode_cid_args(
+            [0xAB; 32],
+            script_to_cid(&user_b),
+            Payload::from_script(&script_to_cid(&payload_v)).expect("payload V"),
+        ),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+
+    let digest = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&int_a),
+        outpoint_ids(&process_a),
+        Some(AddOutputCell {
+            lock_script: user_b.clone().into(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    let refund = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&int_b),
+        user_b.into(),
+        CKB_CAPACITY,
+        None,
+    );
+    TransactionCalculator::default()
+        .instruction(digest)
+        .instruction(refund)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("independent payment and refund outputs to the same lock must succeed");
+}
+
+/// Data1 and Data2 deployments of this binary are not siblings by hash_type,
+/// but they still cannot unique-assign the same beneficiary output.
+#[tokio::test]
+async fn reject_data1_data2_processes_sharing_one_beneficiary() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_a =
+        process_example_type_script_with(b"process-type-id-v0".to_vec(), ScriptHashType::Data1);
+    let type_b =
+        process_example_type_script_with(b"process-type-id-v1".to_vec(), ScriptHashType::Data2);
+    let process_a = seed_process_example_cell(&mut rpc, type_a.clone());
+    let process_b = seed_process_example_cell(&mut rpc, type_b.clone());
+    let int_a = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_a), &dest_script()),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let int_b = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_b), &dest_script()),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+
+    let first = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&int_a),
+        outpoint_ids(&process_a),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    let second = digest_ok::<FakeRpcClient>(outpoint_ids(&int_b), outpoint_ids(&process_b), None);
+    TransactionCalculator::default()
+        .instruction(first)
+        .instruction(second)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("Data1 and Data2 Processes must not share one beneficiary output");
+    assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
 }
 
 #[tokio::test]
