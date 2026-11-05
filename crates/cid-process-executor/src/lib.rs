@@ -30,13 +30,25 @@ impl ProcessExecutor {
     }
 
     /// Assemble a digest transaction for the given intentions via SSRI Process.assemble
-    pub fn assemble(&self, _intentions: &[IntentionInput]) -> Result<PartialTx, ExecutorError> {
+    pub fn assemble(&self, intentions: &[IntentionInput]) -> Result<PartialTx, ExecutorError> {
         if self.binary.is_empty() {
             return Err(ExecutorError::VmError("empty binary".into()));
         }
         
-        // Will implement after VM is complete
-        Err(ExecutorError::VmError("assemble not yet implemented".into()))
+        // Encode input: count (u32 LE) + intention data
+        // For Task 4: only send count; full encoding in Task 5
+        let mut input = Vec::new();
+        input.extend_from_slice(&(intentions.len() as u32).to_le_bytes());
+        
+        // Call SSRI Process.assemble
+        let _response = vm::call_ssri_method(&self.binary, "Process.assemble", &input)?;
+        
+        // Parse response into PartialTx
+        // Stub for Task 4: full parsing in Task 5+
+        Ok(PartialTx {
+            outputs: vec![],
+            outputs_data: vec![],
+        })
     }
 }
 
@@ -151,67 +163,65 @@ mod tests {
     }
     
     #[test]
-    fn test_real_process_binary_batch_bounds() {
-        // Smoke test: load real Process binary and call Process.batch
+    fn test_real_binary_batch_bounds() {
         let bin_path = "../../build/release/cid_process_example";
-        if let Ok(binary) = std::fs::read(bin_path) {
-            let result = vm::call_ssri_method(&binary, "Process.batch", &[]);
-            
-            match result {
-                Ok(output) => {
-                    assert_eq!(output.len(), 8, "batch output should be 8 bytes");
-                    let min = u32::from_le_bytes(output[0..4].try_into().unwrap());
-                    let max = u32::from_le_bytes(output[4..8].try_into().unwrap());
-                    assert_eq!(min, 1, "BATCH_MIN should be 1");
-                    assert_eq!(max, 4, "BATCH_MAX should be 4");
-                    println!("✓ Process.batch returned ({}, {})", min, max);
-                }
-                Err(e) => panic!("Process.batch failed: {:?}", e),
-            }
-        } else {
-            println!("⊘ Skipping: {} not found (run `make build` in contracts/cid_process_example)", bin_path);
+        if !std::path::Path::new(bin_path).exists() {
+            eprintln!("Skipping test: binary not built (run 'cd contracts/cid_process_example && make build')");
+            return;
         }
+        
+        let binary = std::fs::read(bin_path).expect("read binary");
+        let executor = ProcessExecutor::new(binary);
+        
+        let result = executor.get_batch_bounds();
+        assert!(result.is_ok(), "should query batch bounds: {:?}", result);
+        
+        let (min, max) = result.unwrap();
+        assert_eq!(min, 1, "BATCH_MIN should be 1");
+        assert_eq!(max, 4, "BATCH_MAX should be 4");
     }
     
     #[test]
-    fn test_real_process_binary_assemble_incompatible() {
-        // Smoke test: call Process.assemble with out-of-bounds count
+    fn test_assemble_validates_count() {
         let bin_path = "../../build/release/cid_process_example";
-        if let Ok(binary) = std::fs::read(bin_path) {
-            // Test count=0 (below BATCH_MIN=1)
-            let input = 0u32.to_le_bytes().to_vec();
-            let result = vm::call_ssri_method(&binary, "Process.assemble", &input);
-            
-            assert!(
-                matches!(result, Err(ExecutorError::Incompatible(21))),
-                "Expected Incompatible(21) for count=0, got {:?}",
-                result
-            );
-            println!("✓ Process.assemble(count=0) returned Incompatible(21)");
-            
-            // Test count=5 (above BATCH_MAX=4)
-            let input = 5u32.to_le_bytes().to_vec();
-            let result = vm::call_ssri_method(&binary, "Process.assemble", &input);
-            
-            assert!(
-                matches!(result, Err(ExecutorError::Incompatible(21))),
-                "Expected Incompatible(21) for count=5, got {:?}",
-                result
-            );
-            println!("✓ Process.assemble(count=5) returned Incompatible(21)");
-            
-            // Test count=2 (valid)
-            let input = 2u32.to_le_bytes().to_vec();
-            let result = vm::call_ssri_method(&binary, "Process.assemble", &input);
-            
-            assert!(
-                result.is_ok(),
-                "Expected Ok for count=2, got {:?}",
-                result
-            );
-            println!("✓ Process.assemble(count=2) succeeded");
-        } else {
-            println!("⊘ Skipping: {} not found (run `make build` in contracts/cid_process_example)", bin_path);
+        if !std::path::Path::new(bin_path).exists() {
+            eprintln!("Skipping test: binary not built");
+            return;
         }
+        
+        let binary = std::fs::read(bin_path).expect("read binary");
+        let executor = ProcessExecutor::new(binary);
+        
+        // Empty intentions (< BATCH_MIN)
+        let result = executor.assemble(&[]);
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(21))),
+            "should reject empty batch: {:?}",
+            result
+        );
+        
+        // Count=5 (> BATCH_MAX)
+        let intentions = vec![
+            IntentionInput::default(),
+            IntentionInput::default(),
+            IntentionInput::default(),
+            IntentionInput::default(),
+            IntentionInput::default(),
+        ];
+        let result = executor.assemble(&intentions);
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(21))),
+            "should reject count=5: {:?}",
+            result
+        );
+        
+        // Count=1 (valid, at BATCH_MIN)
+        let intentions = vec![IntentionInput::default()];
+        let result = executor.assemble(&intentions);
+        assert!(
+            result.is_ok(),
+            "should accept count=1: {:?}",
+            result
+        );
     }
 }

@@ -1,7 +1,7 @@
 use ckb_types::packed::{CellOutput, OutPoint};
 
 /// Input intention cell for assemble
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct IntentionInput {
     pub out_point: OutPoint,
     pub lock_args: Vec<u8>,
