@@ -100,8 +100,8 @@ In-tree sample Process (not a production SSRI daemon):
   (`Process.batch`, `Process.assemble`) and on-chain Create/Transfer Type ID,
   batch, and beneficiary Script/capacity/data/asset checks
 - Greenfield offline host `crates/cid-process-executor` (ckb-vm, argv method id)
-- Calculator `process_calculator` — `process_digest_ok` builds a skeleton with
-  intention inputs and beneficiary outputs (molecule bridge across ckb-gen-types)
+- Calculator `calculator/process` — `process_digest_ok` builds a skeleton with
+  intention inputs and beneficiary outputs (molecule `Transaction` from assemble)
 - FakeRpc tests: n=1, 2, 4 and empty / n=5 rejection (`tests/src/process_example.rs`)
 - **BATCH_MIN=1, BATCH_MAX=4**
 - Process recreate is **not** composed on the PartialTx / skeleton yet
@@ -133,8 +133,8 @@ cargo run -- --json --dry-run deploy \
 | `contracts/ckb_common_intention_dispatcher/` | On-chain Verify tree (`cinnabar_main!`) |
 | `contracts/cid_process_example/` | Sample Process (SSRI + on-chain verify) |
 | `crates/cid-process-executor/` | Offline SSRI host for the sample Process |
-| `process_calculator/` | `process_digest_ok` skeleton assembly |
-| `calculator/` | CID `Instruction::new` recipes |
+| `calculator/intention/` | CID `Instruction::new` recipes |
+| `calculator/process/` | `process_digest_ok` skeleton assembly |
 | `tests/` | FakeRpc universe (CID + `process_example`) |
 | `tests/binaries/xudt` | Real xUDT RISC-V (not always-success) |
 | `build/release/` | This lock’s RISC-V binary |

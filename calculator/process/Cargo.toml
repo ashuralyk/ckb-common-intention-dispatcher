@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 ckb-cinnabar-calculator = { workspace = true }
-cid-protocol = { path = "../protocol" }
-cid-process-executor = { path = "../crates/cid-process-executor" }
+cid-protocol = { path = "../../protocol" }
+cid-process-executor = { path = "../../crates/cid-process-executor" }

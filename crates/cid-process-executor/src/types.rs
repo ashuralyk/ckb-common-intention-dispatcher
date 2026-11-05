@@ -1,4 +1,4 @@
-use ckb_types::packed::{CellOutput, OutPoint};
+use ckb_types::packed::{CellOutput, OutPoint, Transaction};
 use ckb_types::prelude::*;
 
 /// Input intention cell for assemble
@@ -44,47 +44,50 @@ pub fn encode_intentions(intentions: &[IntentionInput]) -> Vec<u8> {
     buf
 }
 
-/// Partial transaction returned by assemble
+/// Partial transaction returned by assemble.
+///
+/// Wire format is a packed molecule `Transaction` (typically outputs +
+/// `outputs_data` only; other fields empty).
 #[derive(Clone, Debug)]
 pub struct PartialTx {
+    packed: Vec<u8>,
     pub outputs: Vec<CellOutput>,
     pub outputs_data: Vec<Vec<u8>>,
 }
 
-/// Two u32 length prefixes per output (molecule bytes + data), even if empty.
-const MIN_OUTPUT_RECORD_BYTES: usize = 8;
 /// Explicit output-count budget. Assemble only emits BATCH_MAX=4; this is a
-/// parser ceiling so a malicious `u32::MAX` count cannot allocate.
+/// parser ceiling so a malicious vector cannot allocate unbounded outputs.
 const MAX_PARTIAL_TX_OUTPUTS: usize = 256;
 const MAX_PARTIAL_TX_BYTES: usize = 1024 * 1024;
 
 impl PartialTx {
-    /// Parse PartialTx from SSRI response bytes
-    /// Format: output_count (u32 LE) + for each: output_len (u32 LE) + output_bytes + data_len (u32 LE) + data_bytes
+    /// Parse a packed molecule `Transaction` from SSRI response bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, super::ExecutorError> {
-        let mut pos = 0;
-
-        if bytes.len() < 4 {
-            return Err(super::ExecutorError::InvalidResponse(
-                "response too short for output count".into(),
-            ));
-        }
         if bytes.len() > MAX_PARTIAL_TX_BYTES {
             return Err(super::ExecutorError::InvalidResponse(
                 "response exceeds byte budget".into(),
             ));
         }
 
-        let output_count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
+        let tx = Transaction::from_slice(bytes).map_err(|e| {
+            super::ExecutorError::InvalidResponse(format!("invalid Transaction molecule: {:?}", e))
+        })?;
+        let raw = tx.raw();
+        let packed_outputs = raw.outputs();
+        let packed_data = raw.outputs_data();
+        let output_count = packed_outputs.len();
 
-        let remaining = bytes.len() - pos;
-        let max_from_len = remaining / MIN_OUTPUT_RECORD_BYTES;
-        if output_count > MAX_PARTIAL_TX_OUTPUTS || output_count > max_from_len {
+        if output_count > MAX_PARTIAL_TX_OUTPUTS {
             return Err(super::ExecutorError::InvalidResponse(format!(
-                "output count {} exceeds remaining-length budget {}",
+                "output count {} exceeds budget {}",
+                output_count, MAX_PARTIAL_TX_OUTPUTS
+            )));
+        }
+        if packed_data.len() != output_count {
+            return Err(super::ExecutorError::InvalidResponse(format!(
+                "outputs ({}) / outputs_data ({}) length mismatch",
                 output_count,
-                max_from_len.min(MAX_PARTIAL_TX_OUTPUTS)
+                packed_data.len()
             )));
         }
 
@@ -97,66 +100,24 @@ impl PartialTx {
             super::ExecutorError::InvalidResponse("output data vec reserve failed".into())
         })?;
 
-        for _ in 0..output_count {
-            // Read output length
-            if pos + 4 > bytes.len() {
-                return Err(super::ExecutorError::InvalidResponse(
-                    "truncated output length".into(),
-                ));
-            }
-            let output_len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-            pos += 4;
-
-            // Read output bytes
-            if pos + output_len > bytes.len() {
-                return Err(super::ExecutorError::InvalidResponse(
-                    "truncated output bytes".into(),
-                ));
-            }
-            let output = CellOutput::from_slice(&bytes[pos..pos + output_len]).map_err(|e| {
-                super::ExecutorError::InvalidResponse(format!(
-                    "invalid CellOutput molecule: {:?}",
-                    e
-                ))
-            })?;
-            pos += output_len;
+        for output in packed_outputs.into_iter() {
             outputs.push(output);
-
-            // Read data length
-            if pos + 4 > bytes.len() {
-                return Err(super::ExecutorError::InvalidResponse(
-                    "truncated data length".into(),
-                ));
-            }
-            let data_len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-            pos += 4;
-
-            // Read data bytes
-            if pos + data_len > bytes.len() {
-                return Err(super::ExecutorError::InvalidResponse(
-                    "truncated data bytes".into(),
-                ));
-            }
-            outputs_data.push(bytes[pos..pos + data_len].to_vec());
-            pos += data_len;
+        }
+        for data in packed_data.into_iter() {
+            let unpacked: Vec<u8> = data.unpack();
+            outputs_data.push(unpacked);
         }
 
         Ok(PartialTx {
+            packed: bytes.to_vec(),
             outputs,
             outputs_data,
         })
     }
 
-    /// Molecule wire bytes for each output plus its data.
-    ///
-    /// Lets host crates (e.g. the Process calculator) reconstruct CellOutput
-    /// with a different ckb-gen-types version without importing Entity.
-    pub fn output_molecule_pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        self.outputs
-            .iter()
-            .zip(self.outputs_data.iter())
-            .map(|(output, data)| (output.as_slice().to_vec(), data.clone()))
-            .collect()
+    /// Original packed molecule `Transaction` bytes.
+    pub fn as_molecule_bytes(&self) -> &[u8] {
+        &self.packed
     }
 }
 

@@ -174,6 +174,24 @@ mod tests {
         );
     }
 
+    fn pack_molecule_tx(
+        outputs: Vec<ckb_types::packed::CellOutput>,
+        outputs_data: Vec<Vec<u8>>,
+    ) -> Vec<u8> {
+        use ckb_types::packed::{RawTransaction, Transaction};
+        use ckb_types::prelude::{Builder, Entity, Pack, PackVec};
+        Transaction::new_builder()
+            .raw(
+                RawTransaction::new_builder()
+                    .outputs(outputs.pack())
+                    .outputs_data(outputs_data.iter().map(|d| d.as_slice().pack()).pack())
+                    .build(),
+            )
+            .build()
+            .as_slice()
+            .to_vec()
+    }
+
     #[test]
     fn test_partial_tx_rejects_malicious_output_count() {
         // 4-byte 0xffffffff used to Vec::with_capacity(u32::MAX) before length checks.
@@ -188,9 +206,97 @@ mod tests {
 
     #[test]
     fn test_partial_tx_zero_outputs() {
-        let parsed = PartialTx::from_bytes(&[0, 0, 0, 0]).expect("zero count is empty tx");
+        let parsed = PartialTx::from_bytes(&pack_molecule_tx(Vec::new(), Vec::new()))
+            .expect("empty molecule Transaction");
         assert!(parsed.outputs.is_empty());
         assert!(parsed.outputs_data.is_empty());
+    }
+
+    #[test]
+    fn test_partial_tx_parses_molecule_transaction() {
+        use ckb_types::packed::{Byte32, CellOutput, Script};
+        use ckb_types::prelude::{Builder, Entity, Pack, Unpack};
+
+        let lock = Script::new_builder()
+            .code_hash(Byte32::from_slice(&[0x11; 32]).unwrap())
+            .hash_type(1u8.into())
+            .args([0xAA, 0xBB].pack())
+            .build();
+        let output = CellOutput::new_builder()
+            .capacity(100_000_000_000u64.pack())
+            .lock(lock)
+            .build();
+        let data = vec![0xcc, 0xdd];
+        let bytes = pack_molecule_tx(vec![output.clone()], vec![data.clone()]);
+
+        let parsed = PartialTx::from_bytes(&bytes).expect("parse molecule Transaction");
+        assert_eq!(parsed.as_molecule_bytes(), bytes.as_slice());
+        assert_eq!(parsed.outputs.len(), 1);
+        assert_eq!(parsed.outputs[0].as_slice(), output.as_slice());
+        assert_eq!(parsed.outputs_data[0], data);
+        let cap: u64 = parsed.outputs[0].capacity().unpack();
+        assert_eq!(cap, 100_000_000_000);
+    }
+
+    #[test]
+    fn test_partial_tx_rejects_legacy_length_prefix() {
+        // Old wire: output_count u32 LE + per-output (output_len + data_len).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let result = PartialTx::from_bytes(&bytes);
+        assert!(
+            matches!(result, Err(ExecutorError::InvalidResponse(_))),
+            "legacy envelope must be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_partial_tx_rejects_oversized_response() {
+        let bytes = vec![0u8; 1024 * 1024 + 1];
+        let result = PartialTx::from_bytes(&bytes);
+        assert!(
+            matches!(result, Err(ExecutorError::InvalidResponse(_))),
+            "oversized response must be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_partial_tx_rejects_too_many_outputs() {
+        use ckb_types::packed::CellOutput;
+        let outputs = vec![CellOutput::default(); 257];
+        let data = vec![Vec::new(); 257];
+        let bytes = pack_molecule_tx(outputs, data);
+        let result = PartialTx::from_bytes(&bytes);
+        assert!(
+            matches!(result, Err(ExecutorError::InvalidResponse(_))),
+            "output count above budget must be rejected, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_partial_tx_rejects_outputs_data_length_mismatch() {
+        use ckb_types::packed::{CellOutput, RawTransaction, Transaction};
+        use ckb_types::prelude::{Builder, Entity, PackVec};
+        let bytes = Transaction::new_builder()
+            .raw(
+                RawTransaction::new_builder()
+                    .outputs(vec![CellOutput::default()].pack())
+                    .build(),
+            )
+            .build()
+            .as_slice()
+            .to_vec();
+        let result = PartialTx::from_bytes(&bytes);
+        assert!(
+            matches!(result, Err(ExecutorError::InvalidResponse(_))),
+            "mismatched outputs / outputs_data must be rejected, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -405,7 +511,7 @@ mod tests {
         let type_script = Script::new_builder()
             .code_hash(Byte32::from_slice(&XUDT_CODE_HASH).unwrap())
             .hash_type(2u8.into())
-            .args(vec![0x33; 32].pack())
+            .args([0x33; 32].as_slice().pack())
             .build();
         let amount = 1_000u128.to_le_bytes()[..XUDT_AMOUNT_LEN].to_vec();
         let partial = executor

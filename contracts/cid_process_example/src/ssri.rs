@@ -4,7 +4,7 @@ use crate::ProcessError;
 use alloc::vec::Vec;
 use cid_protocol::CidArgs;
 use ckb_cinnabar_verifier::ssri::{SsriArgs, SsriSource};
-use ckb_std::ckb_types::packed::{Byte32, Bytes, CellOutput, Script};
+use ckb_std::ckb_types::packed::{Byte32, Bytes, CellOutput, RawTransaction, Script, Transaction};
 use ckb_std::ckb_types::prelude::*;
 
 const BATCH_MIN: u32 = 1;
@@ -170,20 +170,16 @@ pub fn assemble_handler(
         outputs_data.push(data);
     }
 
-    // Serialize PartialTx
-    // Format: output_count (u32 LE) + for each: output_len (u32 LE) + output_bytes + data_len (u32 LE) + data_bytes
-    let mut response = Vec::new();
-    response.extend_from_slice(&(outputs.len() as u32).to_le_bytes());
-
-    for (output, data) in outputs.iter().zip(outputs_data.iter()) {
-        let output_bytes = output.as_slice();
-        response.extend_from_slice(&(output_bytes.len() as u32).to_le_bytes());
-        response.extend_from_slice(output_bytes);
-        response.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        response.extend_from_slice(data);
-    }
-
-    Ok(response)
+    // Packed molecule Transaction: outputs + outputs_data; other fields empty.
+    let tx = Transaction::new_builder()
+        .raw(
+            RawTransaction::new_builder()
+                .outputs(outputs.pack())
+                .outputs_data(outputs_data.into_iter().map(Bytes::from).pack())
+                .build(),
+        )
+        .build();
+    Ok(tx.as_slice().to_vec())
 }
 
 /// Prefer the Script encoded in `CidEntry.payload`; fall back to the
