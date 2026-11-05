@@ -73,4 +73,11 @@ mod tests {
             Err(ExecutorError::VmError(_))
         ));
     }
+
+    #[test]
+    fn test_vm_error_on_invalid_binary() {
+        let executor = ProcessExecutor::new(vec![0xFF; 100]);
+        let result = executor.get_batch_bounds();
+        assert!(matches!(result, Err(ExecutorError::VmError(_))));
+    }
 }
