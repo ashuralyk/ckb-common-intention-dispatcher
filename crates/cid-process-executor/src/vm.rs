@@ -1,5 +1,6 @@
 use crate::{ExecutorError, CUSTOM_ERROR_START};
 use ckb_hash::blake2b_256;
+use ckb_vm::cost_model::estimate_cycles;
 use ckb_vm::registers::{A0, A1, A2, A7};
 use ckb_vm::{
     Bytes, CoreMachine, DefaultCoreMachine, DefaultMachineBuilder, Error as VmError, Memory,
@@ -10,6 +11,8 @@ use std::sync::{Arc, Mutex};
 
 pub const SSRI_VM_VERSION: u64 = u64::MAX;
 const MAX_CYCLES: u64 = 70_000_000;
+/// Cap captured stdout / pipe buffers so a looping guest cannot grow host RAM.
+const MAX_HOST_BUFFER: usize = 1024 * 1024;
 
 /// Syscall numbers (Linux-style, for fixture tests)
 const SYS_READ: u64 = 63;
@@ -55,6 +58,30 @@ impl SsriSyscalls {
     }
 }
 
+fn append_capped(buf: &mut Vec<u8>, data: &[u8]) -> Result<(), VmError> {
+    let new_len = buf.len().saturating_add(data.len());
+    if new_len > MAX_HOST_BUFFER {
+        return Err(VmError::External("host buffer cap exceeded".into()));
+    }
+    buf.try_reserve(data.len())
+        .map_err(|_| VmError::External("host buffer reserve failed".into()))?;
+    buf.extend_from_slice(data);
+    Ok(())
+}
+
+fn load_guest_bytes<Mac: SupportMachine>(
+    machine: &mut Mac,
+    addr: u64,
+    len: u64,
+) -> Result<Bytes, VmError> {
+    if len as usize > MAX_HOST_BUFFER {
+        return Err(VmError::External(
+            "guest write exceeds host buffer cap".into(),
+        ));
+    }
+    machine.memory_mut().load_bytes(addr, len)
+}
+
 impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
     fn initialize(&mut self, _machine: &mut Mac) -> Result<(), VmError> {
         Ok(())
@@ -91,9 +118,8 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 let len = machine.registers()[A2].to_u64();
 
                 if fd == 1 {
-                    // stdout
-                    let buf = machine.memory_mut().load_bytes(buf_addr, len)?;
-                    self.output.lock().unwrap().extend_from_slice(&buf);
+                    let buf = load_guest_bytes(machine, buf_addr, len)?;
+                    append_capped(&mut self.output.lock().unwrap(), &buf)?;
                     machine.set_register(A0, Mac::REG::from_u64(len));
                 } else {
                     machine.set_register(A0, Mac::REG::from_u64(len));
@@ -135,16 +161,13 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 let len_bytes = machine.memory_mut().load_bytes(len_ptr, 8)?;
                 let len = u64::from_le_bytes(len_bytes.as_ref().try_into().unwrap()) as usize;
 
-                let data = machine.memory_mut().load_bytes(buf_ptr, len as u64)?;
+                let data = load_guest_bytes(machine, buf_ptr, len as u64)?;
 
-                // Check if fd is a pipe write-end
                 if let Some(pipe) = self.pipes.lock().unwrap().get_mut(&fd) {
-                    pipe.buffer.extend_from_slice(&data);
-                    // Capture pipe output as SSRI stdout
-                    self.output.lock().unwrap().extend_from_slice(&data);
+                    append_capped(&mut pipe.buffer, &data)?;
+                    append_capped(&mut self.output.lock().unwrap(), &data)?;
                 } else if fd == 1 {
-                    // stdout
-                    self.output.lock().unwrap().extend_from_slice(&data);
+                    append_capped(&mut self.output.lock().unwrap(), &data)?;
                 }
 
                 // Write back length
@@ -257,15 +280,25 @@ pub fn call_ssri_method(
     method_path: &str,
     input: &[u8],
 ) -> Result<Vec<u8>, ExecutorError> {
+    call_ssri_method_with_cycles(binary, method_path, input, MAX_CYCLES)
+}
+
+pub fn call_ssri_method_with_cycles(
+    binary: &[u8],
+    method_path: &str,
+    input: &[u8],
+    max_cycles: u64,
+) -> Result<Vec<u8>, ExecutorError> {
     let syscalls = SsriSyscalls::new(input.to_vec());
     let output_handle = syscalls.output.clone();
     let exit_handle = syscalls.exit_code.clone();
 
     let isa = ISA_IMC | ISA_A | ISA_B | ISA_MOP;
     let core_machine =
-        DefaultCoreMachine::<u64, SparseMemory<u64>>::new(isa, SSRI_VM_VERSION as u32, MAX_CYCLES);
+        DefaultCoreMachine::<u64, SparseMemory<u64>>::new(isa, SSRI_VM_VERSION as u32, max_cycles);
 
     let mut machine = DefaultMachineBuilder::new(core_machine)
+        .instruction_cycle_func(Box::new(estimate_cycles))
         .syscall(Box::new(syscalls))
         .build();
 
@@ -290,6 +323,7 @@ pub fn call_ssri_method(
 
     // Check result and exit code
     match result {
+        Err(VmError::CyclesExceeded) => Err(ExecutorError::CyclesExceeded),
         Ok(_) | Err(VmError::InvalidEcall(SYS_EXIT)) => {
             // Program exited (either via sys_exit or naturally)
             // Use final_code which is either from SYS_EXIT or from register a0

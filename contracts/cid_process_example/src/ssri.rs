@@ -2,6 +2,7 @@ extern crate alloc;
 
 use crate::ProcessError;
 use alloc::vec::Vec;
+use cid_protocol::CidArgs;
 use ckb_cinnabar_verifier::ssri::{SsriArgs, SsriSource};
 use ckb_std::ckb_types::packed::{Byte32, Bytes, CellOutput, Script};
 use ckb_std::ckb_types::prelude::*;
@@ -125,7 +126,7 @@ pub fn assemble_handler(
     pos += 4;
 
     // Validate batch bounds
-    if count < BATCH_MIN || count > BATCH_MAX {
+    if !(BATCH_MIN..=BATCH_MAX).contains(&count) {
         return Err(ProcessError::IncompatibleBatch);
     }
 
@@ -137,12 +138,7 @@ pub fn assemble_handler(
         let (capacity, lock_args, data, next_pos) = parse_intention(input, pos)?;
         pos = next_pos;
 
-        // Create beneficiary output
-        let lock = Script::new_builder()
-            .code_hash(Byte32::from_slice(&DEFAULT_LOCK_CODE_HASH).unwrap())
-            .hash_type(0u8)
-            .args(Bytes::from(lock_args))
-            .build();
+        let lock = beneficiary_lock(lock_args);
 
         let output = CellOutput::new_builder()
             .capacity(capacity)
@@ -167,4 +163,26 @@ pub fn assemble_handler(
     }
 
     Ok(response)
+}
+
+/// Prefer the Script encoded in `CidEntry.payload`; fall back to the
+/// placeholder lock used by host unit tests that pass raw `lock_args`.
+fn beneficiary_lock(lock_args: Vec<u8>) -> Script {
+    if let Ok(cid) = CidArgs::decode(&lock_args) {
+        if let Ok(script) = cid.entry.payload.to_script() {
+            if let Ok(code_hash) = Byte32::from_slice(&script.code_hash) {
+                return Script::new_builder()
+                    .code_hash(code_hash)
+                    .hash_type(script.hash_type)
+                    .args(Bytes::from(script.args))
+                    .build();
+            }
+        }
+    }
+
+    Script::new_builder()
+        .code_hash(Byte32::from_slice(&DEFAULT_LOCK_CODE_HASH).unwrap())
+        .hash_type(0u8)
+        .args(Bytes::from(lock_args))
+        .build()
 }

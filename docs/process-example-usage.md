@@ -4,9 +4,10 @@ Sample Process implementation for CID v0.1: an offline SSRI host, a RISC-V
 Process with `cinnabar_main!` SSRI handlers, and FakeRpc tests that call
 `process_digest_ok` against the real binary.
 
-This is **not** a production Process. Beneficiary locks use a placeholder
-code hash; Process recreate is **not** yet emitted on the PartialTx /
-skeleton (Type ID pair is checked on-chain when that cell is present).
+This is **not** a production Process. Process recreate is **not** yet emitted
+on the PartialTx / skeleton. On-chain, Create initializes Type ID args via
+`calc_type_id`; Transfer checks the 1→1 pair, batch bounds, and beneficiary
+Script / capacity / data / supported assets from each CID payload.
 
 ## Components
 
@@ -65,8 +66,10 @@ cd tests && cargo test process_example -- --nocapture
 ```
 
 `require_binaries()` fails loudly if the CID or Process binary is missing.
-Two tests stay `#[ignore]`: `reject_wrong_beneficiary` and
-`reject_missing_type_id_pair` (need full on-chain FakeRpc verify).
+One test stays `#[ignore]`: `reject_missing_type_id_pair` — the Process type
+script does not execute when the Process cell is absent (CID reports
+`ERROR_PROCESS_MISMATCH` instead). `reject_wrong_beneficiary` and
+amount/data/asset mismatch tests run on-chain.
 
 ## Batch configuration
 
@@ -85,8 +88,9 @@ custom exit ≥ 20 to `ExecutorError::Incompatible` (e.g. 21 for
 - **Process.batch** — 8 LE bytes: `min` then `max` → `(1, 4)`
 - **Process.assemble** — stdin: `count` + length-prefixed intentions
   (`capacity`, `lock_args`, `data`). Returns serialized PartialTx:
-  beneficiary `CellOutput`s (placeholder lock code hash + intention
-  `lock_args`) plus output data.
+  beneficiary `CellOutput`s. When `lock_args` decode as CID args, the lock
+  is the `CidEntry.payload` Script; otherwise a placeholder code hash plus
+  the raw `lock_args` (host unit tests).
 
 Host argv[0] is the hex-encoded blake2b method id (not the UTF-8 path).
 
@@ -104,7 +108,11 @@ let partial_tx = executor.assemble(&intentions)?;
 
 - `ExecutorError::Incompatible(code)` — Process rejected the batch (exit ≥ 20)
 - `ExecutorError::VmError` — VM / load failure
-- `ExecutorError::InvalidResponse` — SSRI payload parse failure
+- `ExecutorError::CyclesExceeded` — guest hit the instruction cycle budget
+  (`estimate_cycles`; default `MAX_CYCLES = 70_000_000`). Host stdout/pipe
+  buffers are capped at 1 MiB.
+- `ExecutorError::InvalidResponse` — SSRI payload parse failure (including
+  output-count / byte-budget guards in `PartialTx::from_bytes`)
 
 ## Calculator and molecule bridge
 
@@ -125,15 +133,23 @@ OutPoint is used on the skeleton; the executor `OutPoint` in
 
 ## On-chain verification (Process type)
 
-`verify.rs` (custom errors 30–32):
+`verify.rs` (custom errors 30–35):
 
-1. Type ID pair: exactly 1 GroupInput + 1 GroupOutput with the Process type
-2. Intention count in `[1, 4]` (CID lock args prefix = Process type hash,
-   `args.len() > 32`)
-3. All outputs counted via `load_cell_lock`; require
-   `output_count >= intention_count + 1` (beneficiaries + Process)
+1. **Create** (0 type-group inputs, 1 output): Type ID args must be 32 bytes
+   and equal `calc_type_id(output_index)`. No intention batch on Create.
+2. **Transfer** (1→1 type-group pair): intention count in `[1, 4]`; each CID
+   payload must decode to a beneficiary Script whose matching unused output
+   has the same lock, capacity, data, and type (CKB or official xUDT).
+3. **Burn** is rejected (`ProcessPairInvalid`).
 
-Full FakeRpc on-chain reject paths are the ignored Task 10 placeholders.
+| Code | Error |
+|------|--------|
+| 30 | `ProcessPairInvalid` |
+| 31 | `BatchCountInvalid` |
+| 32 | `BeneficiaryMissing` |
+| 33 | `BeneficiaryAmountMismatch` |
+| 34 | `UnsupportedAsset` |
+| 35 | `TypeIdInvalid` |
 
 ## Architecture
 
@@ -148,12 +164,13 @@ TransactionSkeleton: intention inputs + beneficiary outputs
         │  (Process recreate not composed yet)
         ▼
 On-chain (when a full tx is submitted):
-  CID lock basic rules; Process type: pair, batch [1,4], beneficiary count
+  CID lock basic rules; Process type: Create Type ID init, or Transfer
+  1→1 pair + batch [1,4] + beneficiary Script/capacity/data/asset
 ```
 
 ## What is deferred
 
 - Process consume + recreate cell on PartialTx / skeleton
-- Real beneficiary Script from CID payload (placeholder `DEFAULT_LOCK_CODE_HASH`)
 - Official SSRI daemon (this host is greenfield, not vendored ssri-server)
-- Ignored FakeRpc tests for wrong beneficiary / missing Type ID pair
+- Ignored FakeRpc test `reject_missing_type_id_pair` (Process type does not
+  run when the Process cell is absent)

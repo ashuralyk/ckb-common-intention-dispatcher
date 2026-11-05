@@ -44,6 +44,13 @@ pub struct PartialTx {
     pub outputs_data: Vec<Vec<u8>>,
 }
 
+/// Two u32 length prefixes per output (molecule bytes + data), even if empty.
+const MIN_OUTPUT_RECORD_BYTES: usize = 8;
+/// Explicit output-count budget. Assemble only emits BATCH_MAX=4; this is a
+/// parser ceiling so a malicious `u32::MAX` count cannot allocate.
+const MAX_PARTIAL_TX_OUTPUTS: usize = 256;
+const MAX_PARTIAL_TX_BYTES: usize = 1024 * 1024;
+
 impl PartialTx {
     /// Parse PartialTx from SSRI response bytes
     /// Format: output_count (u32 LE) + for each: output_len (u32 LE) + output_bytes + data_len (u32 LE) + data_bytes
@@ -55,12 +62,33 @@ impl PartialTx {
                 "response too short for output count".into(),
             ));
         }
+        if bytes.len() > MAX_PARTIAL_TX_BYTES {
+            return Err(super::ExecutorError::InvalidResponse(
+                "response exceeds byte budget".into(),
+            ));
+        }
 
         let output_count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
 
-        let mut outputs = Vec::with_capacity(output_count);
-        let mut outputs_data = Vec::with_capacity(output_count);
+        let remaining = bytes.len() - pos;
+        let max_from_len = remaining / MIN_OUTPUT_RECORD_BYTES;
+        if output_count > MAX_PARTIAL_TX_OUTPUTS || output_count > max_from_len {
+            return Err(super::ExecutorError::InvalidResponse(format!(
+                "output count {} exceeds remaining-length budget {}",
+                output_count,
+                max_from_len.min(MAX_PARTIAL_TX_OUTPUTS)
+            )));
+        }
+
+        let mut outputs = Vec::new();
+        let mut outputs_data = Vec::new();
+        outputs.try_reserve(output_count).map_err(|_| {
+            super::ExecutorError::InvalidResponse("output vec reserve failed".into())
+        })?;
+        outputs_data.try_reserve(output_count).map_err(|_| {
+            super::ExecutorError::InvalidResponse("output data vec reserve failed".into())
+        })?;
 
         for _ in 0..output_count {
             // Read output length
@@ -132,6 +160,8 @@ pub enum ExecutorError {
     Incompatible(i8),
     /// VM execution failed
     VmError(String),
+    /// Guest exceeded the instruction cycle budget
+    CyclesExceeded,
     /// SSRI response invalid
     InvalidResponse(String),
 }
@@ -143,6 +173,7 @@ impl std::fmt::Display for ExecutorError {
                 write!(f, "Process rejected batch (exit {})", code)
             }
             ExecutorError::VmError(msg) => write!(f, "VM error: {}", msg),
+            ExecutorError::CyclesExceeded => write!(f, "VM cycle budget exceeded"),
             ExecutorError::InvalidResponse(msg) => write!(f, "Invalid SSRI response: {}", msg),
         }
     }

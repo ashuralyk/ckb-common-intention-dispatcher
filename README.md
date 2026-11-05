@@ -97,7 +97,8 @@ To build CID and the Process example into `build/release/` without a full
 In-tree sample Process (not a production SSRI daemon):
 
 - RISC-V contract `contracts/cid_process_example` with `cinnabar_main!` SSRI
-  (`Process.batch`, `Process.assemble`) and on-chain Type ID / batch / beneficiary checks
+  (`Process.batch`, `Process.assemble`) and on-chain Create/Transfer Type ID,
+  batch, and beneficiary Script/capacity/data/asset checks
 - Greenfield offline host `crates/cid-process-executor` (ckb-vm, argv method id)
 - Calculator `process_calculator` — `process_digest_ok` builds a skeleton with
   intention inputs and beneficiary outputs (molecule bridge across ckb-gen-types)

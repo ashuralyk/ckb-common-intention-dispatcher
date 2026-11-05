@@ -164,6 +164,36 @@ mod tests {
     }
 
     #[test]
+    fn test_looping_guest_hits_cycle_budget() {
+        let binary = include_bytes!("../tests/fixtures/infinite_loop.elf");
+        let result = vm::call_ssri_method_with_cycles(binary, "test.method", &[], 10_000);
+        assert!(
+            matches!(result, Err(ExecutorError::CyclesExceeded)),
+            "looping guest must stop at the cycle budget, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_partial_tx_rejects_malicious_output_count() {
+        // 4-byte 0xffffffff used to Vec::with_capacity(u32::MAX) before length checks.
+        let bytes = [0xff, 0xff, 0xff, 0xff];
+        let result = PartialTx::from_bytes(&bytes);
+        assert!(
+            matches!(result, Err(ExecutorError::InvalidResponse(_))),
+            "malicious short response must be InvalidResponse, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_partial_tx_zero_outputs() {
+        let parsed = PartialTx::from_bytes(&[0, 0, 0, 0]).expect("zero count is empty tx");
+        assert!(parsed.outputs.is_empty());
+        assert!(parsed.outputs_data.is_empty());
+    }
+
+    #[test]
     fn test_real_binary_batch_bounds() {
         let bin_path = "../../build/release/cid_process_example";
         if !std::path::Path::new(bin_path).exists() {

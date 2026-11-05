@@ -115,6 +115,23 @@ impl CidArgs {
     }
 }
 
+impl Payload {
+    /// Encode a beneficiary [`Script`] into opaque payload bytes.
+    ///
+    /// Process example: `CidEntry.payload` is this molecule table, not a
+    /// free-form string. CID itself still treats `data` as opaque.
+    pub fn from_script(script: &Script) -> Result<Self, CodecError> {
+        Ok(Self {
+            data: serde_molecule::to_vec(script, false).map_err(|_| CodecError::Encode)?,
+        })
+    }
+
+    /// Decode a beneficiary [`Script`] from payload bytes.
+    pub fn to_script(&self) -> Result<Script, CodecError> {
+        serde_molecule::from_slice(&self.data, false).map_err(|_| CodecError::Decode)
+    }
+}
+
 /// `process_type_hash[32] || molecule_table(entry)`.
 pub fn encode_args(process_type_hash: &[u8; 32], entry: &CidEntry) -> Result<Vec<u8>, CodecError> {
     let body = serde_molecule::to_vec(entry, false).map_err(|_| CodecError::Encode)?;
@@ -173,5 +190,16 @@ mod tests {
         args.entry.version = 7;
         let bytes = encode_args(&args.process_type_hash, &args.entry).unwrap();
         assert_eq!(CidArgs::decode(&bytes), Err(CodecError::Version));
+    }
+
+    #[test]
+    fn script_payload_roundtrip() {
+        let script = Script {
+            code_hash: [0xAB; 32],
+            hash_type: SCRIPT_HASH_TYPE_DATA1,
+            args: alloc::vec![1, 2, 3, 4],
+        };
+        let payload = Payload::from_script(&script).unwrap();
+        assert_eq!(payload.to_script().unwrap(), script);
     }
 }
