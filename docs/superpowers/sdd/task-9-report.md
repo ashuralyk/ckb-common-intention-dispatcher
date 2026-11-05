@@ -5,7 +5,7 @@ Task 9 adds n=1, n=2, and n=4 digest tests that call `process_digest_ok` against
 
 ## Git Context
 - **Base SHA**: `33077fb824b63578f4c5d546b898ba1a9fa48d36` (Task 8 approved)
-- **Head SHA**: (set after commit)
+- **Head SHA**: `a8834b95210c1158e3a599a5309a7058e381e7c8` (code; docs SHA follows)
 - **Branch**: `cursor/cid-process-example-c952`
 - **PR**: #6 targeting `main`
 
