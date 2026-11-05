@@ -5,7 +5,7 @@ Task 8 adds Process example test infrastructure to the existing `tests/` crate. 
 
 ## Git Context
 - **Base SHA**: `f5bf15aaffb1dcd4ec52646e2dcacc72b1af60ed` (Task 7 approved)
-- **Head SHA**: (set after commit)
+- **Head SHA**: `b4f64b48189bf8f89f875e3104c78126096fc37e` (code; docs SHA follows)
 - **Branch**: `cursor/cid-process-example-c952`
 - **PR**: #6 targeting `main`
 
