@@ -423,6 +423,107 @@ Per the plan:
    - Capacity/data validation per beneficiary
    - More granular error codes (which beneficiary failed, etc.)
 
+## Task 6 Review Fix
+
+**Review HEAD**: `11d28099cf71e41664f260ac097ba05d8a6335a4`
+**Fixed HEAD**: `b619c1265ee0cb7ca42b2f6187ebf56beb2f6f12`
+
+### Issue Identified
+`verify_beneficiaries_exist` used `QueryIter::new(load_cell_type, Source::Output)` which **skips cells without a type script**. Since Task 5 beneficiary outputs have no type script, they were invisible to the verification.
+
+**Bug consequences**:
+- **n ≥ 2 intentions**: Verification failed even with correct beneficiary cells (only counted Process cell = 1)
+- **n = 1 intention**: Verification passed with only Process cell and **zero beneficiaries**
+
+This defeated the purpose of the beneficiary existence check.
+
+### Fixes Applied
+
+**1. Count ALL outputs via load_cell_lock** (commit `b619c12`)
+
+Changed from:
+```rust
+let output_count = QueryIter::new(load_cell_type, Source::Output).count();
+if output_count < intention_count {
+    return Err(ProcessError::BeneficiaryMissing.into());
+}
+```
+
+To:
+```rust
+// Count ALL outputs (including typeless beneficiaries) via load_cell_lock
+// load_cell_type would skip typeless cells, making beneficiaries invisible
+let output_count = QueryIter::new(load_cell_lock, Source::Output).count();
+
+// Require: intention_count beneficiary outputs + 1 Process output
+// verify_type_id_pair already ensures the Process output exists
+if output_count < intention_count + 1 {
+    return Err(ProcessError::BeneficiaryMissing.into());
+}
+```
+
+**Why load_cell_lock**:
+- `load_cell_lock` succeeds on **all cells** (every cell has a lock)
+- `load_cell_type` fails with `ItemMissing` on typeless cells → QueryIter skips them
+- Beneficiary cells from Task 5 have no type script (only lock + data)
+
+**Threshold change**: `< intention_count + 1` instead of `< intention_count`
+- Matches plan: beneficiaries (n) + Process recreate (1)
+- `verify_type_id_pair` already requires Process output exists
+- Correct accounting: total outputs = n beneficiaries + 1 Process
+
+**2. Tighten intention args check** (commit `b619c12`)
+
+Changed from:
+```rust
+if args.len() >= PROCESS_TYPE_HASH_LEN {  // exactly 32 bytes would count
+```
+
+To:
+```rust
+if args.len() > PROCESS_TYPE_HASH_LEN {  // requires CidEntry payload
+```
+
+**Reasoning**:
+- CID lock format: `process_type_hash[32] + molecule(CidEntry)`
+- Lock args with exactly 32 bytes have no CidEntry payload
+- Proper intention inputs must have `len > 32` (type hash + non-empty payload)
+- Aligns with plan specification
+
+### Verification
+
+**Build**: ✅
+```
+$ make build
+Finished `release` profile [optimized] target(s) in 1.01s
+```
+
+**Tests**: ✅ All executor tests green
+```
+$ cargo test -p cid-process-executor
+running 13 tests
+test result: ok. 12 passed; 0 failed; 1 ignored
+```
+
+**Binary size**: 73 KB (unchanged - fix is logic-only, no code size impact)
+
+### Impact Analysis
+
+**Before fix**:
+- Beneficiary cells invisible → always counted as 0
+- Check: `1 < intention_count` → fails for n ≥ 2, passes for n = 1
+- Transaction could succeed with missing beneficiaries (for n = 1)
+
+**After fix**:
+- Beneficiary cells properly counted
+- Check: `total_outputs < n + 1` → requires all beneficiaries + Process
+- Transaction correctly fails if beneficiaries missing
+
+**Test coverage note**: Current executor tests verify SSRI `assemble()` functionality off-chain. On-chain verification tests would require:
+- Constructing full CKB transactions with Process cells
+- Testing verification failure paths (missing beneficiaries, wrong counts)
+- Deferred to integration testing with Process Calculator / FakeRpc
+
 ## Conclusion
 
 Task 6 successfully implements on-chain Type ID and batch verification in the Process contract. The verification enforces three critical invariants:
@@ -430,6 +531,8 @@ Task 6 successfully implements on-chain Type ID and batch verification in the Pr
 2. Intention batch bounds (1-4 intentions)
 3. Beneficiary output existence (sufficient outputs for all intentions)
 
+**Review fix applied**: Corrected beneficiary counting to use `load_cell_lock` (counts all outputs including typeless beneficiaries) and proper threshold `intention_count + 1`.
+
 All tests pass (12 passed, 1 ignored), contract builds successfully (73 KB), and executor SSRI tests remain green. The verification is properly integrated into cinnabar's verification tree and will execute on-chain when the Process contract is invoked.
 
-**Status**: READY FOR REVIEW
+**Status**: REVIEW FIX COMPLETE
