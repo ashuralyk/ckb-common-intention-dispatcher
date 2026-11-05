@@ -5,7 +5,7 @@ Task 11 adds `scripts/build-all-contracts.sh`, `docs/process-example-usage.md`, 
 
 ## Git Context
 - **Base SHA**: `fb21a31587fb4be21682c340a6872e817104602a` (Task 10 approved)
-- **Head SHA**: (set after commit)
+- **Head SHA**: `0f5a770c7b4a6892d77030ad806202baca314a8a`
 - **Branch**: `cursor/cid-process-example-c952`
 - **PR**: #6 targeting `main`
 
