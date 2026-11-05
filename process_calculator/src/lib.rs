@@ -55,10 +55,10 @@ pub fn load_process_binary(bin_dir: &str) -> Result<Vec<u8>> {
 
 /// Process digest calculation: validates batch and prepares transaction skeleton
 ///
-/// Note: Currently builds skeleton with intention inputs only.
-/// Beneficiary outputs from executor.assemble() are validated but not yet added to skeleton
-/// due to ckb-gen-types version mismatch between executor (0.119.0) and calculator (1.1.2).
-/// Full output integration will be added with Process recreate logic in FakeRpc integration.
+/// Builds a skeleton with intention inputs plus beneficiary outputs from
+/// `executor.assemble()`. CellOutput types are bridged across ckb-gen-types
+/// versions via molecule wire bytes (`PartialTx::output_molecule_pairs`).
+/// Process recreate remains deferred (Task 5 carry-forward).
 pub fn process_digest_ok<T: RPC>(
     _rpc: &T,
     intentions: Vec<IntentionCell>,
@@ -85,8 +85,8 @@ pub fn process_digest_ok<T: RPC>(
     let inputs: Vec<IntentionInput> = intentions.iter().map(|c| c.to_intention_input())
         .collect::<Result<Vec<_>>>()?;
     
-    // Call executor assemble to validate and get beneficiary count
-    let _partial_tx = executor.assemble(&inputs).map_err(|e| {
+    // Call executor assemble to get beneficiary outputs
+    let partial_tx = executor.assemble(&inputs).map_err(|e| {
         CalculatorError::Other(format!("executor assemble failed: {}", e))
     })?;
     
@@ -110,9 +110,13 @@ pub fn process_digest_ok<T: RPC>(
         skeleton.input(input)?.witness(Default::default());
     }
     
-    // TODO: Add beneficiary outputs from partial_tx
-    // Deferred due to ckb-gen-types version mismatch (executor uses 0.119.0, calculator uses 1.1.2)
-    // Will be integrated with Process recreate output in FakeRpc task
+    // Bridge executor CellOutput (ckb-gen-types 0.119) → calculator CellOutput (1.x)
+    // via molecule bytes (wire format is stable across versions)
+    for (output_bytes, data) in partial_tx.output_molecule_pairs() {
+        let calc_output = CellOutput::from_slice(&output_bytes)
+            .map_err(|e| CalculatorError::Other(format!("CellOutput bridge: {:?}", e)))?;
+        skeleton.output(CellOutputEx::new(calc_output, data));
+    }
     
     let instructions = vec![];
     Ok((skeleton, instructions))
@@ -142,5 +146,58 @@ mod tests {
         assert_eq!(input.lock_args, vec![1, 2, 3]);
         assert_eq!(input.capacity, 100_000_000_000);
         assert_eq!(input.data, vec![4, 5, 6]);
+    }
+    
+    #[test]
+    fn test_process_digest_beneficiary_outputs() {
+        use ckb_cinnabar_calculator::simulation::{fake_outpoint, FakeRpcClient};
+
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!(
+                "Skipping test: binary not built at {} (run 'cd contracts/cid_process_example && make build')",
+                bin_path
+            );
+            return;
+        }
+
+        let rpc = FakeRpcClient::default();
+
+        let intentions_n1 = vec![IntentionCell {
+            out_point: fake_outpoint(),
+            lock_args: vec![0x01, 0x02, 0x03],
+            capacity: 100_000_000_000,
+            data: vec![0xaa, 0xbb],
+        }];
+        let (skeleton, _) = process_digest_ok(&rpc, intentions_n1.clone(), bin_dir)
+            .expect("digest should succeed with n=1");
+        assert_eq!(
+            skeleton.outputs.len(),
+            intentions_n1.len(),
+            "skeleton should have 1 beneficiary output for 1 intention"
+        );
+
+        let intentions_n2 = vec![
+            IntentionCell {
+                out_point: fake_outpoint(),
+                lock_args: vec![0x01, 0x02, 0x03],
+                capacity: 100_000_000_000,
+                data: vec![0xaa, 0xbb],
+            },
+            IntentionCell {
+                out_point: fake_outpoint(),
+                lock_args: vec![0x04, 0x05, 0x06],
+                capacity: 200_000_000_000,
+                data: vec![0xcc, 0xdd],
+            },
+        ];
+        let (skeleton, _) = process_digest_ok(&rpc, intentions_n2.clone(), bin_dir)
+            .expect("digest should succeed with n=2");
+        assert_eq!(
+            skeleton.outputs.len(),
+            intentions_n2.len(),
+            "skeleton should have 2 beneficiary outputs for 2 intentions"
+        );
     }
 }

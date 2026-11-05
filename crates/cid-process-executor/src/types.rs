@@ -109,6 +109,18 @@ impl PartialTx {
             outputs_data,
         })
     }
+
+    /// Molecule wire bytes for each output plus its data.
+    ///
+    /// Lets host crates (e.g. the Process calculator) reconstruct CellOutput
+    /// with a different ckb-gen-types version without importing Entity.
+    pub fn output_molecule_pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.outputs
+            .iter()
+            .zip(self.outputs_data.iter())
+            .map(|(output, data)| (output.as_slice().to_vec(), data.clone()))
+            .collect()
+    }
 }
 
 /// Executor errors

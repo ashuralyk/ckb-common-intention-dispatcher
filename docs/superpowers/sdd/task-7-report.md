@@ -5,7 +5,9 @@ Task 7 implements the Process Calculator in `process_calculator/`, providing off
 
 ## Git Context
 - **Base SHA**: `37edd313398cd82ec768a38a2392ca181e4efc6e` (Task 6 approved after review fix)
-- **Head SHA**: `8e1b0d6214f9eab06bba6131920c2dd0648dc339` (Task 7 complete)
+- **Initial Task 7 SHA**: `8e1b0d6214f9eab06bba6131920c2dd0648dc339`
+- **Review HEAD**: `0dd87b13ced6c147e1c88a14c44a3776cf836a8f`
+- **Head SHA**: (set after review-fix commit)
 - **Branch**: `cursor/cid-process-example-c952`
 - **PR**: #6 targeting `main`
 
@@ -274,15 +276,75 @@ Per the plan:
    - ConsumeProcess operation for Type ID pair
    - Asset dependency operations (AddInputAssetDeps)
 
+## Task 7 Review Fix
+
+**Review HEAD**: `0dd87b13ced6c147e1c88a14c44a3776cf836a8f`
+**Fixed HEAD**: (see Git Context after this commit)
+
+### Issue
+`process_digest_ok` dropped `_partial_tx` and never added beneficiary outputs. Skeleton was inputs-only. The previous attempt to call `output.as_slice()` from the calculator crate failed because Entity lives in a different ckb-gen-types / molecule version.
+
+### Fixes
+
+**1. `PartialTx::output_molecule_pairs()` in executor** (`crates/cid-process-executor/src/types.rs`)
+
+```rust
+pub fn output_molecule_pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+    self.outputs
+        .iter()
+        .zip(self.outputs_data.iter())
+        .map(|(output, data)| (output.as_slice().to_vec(), data.clone()))
+        .collect()
+}
+```
+
+The executor already has Entity in scope, so it can serialize CellOutput to molecule bytes. The calculator never imports executor Entity.
+
+**2. Bridge outputs onto the skeleton** (`process_calculator/src/lib.rs`)
+
+```rust
+for (output_bytes, data) in partial_tx.output_molecule_pairs() {
+    let calc_output = CellOutput::from_slice(&output_bytes)
+        .map_err(|e| CalculatorError::Other(format!("CellOutput bridge: {:?}", e)))?;
+    skeleton.output(CellOutputEx::new(calc_output, data));
+}
+```
+
+Molecule wire format is stable across ckb-gen-types 0.119 vs 1.x.
+
+**3. FakeRpcClient smoke test** (no hand-rolled RPC)
+
+- Soft-skip if `CARGO_MANIFEST_DIR/../build/release/cid_process_example` is missing
+- Uses `ckb_cinnabar_calculator::simulation::FakeRpcClient::default()`
+- Distinct OutPoints via `fake_outpoint()` (duplicate defaults caused `input already exists`)
+- Asserts `skeleton.outputs.len() == intentions.len()` for n=1 and n=2
+
+Process recreate remains deferred.
+
+### Test results after fix
+
+```
+$ cargo test -p cid_process_example-calculator
+running 3 tests
+test tests::test_load_binary_missing ... ok
+test tests::test_intention_conversion ... ok
+test tests::test_process_digest_beneficiary_outputs ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored
+
+$ cargo test -p cid-process-executor
+running 13 tests
+test result: ok. 12 passed; 0 failed; 1 ignored
+```
+
 ## Conclusion
 
-Task 7 successfully implements the Process Calculator with:
+Task 7 implements the Process Calculator with:
 - IntentionCell type and conversion
 - Binary loading from build directory
 - Batch bounds validation via executor
-- Transaction skeleton construction with intention inputs
-- Proper cinnabar calculator API usage
+- Transaction skeleton with intention inputs **and** beneficiary outputs (molecule bridge)
+- FakeRpcClient smoke test that output count equals intention count
 
-All tests pass (calculator: 2 passed; executor: 12 passed, 1 ignored). The calculator is ready for FakeRpc integration, with known limitations documented for resolution in subsequent tasks.
+All tests pass (calculator: 3 passed; executor: 12 passed, 1 ignored). Process recreate remains a carry-forward Minor.
 
-**Status**: READY FOR REVIEW
+**Status**: REVIEW FIX COMPLETE
