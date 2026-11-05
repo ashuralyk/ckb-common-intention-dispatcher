@@ -94,3 +94,63 @@ async fn multi_intention_digest_n2_real_ssri() {
 async fn multi_intention_digest_n4_real_ssri() {
     assert_digest_counts(4);
 }
+
+#[tokio::test]
+async fn reject_empty_batch_real_ssri() {
+    require_binaries();
+    let rpc = FakeRpcClient::default();
+    let err = process_digest_ok(&rpc, vec![], CONTRACT_BIN)
+        .err()
+        .expect("should reject empty batch");
+    match err {
+        ckb_cinnabar_calculator::CalculatorError::Other(msg) => {
+            assert!(
+                msg.contains("out of bounds") || msg.contains("Incompatible"),
+                "error should mention bounds: {msg}"
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+    println!("Empty batch rejected: SUCCESS");
+}
+
+#[tokio::test]
+async fn reject_count_exceeds_max_real_ssri() {
+    require_binaries();
+    let intentions: Vec<IntentionCell> = (0..5).map(mock_intention).collect();
+    let rpc = FakeRpcClient::default();
+    let err = process_digest_ok(&rpc, intentions, CONTRACT_BIN)
+        .err()
+        .expect("should reject 5 intentions (> BATCH_MAX=4)");
+    match err {
+        ckb_cinnabar_calculator::CalculatorError::Other(msg) => {
+            assert!(
+                msg.contains("out of bounds") || msg.contains("Incompatible"),
+                "error should mention bounds: {msg}"
+            );
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+    println!("Count > BATCH_MAX rejected: SUCCESS");
+}
+
+// These tests require full on-chain verification integration.
+
+#[tokio::test]
+#[ignore]
+async fn reject_wrong_beneficiary() {
+    // TODO: Full integration test
+    // 1. Create intention with beneficiary Script A in payload
+    // 2. Assemble digest but output to different lock Script B
+    // 3. Verify on-chain verification rejects with ERROR_BENEFICIARY_MISSING
+    todo!("requires full FakeRpc integration with CID + Process validators");
+}
+
+#[tokio::test]
+#[ignore]
+async fn reject_missing_type_id_pair() {
+    // TODO: Full integration test
+    // 1. Create digest transaction without Process Type ID output
+    // 2. Verify on-chain verification rejects with ERROR_PROCESS_PAIR_INVALID
+    todo!("requires full FakeRpc integration");
+}
