@@ -7,7 +7,7 @@ Task 7 implements the Process Calculator in `process_calculator/`, providing off
 - **Base SHA**: `37edd313398cd82ec768a38a2392ca181e4efc6e` (Task 6 approved after review fix)
 - **Initial Task 7 SHA**: `8e1b0d6214f9eab06bba6131920c2dd0648dc339`
 - **Review HEAD**: `0dd87b13ced6c147e1c88a14c44a3776cf836a8f`
-- **Head SHA**: `08441d4` (Task 7 review fix; docs commit follows)
+- **Head SHA**: `a119a5aa91c43a038948d1d353f5c285e7bd2d6a` (Task 7 review fix)
 - **Branch**: `cursor/cid-process-example-c952`
 - **PR**: #6 targeting `main`
 
@@ -279,7 +279,7 @@ Per the plan:
 ## Task 7 Review Fix
 
 **Review HEAD**: `0dd87b13ced6c147e1c88a14c44a3776cf836a8f`
-**Fixed HEAD**: `08441d4` (code fix; this report append is the subsequent docs commit)
+**Fixed HEAD**: `a119a5aa91c43a038948d1d353f5c285e7bd2d6a` (report); code fix `08441d4`
 
 ### Issue
 `process_digest_ok` dropped `_partial_tx` and never added beneficiary outputs. Skeleton was inputs-only. The previous attempt to call `output.as_slice()` from the calculator crate failed because Entity lives in a different ckb-gen-types / molecule version.
