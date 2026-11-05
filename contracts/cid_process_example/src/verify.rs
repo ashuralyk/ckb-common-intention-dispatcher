@@ -73,8 +73,8 @@ fn count_intention_inputs() -> core::result::Result<usize, ProcessError> {
         let args = lock.args().raw_data();
         
         // CID lock args: process_type_hash[32] + molecule(CidEntry)
-        // Check if args starts with our Process type hash
-        if args.len() >= PROCESS_TYPE_HASH_LEN {
+        // Check if args starts with our Process type hash (and has payload)
+        if args.len() > PROCESS_TYPE_HASH_LEN {
             let prefix: [u8; 32] = args[..PROCESS_TYPE_HASH_LEN]
                 .try_into()
                 .map_err(|_| ProcessError::ProcessPairInvalid)?;
@@ -95,12 +95,13 @@ fn verify_beneficiaries_exist(intention_count: usize) -> Result<Option<&'static 
     // 2. Verify matching output lock exists
     // 3. Verify capacity/data match expected transfers
     
-    let output_count = QueryIter::new(load_cell_type, Source::Output).count();
+    // Count ALL outputs (including typeless beneficiaries) via load_cell_lock
+    // load_cell_type would skip typeless cells, making beneficiaries invisible
+    let output_count = QueryIter::new(load_cell_lock, Source::Output).count();
     
-    // At minimum: intention_count beneficiary outputs + 1 Process output
-    // Note: Task 5 assemble() does not yet emit Process recreate in PartialTx
-    // For now, just check we have at least intention_count outputs total
-    if output_count < intention_count {
+    // Require: intention_count beneficiary outputs + 1 Process output
+    // verify_type_id_pair already ensures the Process output exists
+    if output_count < intention_count + 1 {
         return Err(ProcessError::BeneficiaryMissing.into());
     }
     
