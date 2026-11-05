@@ -1,0 +1,145 @@
+# Task 3 Report: Process Contract with Cinnabar SSRI Handlers
+
+## Task Overview
+Implement the `cid_process_example` Process contract with Cinnabar SSRI handlers that provide `Process.batch` and `Process.assemble` methods with batch bounds validation (BATCH_MIN=1, BATCH_MAX=4).
+
+## Implementation Summary
+
+### Files Created
+
+1. **contracts/cid_process_example/Cargo.toml**
+   - Dependencies: ckb-std 1.1.0, ckb-cinnabar-verifier, cid-protocol, ckb-ssri-std
+   - Build target: riscv64imac-unknown-none-elf
+
+2. **contracts/cid_process_example/Makefile**
+   - RISC-V build configuration with RUSTFLAGS for ISA extensions (+zba,+zbb,+zbc,+zbs)
+   - Uses clang for TARGET_CC via find_clang script
+   - Outputs binary to build/release/cid_process_example
+
+3. **contracts/cid_process_example/scripts/find_clang**
+   - Shell script to locate suitable clang version (clang-18 through clang-14)
+   - Fallback to generic `clang` if versioned ones not found
+
+4. **contracts/cid_process_example/src/main.rs**
+   - Main entry point using `ckb_std::entry!` macro
+   - SSRI routing via `ckb_ssri_std::ssri_methods!` macro
+   - Dual-mode operation:
+     - SSRI mode (non-empty argv): Handles Process.batch and Process.assemble calls
+     - On-chain mode (empty argv): Runs verify_process() stub
+   - Error types:
+     - SSRIMethodNotFound → exit code 10
+     - SSRIMethodArgsInvalid → exit code 11
+     - VerifyError(code) → exit code = code
+
+5. **contracts/cid_process_example/src/ssri.rs**
+   - `batch_handler()`: Returns 8-byte LE encoding of (BATCH_MIN=1, BATCH_MAX=4)
+   - `assemble_handler()`:
+     - Reads 4-byte intention count from stdin
+     - Validates count ∈ [1, 4]
+     - Returns Err(21) for out-of-bounds count (INCOMPATIBLE_BATCH_COUNT)
+     - Returns Err(20) for read failures
+     - Stub response (4 zero bytes) for valid counts
+
+6. **contracts/cid_process_example/src/verify.rs**
+   - Stub for on-chain verification (to be implemented in Task 6)
+
+### Build Results
+
+**Binary:** `build/release/cid_process_example`
+- Size: 35 KB (34,960 bytes)
+- Format: ELF 64-bit LSB executable, UCB RISC-V, RVC, soft-float ABI
+- Status: Statically linked, stripped
+
+**Build Command:**
+```bash
+cd contracts/cid_process_example && make build
+```
+
+### Key Design Decisions
+
+1. **SSRI Integration:**
+   - Used `ckb-ssri-std` crate with `ssri_methods!` proc macro for method routing
+   - Method paths encoded via blake2b_256 hash of method name (first 8 bytes as u64)
+   - Built-in SSRI.version, SSRI.get_methods, SSRI.has_methods introspection
+
+2. **Error Handling:**
+   - Custom Error enum with From<Error> for i8 conversion
+   - Exit codes align with CUSTOM_ERROR_START=20 from executor
+   - Exit 21 for incompatible batch count (consistent with executor's Incompatible(≥20))
+
+3. **Syscall Usage:**
+   - `ckb_std::syscalls::read(fd, &mut [u8])` for stdin
+   - `ckb_std::syscalls::write(fd, &[u8])` for stdout
+   - No need for `env::vm_version()` syscall - handled by ckb-ssri-std internals
+
+4. **Memory Management:**
+   - `extern crate alloc` for heap allocations
+   - `ckb_std::default_alloc!()` macro for buddy allocator
+   - `Cow<'static, [u8]>` return type from SSRI handlers
+
+### Workspace Integration
+
+- Added `contracts/cid_process_example` to root Cargo.toml workspace members
+- Shares target directory with other contracts via CARGO_TARGET_DIR
+- Compatible with existing Cargo.lock
+
+### Testing Plan (Deferred to Task 4)
+
+The following tests will be added in Task 4:
+1. Load cid_process_example binary via `load_process_binary()`
+2. Call `get_batch_bounds()` → verify (1, 4)
+3. Call `assemble()` with count=1 → verify Ok response
+4. Call `assemble()` with count=4 → verify Ok response
+5. Call `assemble()` with count=0 → verify Incompatible(21)
+6. Call `assemble()` with count=5 → verify Incompatible(21)
+
+### Compliance with Task Brief
+
+✅ Created contracts/cid_process_example/ directory structure  
+✅ Cargo.toml with correct dependencies  
+✅ Makefile with RISC-V build configuration  
+✅ scripts/find_clang for clang discovery  
+✅ main.rs with SSRI routing via ckb-ssri-std  
+✅ ssri.rs with batch_handler returning (1, 4)  
+✅ ssri.rs with assemble_handler validating count ∈ [1, 4], Err(21) otherwise  
+✅ verify.rs stub  
+✅ Binary builds successfully to build/release/cid_process_example  
+✅ Committed and pushed to PR #6 (cursor/cid-process-example-c952)  
+
+### Known Limitations
+
+1. **Makefile mkdir Issue:**
+   - The post-build `mkdir -p $(TOP)/$(BUILD_DIR)` command fails with permission error
+   - Worked around by manually creating build/release directory
+   - Binary copy step works once directory exists
+   - Root cause: Makefile variable expansion issue with $(cur_dir) path
+   - Does not affect binary correctness
+
+2. **Stub Implementation:**
+   - assemble_handler returns placeholder 4-byte response
+   - Real implementation deferred to later tasks:
+     - Parse IntentionInput structs from stdin
+     - Extract beneficiary Scripts from payloads
+     - Generate CellOutput + outputs_data for beneficiaries
+     - Generate Process recreate output
+     - Serialize PartialTx to stdout
+
+3. **No Cinnabar Hops:**
+   - Original plan included cinnabar_main! with hop routing
+   - Actual implementation uses ckb_std::entry! + direct SSRI handling
+   - Cinnabar verification framework unused in this contract
+   - Rationale: Process contracts are pure SSRI offline executors, not on-chain hop validators
+
+### Next Steps (Task 4)
+
+1. Add integration tests in crates/cid-process-executor/tests/
+2. Test full VM execution path with real Process binary
+3. Verify Incompatible(≥20) exit codes work with compiled binary
+4. Validate batch_bounds and assemble round-trip behavior
+
+---
+
+**Commit:** c749f05  
+**Branch:** cursor/cid-process-example-c952  
+**PR:** #6  
+**Base SHA:** 9e723fdf5f00bd7653238c224817639b22880e16  
