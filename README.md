@@ -8,8 +8,8 @@ slice only**: the CID lock, Calculate recipes, and FakeRpc tests.
 
 Design notes: [Common Intention Dispatch](https://app.notion.com/p/ckb-devrel/Common-Intention-Dispatch-3de9f5bf382080249b91d32ad72639d9).
 
-**Out of scope for v0.1:** Process contract, SSRI client, and the executor
-daemon. Those land in later slices.
+**Original v0.1 lock slice** did not include a production Process. This repo
+also ships a **sample Process** (see [Process Example](#process-example)).
 
 ## How it works
 
@@ -85,6 +85,34 @@ make test      # FakeRpc + native CKB-VM, all cases
 Both `make build` and `make test` must exit 0. Tests load this contract from `build/release/` and the
 official xUDT RISC-V binary from `tests/binaries/xudt`.
 
+To build CID and the Process example into `build/release/` without a full
+`make build` clean:
+
+```bash
+./scripts/build-all-contracts.sh
+```
+
+## Process Example
+
+In-tree sample Process (not a production SSRI daemon):
+
+- RISC-V contract `contracts/cid_process_example` with `cinnabar_main!` SSRI
+  (`Process.batch`, `Process.assemble`) and on-chain Create/Transfer Type ID,
+  batch, and beneficiary Script/capacity/data/asset checks
+- Greenfield offline host `crates/cid-process-executor` (ckb-vm, argv method id)
+- Calculator `process_calculator` — `process_digest_ok` builds a skeleton with
+  intention inputs and beneficiary outputs (molecule bridge across ckb-gen-types)
+- FakeRpc tests: n=1, 2, 4 and empty / n=5 rejection (`tests/src/process_example.rs`)
+- **BATCH_MIN=1, BATCH_MAX=4**
+- Process recreate is **not** composed on the PartialTx / skeleton yet
+
+Usage: [docs/process-example-usage.md](docs/process-example-usage.md)
+
+```bash
+./scripts/build-all-contracts.sh
+cd tests && cargo test process_example -- --nocapture
+```
+
 Cargo may print non-fatal parse errors for `ckb-cinnabar`’s
 `templates/contract` placeholders (`{{crate_name}}`). Those files are not
 workspace members; the build still succeeds.
@@ -103,8 +131,11 @@ cargo run -- --json --dry-run deploy \
 |------|------|
 | `protocol/` | Shared `no_std` args layout + constants |
 | `contracts/ckb_common_intention_dispatcher/` | On-chain Verify tree (`cinnabar_main!`) |
-| `calculator/` | `Instruction::new` recipes |
-| `tests/` | FakeRpc universe |
+| `contracts/cid_process_example/` | Sample Process (SSRI + on-chain verify) |
+| `crates/cid-process-executor/` | Offline SSRI host for the sample Process |
+| `process_calculator/` | `process_digest_ok` skeleton assembly |
+| `calculator/` | CID `Instruction::new` recipes |
+| `tests/` | FakeRpc universe (CID + `process_example`) |
 | `tests/binaries/xudt` | Real xUDT RISC-V (not always-success) |
 | `build/release/` | This lock’s RISC-V binary |
 | `src/main.rs` | `ckb_cinnabar::dispatch()` runner |
