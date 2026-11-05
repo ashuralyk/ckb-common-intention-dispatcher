@@ -35,6 +35,9 @@ pub const XUDT_CODE_HASH: [u8; 32] = [
 /// `ScriptHashType::Data1` as packed byte.
 pub const SCRIPT_HASH_TYPE_DATA1: u8 = 2;
 
+/// `ScriptHashType::Data2` as packed byte.
+pub const SCRIPT_HASH_TYPE_DATA2: u8 = 4;
+
 /// Custom script exit codes. Must match `define_errors!` in the lock crate.
 pub const ERROR_ARGS_INVALID: i8 = 20;
 pub const ERROR_UNKNOWN_BRANCH: i8 = 21;

@@ -8,11 +8,14 @@ pub struct IntentionInput {
     pub lock_args: Vec<u8>,
     pub capacity: u64,
     pub data: Vec<u8>,
+    /// Packed molecule `Script` of the intention type, if any (official xUDT).
+    pub type_script: Option<Vec<u8>>,
 }
 
 impl IntentionInput {
     /// Encode for SSRI Process.assemble input
     /// Format: capacity (u64 LE) + lock_args_len (u32 LE) + lock_args + data_len (u32 LE) + data
+    /// + optional type_len (u32 LE) + type_script molecule
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&self.capacity.to_le_bytes());
@@ -20,6 +23,10 @@ impl IntentionInput {
         buf.extend_from_slice(&self.lock_args);
         buf.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
         buf.extend_from_slice(&self.data);
+        if let Some(type_script) = &self.type_script {
+            buf.extend_from_slice(&(type_script.len() as u32).to_le_bytes());
+            buf.extend_from_slice(type_script);
+        }
         buf
     }
 }

@@ -272,12 +272,14 @@ mod tests {
                 lock_args: vec![0x01, 0x02, 0x03, 0x04],
                 capacity: 100_000_000_000,
                 data: vec![0xaa, 0xbb],
+                type_script: None,
             },
             IntentionInput {
                 out_point: OutPoint::default(),
                 lock_args: vec![0x05, 0x06, 0x07],
                 capacity: 200_000_000_000,
                 data: vec![0xcc, 0xdd, 0xee],
+                type_script: None,
             },
         ];
 
@@ -342,5 +344,86 @@ mod tests {
             vec![0xcc, 0xdd, 0xee],
             "second output data should match"
         );
+    }
+
+    fn load_process_binary() -> Option<Vec<u8>> {
+        let bin_path = "../../build/release/cid_process_example";
+        if !std::path::Path::new(bin_path).exists() {
+            eprintln!("Skipping test: binary not built");
+            return None;
+        }
+        Some(std::fs::read(bin_path).expect("read binary"))
+    }
+
+    #[test]
+    fn test_assemble_preserves_data2_beneficiary_hash_type() {
+        use cid_protocol::{CidArgs, Payload, Script as CidScript, SCRIPT_HASH_TYPE_DATA2};
+        use ckb_types::prelude::Unpack;
+
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+
+        let beneficiary = CidScript {
+            code_hash: [0x11; 32],
+            hash_type: SCRIPT_HASH_TYPE_DATA2,
+            args: vec![0xAA],
+        };
+        let lock_args = CidArgs::new(
+            [0x22; 32],
+            CidScript::default(),
+            Payload::from_script(&beneficiary).unwrap(),
+        )
+        .encode()
+        .unwrap();
+        let partial = executor
+            .assemble(&[IntentionInput {
+                lock_args,
+                capacity: 100_000_000_000,
+                data: vec![],
+                ..Default::default()
+            }])
+            .expect("assemble Data2 beneficiary");
+        let ht: u8 = partial.outputs[0].lock().hash_type().into();
+        assert_eq!(ht, SCRIPT_HASH_TYPE_DATA2, "assemble must keep Data2");
+        let args: Vec<u8> = partial.outputs[0].lock().args().unpack();
+        assert_eq!(args, vec![0xAA]);
+    }
+
+    #[test]
+    fn test_assemble_preserves_xudt_type_script() {
+        use cid_protocol::{XUDT_AMOUNT_LEN, XUDT_CODE_HASH};
+        use ckb_types::packed::{Byte32, Script};
+        use ckb_types::prelude::{Builder, Entity, Pack, Unpack};
+
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+
+        let type_script = Script::new_builder()
+            .code_hash(Byte32::from_slice(&XUDT_CODE_HASH).unwrap())
+            .hash_type(2u8.into())
+            .args(vec![0x33; 32].pack())
+            .build();
+        let amount = 1_000u128.to_le_bytes()[..XUDT_AMOUNT_LEN].to_vec();
+        let partial = executor
+            .assemble(&[IntentionInput {
+                lock_args: vec![0x01],
+                capacity: 100_000_000_000,
+                data: amount.clone(),
+                type_script: Some(type_script.as_slice().to_vec()),
+                ..Default::default()
+            }])
+            .expect("assemble xUDT intention");
+        let got = partial.outputs[0]
+            .type_()
+            .to_opt()
+            .expect("beneficiary output must keep xUDT type");
+        assert_eq!(got.as_slice(), type_script.as_slice());
+        assert_eq!(partial.outputs_data[0], amount);
+        let cap: u64 = partial.outputs[0].capacity().unpack();
+        assert_eq!(cap, 100_000_000_000);
     }
 }

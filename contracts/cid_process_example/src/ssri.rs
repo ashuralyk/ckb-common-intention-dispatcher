@@ -28,12 +28,11 @@ pub fn batch_handler(
     Ok(output)
 }
 
+type ParsedIntention = (u64, Vec<u8>, Vec<u8>, Option<Vec<u8>>, usize);
+
 /// Parse a single intention from buffer at given position
-/// Returns (capacity, lock_args, data, next_position)
-fn parse_intention(
-    buf: &[u8],
-    mut pos: usize,
-) -> Result<(u64, Vec<u8>, Vec<u8>, usize), ProcessError> {
+/// Returns (capacity, lock_args, data, type_script molecule, next_position)
+fn parse_intention(buf: &[u8], mut pos: usize) -> Result<ParsedIntention, ProcessError> {
     // Read intention length
     if pos + 4 > buf.len() {
         return Err(ProcessError::ReadFailed);
@@ -82,12 +81,32 @@ fn parse_intention(
     let data = buf[pos..pos + data_len].to_vec();
     pos += data_len;
 
-    // Verify we consumed exactly intention_len bytes
+    // Optional type script: present when the record still has bytes after data.
+    let type_script = if pos - intention_start < intention_len {
+        if pos + 4 > buf.len() {
+            return Err(ProcessError::ReadFailed);
+        }
+        let type_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + type_len > buf.len() {
+            return Err(ProcessError::ReadFailed);
+        }
+        let bytes = buf[pos..pos + type_len].to_vec();
+        pos += type_len;
+        if bytes.is_empty() {
+            None
+        } else {
+            Some(bytes)
+        }
+    } else {
+        None
+    };
+
     if pos - intention_start != intention_len {
         return Err(ProcessError::ReadFailed);
     }
 
-    Ok((capacity, lock_args, data, pos))
+    Ok((capacity, lock_args, data, type_script, pos))
 }
 
 /// SSRI handler for Process.assemble
@@ -135,15 +154,17 @@ pub fn assemble_handler(
     let mut outputs_data = Vec::with_capacity(count as usize);
 
     for _ in 0..count {
-        let (capacity, lock_args, data, next_pos) = parse_intention(input, pos)?;
+        let (capacity, lock_args, data, type_script, next_pos) = parse_intention(input, pos)?;
         pos = next_pos;
 
         let lock = beneficiary_lock(lock_args);
 
-        let output = CellOutput::new_builder()
-            .capacity(capacity)
-            .lock(lock)
-            .build();
+        let mut output = CellOutput::new_builder().capacity(capacity).lock(lock);
+        if let Some(type_bytes) = type_script {
+            let script = Script::from_slice(&type_bytes).map_err(|_| ProcessError::ReadFailed)?;
+            output = output.type_(Some(script).pack());
+        }
+        let output = output.build();
 
         outputs.push(output);
         outputs_data.push(data);

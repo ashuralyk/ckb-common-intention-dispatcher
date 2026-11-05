@@ -87,10 +87,11 @@ custom exit ≥ 20 to `ExecutorError::Incompatible` (e.g. 21 for
 
 - **Process.batch** — 8 LE bytes: `min` then `max` → `(1, 4)`
 - **Process.assemble** — stdin: `count` + length-prefixed intentions
-  (`capacity`, `lock_args`, `data`). Returns serialized PartialTx:
-  beneficiary `CellOutput`s. When `lock_args` decode as CID args, the lock
-  is the `CidEntry.payload` Script; otherwise a placeholder code hash plus
-  the raw `lock_args` (host unit tests).
+  (`capacity`, `lock_args`, `data`, optional type-script molecule). Returns
+  serialized PartialTx: beneficiary `CellOutput`s. When `lock_args` decode as
+  CID args, the lock is the `CidEntry.payload` Script (including Data2);
+  otherwise a placeholder code hash plus the raw `lock_args` (host unit tests).
+  An official xUDT type on the intention is copied onto the output.
 
 Host argv[0] is the hex-encoded blake2b method id (not the UTF-8 path).
 
@@ -137,9 +138,12 @@ OutPoint is used on the skeleton; the executor `OutPoint` in
 
 1. **Create** (0 type-group inputs, 1 output): Type ID args must be 32 bytes
    and equal `calc_type_id(output_index)`. No intention batch on Create.
-2. **Transfer** (1→1 type-group pair): intention count in `[1, 4]`; each CID
-   payload must decode to a beneficiary Script whose matching unused output
-   has the same lock, capacity, data, and type (CKB or official xUDT).
+2. **Transfer** (1→1 type-group pair): this group's intention count in
+   `[1, 4]`; unique-assign outputs across **every** example-format CID
+   intention in the transaction (so two Process Type IDs cannot share one
+   beneficiary). Payload Script hash types 0/1/2/4 (Data/Type/Data1/Data2)
+   are accepted. Matching unused output must have the same lock, capacity,
+   data, and type (CKB or official xUDT).
 3. **Burn** is rejected (`ProcessPairInvalid`).
 
 | Code | Error |
@@ -165,7 +169,7 @@ TransactionSkeleton: intention inputs + beneficiary outputs
         ▼
 On-chain (when a full tx is submitted):
   CID lock basic rules; Process type: Create Type ID init, or Transfer
-  1→1 pair + batch [1,4] + beneficiary Script/capacity/data/asset
+  1→1 pair + batch [1,4] + tx-wide unique beneficiary Script/capacity/data/asset
 ```
 
 ## What is deferred

@@ -22,8 +22,9 @@ use ckb_cinnabar_calculator::{
 use ckb_common_intention_dispatcher_calculator::{digest_ok, encode_cid_args, Payload};
 
 use crate::faker::{
-    dest_lock, dest_script, outpoint_ids, script_to_cid, seed_intention, user_lock, user_lock_cid,
-    CKB_CAPACITY, CONTRACT_BIN, CONTRACT_NAME, PACK_BLOCK,
+    dest_lock, dest_script, outpoint_ids, script_to_cid, seed_fakenet_xudt_cell, seed_intention,
+    user_lock, user_lock_cid, xudt_type_script, CKB_CAPACITY, CONTRACT_BIN, CONTRACT_NAME,
+    PACK_BLOCK, XUDT_AMOUNT,
 };
 
 const CID_CONTRACT_NAME: &str = "ckb_common_intention_dispatcher";
@@ -87,7 +88,15 @@ fn mock_intention(i: u32) -> IntentionCell {
         },
         capacity: 100_000_000_000,
         data: vec![],
+        type_script: None,
     }
+}
+
+fn dest_script_data2() -> Script {
+    dest_script()
+        .as_builder()
+        .hash_type(ScriptHashType::Data2)
+        .build()
 }
 
 fn prepared_process_skeleton(rpc: &FakeRpcClient) -> TransactionSkeleton {
@@ -170,18 +179,28 @@ fn apply_transfer(
     capacity: u64,
     data: Vec<u8>,
 ) -> TransactionSkeleton {
+    apply_transfer_to(rpc, beneficiary, &dest_script(), capacity, data)
+}
+
+fn apply_transfer_to(
+    rpc: &mut FakeRpcClient,
+    output_lock: ScriptEx,
+    payload_beneficiary: &Script,
+    capacity: u64,
+    data: Vec<u8>,
+) -> TransactionSkeleton {
     let mut skeleton = prepared_process_skeleton(rpc);
     let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
     let process_hash = process_example_type_hash(&type_script);
     let process = seed_process_example_cell(rpc, type_script);
-    let args = beneficiary_args(process_hash, &dest_script());
+    let args = beneficiary_args(process_hash, payload_beneficiary);
     let intention = seed_intention(rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
 
     let ix = digest_ok::<FakeRpcClient>(
         outpoint_ids(&intention),
         outpoint_ids(&process),
         Some(AddOutputCell {
-            lock_script: beneficiary,
+            lock_script: output_lock,
             type_script: None,
             data,
             capacity,
@@ -354,6 +373,149 @@ async fn transfer_matching_beneficiary_succeeds() {
     verify(&rpc, skeleton, vec![])
         .await
         .expect("matching beneficiary Script/capacity/data must pass");
+}
+
+#[tokio::test]
+async fn reject_two_processes_sharing_one_beneficiary() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
+    let type_b = process_example_type_script(b"process-type-id-v1".to_vec());
+    let process_a = seed_process_example_cell(&mut rpc, type_a.clone());
+    let process_b = seed_process_example_cell(&mut rpc, type_b.clone());
+    let int_a = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_a), &dest_script()),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let int_b = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_b), &dest_script()),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+
+    let first = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&int_a),
+        outpoint_ids(&process_a),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    let second = digest_ok::<FakeRpcClient>(outpoint_ids(&int_b), outpoint_ids(&process_b), None);
+    TransactionCalculator::default()
+        .instruction(first)
+        .instruction(second)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("two Processes must not share one beneficiary output");
+    assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
+}
+
+#[tokio::test]
+async fn assemble_and_verify_data2_beneficiary() {
+    require_binaries();
+    let dest = dest_script_data2();
+    let rpc = FakeRpcClient::default();
+    let args = beneficiary_args([0x22; 32], &dest);
+    let (assembled, _) = process_digest_ok(
+        &rpc,
+        vec![IntentionCell {
+            out_point: fake_outpoint(),
+            lock_args: args,
+            capacity: CKB_CAPACITY,
+            data: vec![],
+            type_script: None,
+        }],
+        CONTRACT_BIN,
+    )
+    .expect("assemble Data2 payload");
+    let ht: u8 = assembled.outputs[0].lock_script().hash_type().into();
+    assert_eq!(ht, Into::<u8>::into(ScriptHashType::Data2));
+
+    let mut rpc = FakeRpcClient::default();
+    let skeleton = apply_transfer_to(&mut rpc, dest.clone().into(), &dest, CKB_CAPACITY, vec![]);
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("on-chain verify must accept a Data2 beneficiary that assemble emitted");
+}
+
+#[tokio::test]
+async fn assemble_and_verify_xudt_beneficiary() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let xudt = xudt_type_script();
+    let xudt_packed = xudt.clone().to_script(&skeleton).expect("xudt script");
+    let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_a);
+    let process = seed_process_example_cell(&mut rpc, type_a);
+    let args = beneficiary_args(process_hash, &dest_script());
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        args.clone(),
+        CKB_CAPACITY,
+        Some((xudt.clone(), XUDT_AMOUNT)),
+        PACK_BLOCK,
+    );
+
+    let (assembled, _) = process_digest_ok(
+        &rpc,
+        vec![IntentionCell {
+            out_point: intention.clone(),
+            lock_args: args,
+            capacity: CKB_CAPACITY,
+            data: XUDT_AMOUNT.to_le_bytes().to_vec(),
+            type_script: Some(xudt_packed.as_slice().to_vec()),
+        }],
+        CONTRACT_BIN,
+    )
+    .expect("assemble xUDT intention");
+    let assembled_out = &assembled.outputs[0];
+    assert_eq!(
+        assembled_out
+            .type_script()
+            .expect("assembled beneficiary keeps xUDT type")
+            .as_slice(),
+        xudt_packed.as_slice()
+    );
+    assert_eq!(assembled_out.data, XUDT_AMOUNT.to_le_bytes().to_vec());
+
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: assembled_out.lock_script().into(),
+            type_script: assembled_out.type_script().map(Into::into),
+            data: assembled_out.data.clone(),
+            capacity: assembled_out.capacity_shannons(),
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("assembled xUDT beneficiary must verify on-chain");
 }
 
 // Still ignored: Process type script never runs if the Process cell is absent,

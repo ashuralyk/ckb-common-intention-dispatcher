@@ -83,6 +83,7 @@ fn verify_type_id_pair() -> Result<Option<&'static str>> {
     Ok(None)
 }
 
+#[derive(Clone)]
 struct IntentionTransfer {
     beneficiary: Script,
     capacity: u64,
@@ -91,21 +92,25 @@ struct IntentionTransfer {
 }
 
 fn verify_intention_batch_and_beneficiaries() -> Result<Option<&'static str>> {
-    let intentions = collect_intention_transfers()?;
-    if !(BATCH_MIN..=BATCH_MAX).contains(&intentions.len()) {
+    let (ours, all_example) = collect_intention_transfers()?;
+    if !(BATCH_MIN..=BATCH_MAX).contains(&ours.len()) {
         return Err(ProcessError::BatchCountInvalid.into());
     }
-    verify_beneficiaries(&intentions)?;
+    // Unique-assign across every example-format CID intention in the tx, not
+    // just this type group, so two Process Type IDs cannot share one output.
+    verify_beneficiaries(&all_example)?;
     Ok(None)
 }
 
-fn collect_intention_transfers() -> core::result::Result<Vec<IntentionTransfer>, ProcessError> {
+fn collect_intention_transfers(
+) -> core::result::Result<(Vec<IntentionTransfer>, Vec<IntentionTransfer>), ProcessError> {
     let our_type_hash: [u8; 32] = load_script()
         .map_err(|_| ProcessError::ProcessPairInvalid)?
         .calc_script_hash()
         .unpack();
 
-    let mut transfers = Vec::new();
+    let mut ours = Vec::new();
+    let mut all_example = Vec::new();
     for i in 0.. {
         let lock = match load_cell_lock(i, Source::Input) {
             Ok(lock) => lock,
@@ -120,35 +125,48 @@ fn collect_intention_transfers() -> core::result::Result<Vec<IntentionTransfer>,
         let prefix: [u8; 32] = args[..PROCESS_TYPE_HASH_LEN]
             .try_into()
             .map_err(|_| ProcessError::ProcessPairInvalid)?;
-        if prefix != our_type_hash {
-            continue;
+        let ours_prefix = prefix == our_type_hash;
+
+        let transfer = match parse_example_transfer(i, &args) {
+            Ok(Some(t)) => t,
+            Ok(None) if ours_prefix => return Err(ProcessError::BeneficiaryMissing),
+            Ok(None) => continue,
+            Err(e) => return Err(e),
+        };
+
+        if ours_prefix {
+            ours.push(transfer.clone());
         }
-
-        let cid = CidArgs::decode(&args).map_err(|_| ProcessError::BeneficiaryMissing)?;
-        let beneficiary_cid = cid
-            .entry
-            .payload
-            .to_script()
-            .map_err(|_| ProcessError::BeneficiaryMissing)?;
-        let beneficiary = packed_script(&beneficiary_cid)?;
-
-        let capacity =
-            load_cell_capacity(i, Source::Input).map_err(|_| ProcessError::ProcessPairInvalid)?;
-        let data =
-            load_cell_data(i, Source::Input).map_err(|_| ProcessError::ProcessPairInvalid)?;
-        let type_script =
-            load_cell_type(i, Source::Input).map_err(|_| ProcessError::ProcessPairInvalid)?;
-        validate_supported_asset(&type_script, &data)?;
-
-        transfers.push(IntentionTransfer {
-            beneficiary,
-            capacity,
-            data,
-            type_script,
-        });
+        all_example.push(transfer);
     }
 
-    Ok(transfers)
+    Ok((ours, all_example))
+}
+
+fn parse_example_transfer(
+    index: usize,
+    args: &[u8],
+) -> core::result::Result<Option<IntentionTransfer>, ProcessError> {
+    let Ok(cid) = CidArgs::decode(args) else {
+        return Ok(None);
+    };
+    let Ok(beneficiary_cid) = cid.entry.payload.to_script() else {
+        return Ok(None);
+    };
+    let beneficiary = packed_script(&beneficiary_cid)?;
+    let capacity =
+        load_cell_capacity(index, Source::Input).map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let data =
+        load_cell_data(index, Source::Input).map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let type_script =
+        load_cell_type(index, Source::Input).map_err(|_| ProcessError::ProcessPairInvalid)?;
+    validate_supported_asset(&type_script, &data)?;
+    Ok(Some(IntentionTransfer {
+        beneficiary,
+        capacity,
+        data,
+        type_script,
+    }))
 }
 
 fn validate_supported_asset(
@@ -199,7 +217,7 @@ fn claim_beneficiary(
             load_cell_lock(i, Source::Output).map_err(|_| ProcessError::ProcessPairInvalid)?;
         let type_script =
             load_cell_type(i, Source::Output).map_err(|_| ProcessError::ProcessPairInvalid)?;
-        if type_script.as_ref() == Some(process_script) {
+        if is_sibling_process(&type_script, process_script) {
             continue;
         }
         if lock != intention.beneficiary {
@@ -227,11 +245,18 @@ fn claim_beneficiary(
     }
 }
 
+fn is_sibling_process(type_script: &Option<Script>, ours: &Script) -> bool {
+    type_script
+        .as_ref()
+        .is_some_and(|t| t.code_hash() == ours.code_hash() && t.hash_type() == ours.hash_type())
+}
+
 fn packed_script(script: &CidScript) -> core::result::Result<Script, ProcessError> {
     let hash_type = match script.hash_type {
         0 => ScriptHashType::Data,
         1 => ScriptHashType::Type,
         2 => ScriptHashType::Data1,
+        4 => ScriptHashType::Data2,
         _ => return Err(ProcessError::BeneficiaryMissing),
     };
     Ok(Script::new_builder()

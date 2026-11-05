@@ -21,6 +21,8 @@ pub struct IntentionCell {
     pub lock_args: Vec<u8>,
     pub capacity: u64,
     pub data: Vec<u8>,
+    /// Packed molecule `Script` of the intention type, if any (official xUDT).
+    pub type_script: Option<Vec<u8>>,
 }
 
 impl IntentionCell {
@@ -41,6 +43,7 @@ impl IntentionCell {
             lock_args: self.lock_args.clone(),
             capacity: self.capacity,
             data: self.data.clone(),
+            type_script: self.type_script.clone(),
         })
     }
 }
@@ -142,12 +145,14 @@ mod tests {
             lock_args: vec![1, 2, 3],
             capacity: 100_000_000_000,
             data: vec![4, 5, 6],
+            type_script: None,
         };
 
         let input = cell.to_intention_input().expect("conversion");
         assert_eq!(input.lock_args, vec![1, 2, 3]);
         assert_eq!(input.capacity, 100_000_000_000);
         assert_eq!(input.data, vec![4, 5, 6]);
+        assert!(input.type_script.is_none());
     }
 
     #[test]
@@ -171,6 +176,7 @@ mod tests {
             lock_args: vec![0x01, 0x02, 0x03],
             capacity: 100_000_000_000,
             data: vec![0xaa, 0xbb],
+            type_script: None,
         }];
         let (skeleton, _) = process_digest_ok(&rpc, intentions_n1.clone(), bin_dir)
             .expect("digest should succeed with n=1");
@@ -186,12 +192,14 @@ mod tests {
                 lock_args: vec![0x01, 0x02, 0x03],
                 capacity: 100_000_000_000,
                 data: vec![0xaa, 0xbb],
+                type_script: None,
             },
             IntentionCell {
                 out_point: fake_outpoint(),
                 lock_args: vec![0x04, 0x05, 0x06],
                 capacity: 200_000_000_000,
                 data: vec![0xcc, 0xdd],
+                type_script: None,
             },
         ];
         let (skeleton, _) = process_digest_ok(&rpc, intentions_n2.clone(), bin_dir)
