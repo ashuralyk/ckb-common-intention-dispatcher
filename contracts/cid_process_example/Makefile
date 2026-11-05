@@ -6,7 +6,7 @@ FULL_RUSTFLAGS := -C target-feature=+zba,+zbb,+zbc,+zbs -C passes=lower-atomic $
 CARGO_ARGS :=
 MODE := release
 CLANG := $(shell $(TOP)/contracts/cid_process_example/scripts/find_clang)
-BUILD_DIR := ../../build/release
+BUILD_DIR := build/release
 BINARIES := cid_process_example
 CARGO_TARGET_DIR ?= $(TOP)/target
 
