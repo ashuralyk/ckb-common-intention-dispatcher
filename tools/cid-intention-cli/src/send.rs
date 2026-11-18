@@ -3,6 +3,7 @@
 //! Never used by `create`. Development/CI must point `--rpc-url` at a local mock,
 //! not a public endpoint.
 
+use ckb_cinnabar_calculator::re_exports::ckb_jsonrpc_types;
 use serde_json::{json, Value};
 
 use crate::build::CliError;
@@ -18,6 +19,9 @@ pub struct SendOptions {
     pub genesis_hash: String,
 }
 
+/// Node `get_blockchain_info.chain` values accepted for `send` (fail-closed).
+const ALLOWED_TESTNET_CHAINS: &[&str] = &["ckb_testnet"];
+
 fn redact_url(url: &str) -> String {
     // Strip credentials if present: https://user:pass@host/...
     if let Some(idx) = url.find("://") {
@@ -29,47 +33,47 @@ fn redact_url(url: &str) -> String {
     url.to_string()
 }
 
+fn strip_tx_metadata(mut value: Value) -> Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("hash");
+        obj.remove("process_type_hash");
+    }
+    value
+}
+
 fn extract_transaction(value: &Value) -> Result<Value, CliError> {
     // Accept:
+    // - TransactionView-shaped object (flattened fields + hash) from `create`
     // - raw Transaction object with inputs/outputs
-    // - TransactionView { hash, transaction? / inner? }
-    // - our create output which may wrap TransactionView + process_type_hash
-    if value.get("inputs").is_some() && value.get("outputs").is_some() {
-        return Ok(value.clone());
-    }
-    if let Some(tx) = value.get("transaction") {
+    // - wrappers: { transaction: ... } / { inner: ... }
+    // Always strip create metadata before RPC submit (`Transaction` is deny_unknown_fields).
+    let candidate = if value.get("inputs").is_some() && value.get("outputs").is_some() {
+        value.clone()
+    } else if let Some(tx) = value.get("transaction") {
         if tx.get("inputs").is_some() {
-            return Ok(tx.clone());
+            tx.clone()
+        } else {
+            return Err(CliError::InvalidRequest(
+                "signed JSON transaction wrapper missing inputs".into(),
+            ));
         }
-    }
-    if let Some(inner) = value.get("inner") {
+    } else if let Some(inner) = value.get("inner") {
         return extract_transaction(inner);
-    }
-    // ckb_jsonrpc_types::TransactionView often flattens as object with hash + fields
-    if value.get("hash").is_some() && value.get("inputs").is_some() {
-        let mut tx = value.clone();
-        if let Some(obj) = tx.as_object_mut() {
-            obj.remove("hash");
-            obj.remove("process_type_hash");
-        }
-        return Ok(tx);
-    }
-    // Strip our metadata and try again
-    if let Some(obj) = value.as_object() {
-        let mut cleaned = value.clone();
-        if let Some(c) = cleaned.as_object_mut() {
-            c.remove("process_type_hash");
-            c.remove("hash");
-        }
-        if cleaned.get("inputs").is_some() {
-            return Ok(cleaned);
-        }
-        // TransactionView serde: { "hash": ..., ...tx fields at top level sometimes under versioned form }
-        let _ = obj;
-    }
-    Err(CliError::InvalidRequest(
-        "signed JSON does not contain a transaction body".into(),
-    ))
+    } else {
+        return Err(CliError::InvalidRequest(
+            "signed JSON does not contain a transaction body".into(),
+        ));
+    };
+
+    let cleaned = strip_tx_metadata(candidate);
+    // Round-trip through the RPC Transaction type so unknown fields fail locally.
+    let _: ckb_jsonrpc_types::Transaction =
+        serde_json::from_value(cleaned.clone()).map_err(|e| {
+            CliError::InvalidRequest(format!(
+                "signed JSON is not a valid CKB Transaction after stripping metadata: {e}"
+            ))
+        })?;
+    Ok(cleaned)
 }
 
 fn rpc_call(url: &str, method: &str, params: Value) -> Result<Value, CliError> {
@@ -132,30 +136,39 @@ fn assert_testnet_guards(opts: &SendOptions) -> Result<(), CliError> {
     Ok(())
 }
 
+fn assert_allowed_testnet_chain(chain_info: &Value) -> Result<(), CliError> {
+    let chain = chain_info
+        .get("chain")
+        .and_then(|c| c.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            CliError::NetworkGuard("node get_blockchain_info missing non-empty chain".into())
+        })?;
+    let chain_l = chain.to_ascii_lowercase();
+    if ALLOWED_TESTNET_CHAINS
+        .iter()
+        .any(|allowed| chain_l == *allowed)
+    {
+        return Ok(());
+    }
+    if chain_l == "ckb" || (chain_l.contains("main") && !chain_l.contains("test")) {
+        return Err(CliError::NetworkGuard(format!(
+            "node reports chain `{chain}`; mainnet forbidden"
+        )));
+    }
+    Err(CliError::NetworkGuard(format!(
+        "node chain `{chain}` is not an allowed testnet identity"
+    )))
+}
+
 /// Submit a signed tx JSON to a CKB JSON-RPC endpoint after testnet/genesis checks.
 pub fn send_signed_transaction(opts: &SendOptions, signed: &Value) -> Result<String, CliError> {
     assert_testnet_guards(opts)?;
     let tx = extract_transaction(signed)?;
 
     let chain_info = rpc_call(&opts.rpc_url, "get_blockchain_info", json!([]))?;
-    let chain = chain_info
-        .get("chain")
-        .and_then(|c| c.as_str())
-        .unwrap_or("");
-    let chain_l = chain.to_ascii_lowercase();
-    if chain_l.contains("main") && !chain_l.contains("test") {
-        return Err(CliError::NetworkGuard(format!(
-            "node reports chain `{chain}`; mainnet forbidden"
-        )));
-    }
-    if !chain_l.contains("test") && chain_l != "ckb_testnet" && !chain_l.is_empty() {
-        // Allow empty only if node is minimal mock; otherwise require test marker.
-        if !chain.is_empty() {
-            return Err(CliError::NetworkGuard(format!(
-                "node chain `{chain}` is not recognized as testnet"
-            )));
-        }
-    }
+    assert_allowed_testnet_chain(&chain_info)?;
 
     let genesis = rpc_call(&opts.rpc_url, "get_block_hash", json!(["0x0"]))?;
     let genesis_s = genesis

@@ -25,7 +25,7 @@ Lean host binary in this contract repo that:
 | User lock | Funding lock (= payer) |
 | Fee / change | Explicit `fee_shannons`; change to payer via skeleton `balance` |
 | Signing | `CID_INTENTION_PRIVKEY` env (32-byte hex); never CLI flags / files / `.env` / logs / JSON |
-| Broadcast | `send` subcommand only; requires `--network testnet` + `--genesis-hash`; fail-closed on mainnet / genesis mismatch; `safe_message` keeps structured genesis hashes actionable while omitting hex-flooded guard/RPC strings |
+| Broadcast | `send` subcommand only; requires `--network testnet` + `--genesis-hash`; strips `hash`/`process_type_hash` then validates as RPC `Transaction`; fail-closed on mainnet / missing-empty-unknown chain (whitelist `ckb_testnet`) / genesis mismatch; `safe_message` keeps structured genesis hashes actionable while omitting hex-flooded guard/RPC strings |
 | Coin selection | Not in v1 (no online UTXO gather) |
 
 ## Request JSON (create)
@@ -100,5 +100,6 @@ cargo test -p cid-intention-cli
 
 Covers offline create (fee/witness/args/leakage/wrong key/duplicates,
 outpoint pin vs same-lock decoy, TransactionSimulator sighash VM verify) and
-`send` against a local HTTP JSON-RPC mock (success, mainnet refusal, genesis
+`send` against a local HTTP JSON-RPC mock (create→send metadata strip,
+`ckb_testnet` whitelist / empty-chain refusal, mainnet refusal, genesis
 mismatch with process-level hash diagnostics, redacted credential errors).

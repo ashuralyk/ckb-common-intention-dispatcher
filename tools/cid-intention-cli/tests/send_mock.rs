@@ -1,12 +1,17 @@
 //! Local HTTP JSON-RPC mock tests for `send` (no public network).
 
+mod common;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use cid_intention_cli::{send_signed_transaction, CliError, SendOptions};
+use cid_intention_cli::{create_signed_intention, send_signed_transaction, CliError, SendOptions};
+use ckb_cinnabar_calculator::re_exports::ckb_jsonrpc_types;
 use serde_json::{json, Value};
+
+use common::{fixture_request, key};
 
 type MockHandler = Box<dyn FnMut(&str, &Value) -> Value + Send>;
 
@@ -70,13 +75,24 @@ fn spawn_mock(handler: Arc<Mutex<MockHandler>>) -> String {
     format!("http://{addr}")
 }
 
+fn h256(byte: u8) -> String {
+    format!("0x{}", hex::encode([byte; 32]))
+}
+
 fn sample_tx() -> Value {
     json!({
         "version": "0x0",
         "cell_deps": [],
         "header_deps": [],
-        "inputs": [{"since":"0x0","previous_output":{"tx_hash":"0x11","index":"0x0"}}],
-        "outputs": [{"capacity":"0x1","lock":{"code_hash":"0x00","hash_type":"data","args":"0x"},"type":null}],
+        "inputs": [{
+            "since":"0x0",
+            "previous_output":{"tx_hash": h256(0x11), "index":"0x0"}
+        }],
+        "outputs": [{
+            "capacity":"0x1",
+            "lock":{"code_hash": h256(0x00), "hash_type":"data", "args":"0x"},
+            "type":null
+        }],
         "outputs_data": ["0x"],
         "witnesses": ["0x"]
     })
@@ -84,8 +100,8 @@ fn sample_tx() -> Value {
 
 #[test]
 fn send_success_returns_hash_after_guards() {
-    let genesis = format!("0x{}", hex::encode([0xAB; 32]));
-    let tx_hash = format!("0x{}", hex::encode([0xCD; 32]));
+    let genesis = h256(0xAB);
+    let tx_hash = h256(0xCD);
     let genesis_c = genesis.clone();
     let tx_hash_c = tx_hash.clone();
     let url = spawn_mock(Arc::new(Mutex::new(Box::new(
@@ -96,7 +112,12 @@ fn send_success_returns_hash_after_guards() {
                 json!(genesis_c.clone())
             }
             "send_transaction" => {
-                assert!(params.as_array().unwrap()[0].get("inputs").is_some());
+                let tx = &params.as_array().unwrap()[0];
+                assert!(tx.get("inputs").is_some());
+                assert!(tx.get("hash").is_none());
+                assert!(tx.get("process_type_hash").is_none());
+                serde_json::from_value::<ckb_jsonrpc_types::Transaction>(tx.clone())
+                    .expect("payload must deserialize as Transaction");
                 json!(tx_hash_c.clone())
             }
             _ => json!({"error": {"code": -1, "message": "unknown"}}),
@@ -113,11 +134,56 @@ fn send_success_returns_hash_after_guards() {
 }
 
 #[test]
+fn create_output_sends_after_stripping_view_metadata() {
+    let secret = key(0x42);
+    let req = fixture_request(&secret);
+    let created = create_signed_intention(&req, &secret).unwrap();
+    assert!(created.get("hash").is_some() || created.get("process_type_hash").is_some());
+    // Create output must not parse as Transaction until metadata is stripped.
+    assert!(serde_json::from_value::<ckb_jsonrpc_types::Transaction>(created.clone()).is_err());
+
+    let genesis = h256(0xAB);
+    let tx_hash = h256(0xCD);
+    let genesis_c = genesis.clone();
+    let tx_hash_c = tx_hash.clone();
+    let saw_send = Arc::new(Mutex::new(false));
+    let saw_send_c = Arc::clone(&saw_send);
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, params| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+            "get_block_hash" => json!(genesis_c.clone()),
+            "send_transaction" => {
+                let tx = &params.as_array().unwrap()[0];
+                assert!(tx.get("hash").is_none(), "hash must be stripped");
+                assert!(
+                    tx.get("process_type_hash").is_none(),
+                    "process_type_hash must be stripped"
+                );
+                serde_json::from_value::<ckb_jsonrpc_types::Transaction>(tx.clone())
+                    .expect("create→send payload must be a Transaction");
+                *saw_send_c.lock().unwrap() = true;
+                json!(tx_hash_c.clone())
+            }
+            _ => json!({"error": {"code": -1, "message": "unknown"}}),
+        },
+    ))));
+
+    let opts = SendOptions {
+        rpc_url: url,
+        network: "testnet".into(),
+        genesis_hash: genesis,
+    };
+    let hash = send_signed_transaction(&opts, &created).unwrap();
+    assert_eq!(hash, tx_hash);
+    assert!(*saw_send.lock().unwrap());
+}
+
+#[test]
 fn send_rejects_mainnet_network_flag() {
     let opts = SendOptions {
         rpc_url: "http://127.0.0.1:1".into(),
         network: "mainnet".into(),
-        genesis_hash: format!("0x{}", hex::encode([1u8; 32])),
+        genesis_hash: h256(0x01),
     };
     let err = send_signed_transaction(&opts, &sample_tx()).unwrap_err();
     assert!(matches!(err, CliError::NetworkGuard(_)));
@@ -125,11 +191,11 @@ fn send_rejects_mainnet_network_flag() {
 
 #[test]
 fn send_rejects_mainnet_chain_from_node() {
-    let genesis = format!("0x{}", hex::encode([0x11; 32]));
+    let genesis = h256(0x11);
     let url = spawn_mock(Arc::new(Mutex::new(Box::new(
         move |method, _| match method {
             "get_blockchain_info" => json!({"chain": "ckb"}),
-            "get_block_hash" => json!(format!("0x{}", hex::encode([0x11; 32]))),
+            "get_block_hash" => json!(h256(0x11)),
             _ => json!(null),
         },
     ))));
@@ -143,9 +209,68 @@ fn send_rejects_mainnet_chain_from_node() {
 }
 
 #[test]
+fn send_rejects_empty_or_missing_chain() {
+    for chain_info in [json!({}), json!({"chain": ""}), json!({"chain": "   "})] {
+        let saw_send = Arc::new(Mutex::new(false));
+        let saw_send_c = Arc::clone(&saw_send);
+        let chain_info_c = chain_info.clone();
+        let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+            move |method, _| match method {
+                "get_blockchain_info" => chain_info_c.clone(),
+                "get_block_hash" => json!(h256(0x11)),
+                "send_transaction" => {
+                    *saw_send_c.lock().unwrap() = true;
+                    json!(h256(0xCD))
+                }
+                _ => json!(null),
+            },
+        ))));
+        let opts = SendOptions {
+            rpc_url: url,
+            network: "testnet".into(),
+            genesis_hash: h256(0x11),
+        };
+        let err = send_signed_transaction(&opts, &sample_tx()).unwrap_err();
+        assert!(
+            matches!(err, CliError::NetworkGuard(_)),
+            "expected NetworkGuard for {chain_info}, got {err:?}"
+        );
+        assert!(
+            !*saw_send.lock().unwrap(),
+            "send_transaction must not run for {chain_info}"
+        );
+    }
+}
+
+#[test]
+fn send_rejects_unknown_chain_identity() {
+    let saw_send = Arc::new(Mutex::new(false));
+    let saw_send_c = Arc::clone(&saw_send);
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, _| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_dev"}),
+            "get_block_hash" => json!(h256(0x11)),
+            "send_transaction" => {
+                *saw_send_c.lock().unwrap() = true;
+                json!(h256(0xCD))
+            }
+            _ => json!(null),
+        },
+    ))));
+    let opts = SendOptions {
+        rpc_url: url,
+        network: "testnet".into(),
+        genesis_hash: h256(0x11),
+    };
+    let err = send_signed_transaction(&opts, &sample_tx()).unwrap_err();
+    assert!(matches!(err, CliError::NetworkGuard(_)));
+    assert!(!*saw_send.lock().unwrap());
+}
+
+#[test]
 fn send_rejects_genesis_mismatch() {
-    let node = format!("0x{}", hex::encode([0xAA; 32]));
-    let expected = format!("0x{}", hex::encode([0xBB; 32]));
+    let node = h256(0xAA);
+    let expected = h256(0xBB);
     let node_c = node.clone();
     let url = spawn_mock(Arc::new(Mutex::new(Box::new(
         move |method, _| match method {
@@ -175,8 +300,8 @@ fn send_rejects_genesis_mismatch() {
 
 #[test]
 fn safe_message_keeps_genesis_hashes_but_omits_hex_flood_guards() {
-    let node = format!("0x{}", hex::encode([0x11; 32]));
-    let expected = format!("0x{}", hex::encode([0x22; 32]));
+    let node = h256(0x11);
+    let expected = h256(0x22);
     let msg = CliError::GenesisMismatch {
         node: node.clone(),
         expected: expected.clone(),
@@ -195,11 +320,11 @@ fn safe_message_keeps_genesis_hashes_but_omits_hex_flood_guards() {
 
 #[test]
 fn send_surfaces_rpc_error_without_url_credentials() {
-    let genesis = format!("0x{}", hex::encode([0x01; 32]));
+    let genesis = h256(0x01);
     let url = spawn_mock(Arc::new(Mutex::new(Box::new(
         move |method, _| match method {
             "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
-            "get_block_hash" => json!(format!("0x{}", hex::encode([0x01; 32]))),
+            "get_block_hash" => json!(h256(0x01)),
             "send_transaction" => {
                 json!({"error": {"code": -3, "message": "TransactionFailedToResolve"}})
             }
@@ -220,8 +345,8 @@ fn send_surfaces_rpc_error_without_url_credentials() {
 
 #[test]
 fn cli_send_genesis_mismatch_prints_hashes_not_credentials() {
-    let node = format!("0x{}", hex::encode([0xAA; 32]));
-    let expected = format!("0x{}", hex::encode([0xBB; 32]));
+    let node = h256(0xAA);
+    let expected = h256(0xBB);
     let node_c = node.clone();
     let url = spawn_mock(Arc::new(Mutex::new(Box::new(
         move |method, _| match method {
