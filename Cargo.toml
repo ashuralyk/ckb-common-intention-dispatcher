@@ -20,6 +20,7 @@ members = [
   "contracts/cid_process_example",
   "crates/cid-process-executor",
   "runner",
+  "tools/cid-intention-cli",
 ]
 
 [workspace.dependencies]

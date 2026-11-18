@@ -1,0 +1,26 @@
+[package]
+name = "cid-intention-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Offline CKB-only CID Intention create + env-key signing (no RPC/broadcast)"
+publish = false
+
+[[bin]]
+name = "cid-intention-cli"
+path = "src/main.rs"
+
+[dependencies]
+ckb-cinnabar-calculator = { workspace = true }
+ckb_common_intention_dispatcher-calculator = { path = "../../calculator/intention" }
+cid-protocol = { path = "../../protocol" }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[dev-dependencies]
+ckb-system-scripts = "=0.5.4"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }
