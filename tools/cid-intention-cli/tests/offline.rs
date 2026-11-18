@@ -279,14 +279,9 @@ fn funding_outpoint_pinned_despite_alternate_same_lock_cell() {
     let secret = key(0x42);
     let req = fixture_request(&secret);
     let decoy = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let bundle = create_signed_intention_with_same_lock_decoy(
-        &req,
-        &secret,
-        decoy,
-        0,
-        900_000_000_000,
-    )
-    .unwrap();
+    let bundle =
+        create_signed_intention_with_same_lock_decoy(&req, &secret, decoy, 0, 900_000_000_000)
+            .unwrap();
     assert_eq!(bundle.skeleton.inputs.len(), 1);
     let prev = bundle.skeleton.inputs[0].input.previous_output();
     let want_tx = format!("0x{}", hex::encode(prev.tx_hash().as_slice()));
