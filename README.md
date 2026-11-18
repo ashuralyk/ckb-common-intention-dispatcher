@@ -162,11 +162,11 @@ non-fatal Cargo `error:` lines while Cargo walks unexpanded
 in package names and dependency keys). Those paths are not workspace members of
 this repo or of cinnabar; the build still succeeds.
 
-As of cinnabar `7187a50` (PR #6), Liquid `{% if use_local_cinnabar %}` tags are
-gone from the copied template manifests, so those specific parse errors no
-longer appear. Eliminating the remaining `{{crate_name}}` noise requires a
-further upstream change (e.g. exclude `templates/` from the git tree Cargo
-indexes, or keep template manifests outside paths Cargo walks).
+As of cinnabar PR #6 (pinned `f94937a`), Liquid `{% if use_local_cinnabar %}`
+tags are gone from the copied template manifests, so those specific parse
+errors no longer appear. Eliminating the remaining `{{crate_name}}` noise
+requires a further upstream change (e.g. exclude `templates/` from the git
+tree Cargo indexes, or keep template manifests outside paths Cargo walks).
 
 ## Layout
 
