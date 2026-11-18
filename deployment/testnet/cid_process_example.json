@@ -1,0 +1,17 @@
+[
+  {
+    "name": "cid_process_example",
+    "date": "2026-11-18T05:24:38.909044+00:00",
+    "operation": "deploy",
+    "version": "v0.1.1",
+    "tx_hash": "0xf807f704d8efabf84da844abfe6390ec1c031df3390991b6c4bdd4b45d78dcc9",
+    "out_index": 0,
+    "data_hash": "0x09f703922dc85959757d691e8780e65ed591c3d3873c7206b78d4769c5d44e5b",
+    "occupied_capacity": 10963000000000,
+    "payer_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
+    "contract_owner_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
+    "type_id": "0x9efaaa094bdbdc463813d26c82021a2bcc2fc9cf886a3c2cfd04612e44c5f16d",
+    "type_id_args": "0x1666a7d877fcabcf28bbc0903df791742a4c83a85dfb666a6c5db7adde76ace7",
+    "__comment": null
+  }
+]

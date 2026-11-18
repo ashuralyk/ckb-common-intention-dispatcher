@@ -1,0 +1,17 @@
+[
+  {
+    "name": "ckb_common_intention_dispatcher",
+    "date": "2026-11-18T05:19:44.015060+00:00",
+    "operation": "deploy",
+    "version": "v0.1.1",
+    "tx_hash": "0xdd5b21773f2822b1369336bdaa1b6ea49ac9762f59bfe0c244395dbb95560690",
+    "out_index": 0,
+    "data_hash": "0xa6ff4ce51172a208ca820fc07e81c596287c256e747fcb5a46434032655c087d",
+    "occupied_capacity": 8520600000000,
+    "payer_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
+    "contract_owner_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
+    "type_id": "0xf3f8a56c2594030f99f05b09ff1b6a1b07e6e07ed04309c1c4e246561faad326",
+    "type_id_args": "0xdfe0a1416c7373e8aaae5257445e940b6ff08e9cbc62ebca8541d28997370f25",
+    "__comment": null
+  }
+]
