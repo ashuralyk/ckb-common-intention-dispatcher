@@ -23,7 +23,7 @@ use ckb_cinnabar_calculator::{
 };
 use ckb_common_intention_dispatcher_calculator::{
     cid_lock, create_intention, digest_incompatible, digest_ok, encode_cid_args, timeout_burn,
-    Payload, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING, ERROR_PARTIAL_DIGEST,
+    Payload, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING, ERROR_MIXED_CID_LOCK, ERROR_PARTIAL_DIGEST,
     ERROR_PROCESS_MISMATCH, ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING,
     ERROR_TIMEOUT_NOT_REACHED, ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET,
     MAX_REFUND_FEE, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
@@ -31,10 +31,10 @@ use ckb_common_intention_dispatcher_calculator::{
 
 use crate::faker::{
     cid_args, dest_lock, dest_script, outpoint_ids, prepared_skeleton, process_type_hash,
-    process_type_script, script_to_cid, seed_fakenet_xudt_cell, seed_header, seed_intention,
-    seed_minimal_ckb_intention, seed_process_cell, seed_typed_dummy_cell, seed_typed_intention,
-    seed_user_cell, user_address, user_lock, user_script, xudt_type_script, CKB_CAPACITY,
-    CONTRACT_BIN, CONTRACT_NAME, PACK_BLOCK, USER_CELL_CAPACITY, XUDT_AMOUNT,
+    script_to_cid, seed_fakenet_xudt_cell, seed_header, seed_intention, seed_minimal_ckb_intention,
+    seed_process_cell, seed_typed_dummy_cell, seed_typed_intention, seed_user_cell, user_address,
+    user_lock, user_script, xudt_type_script, CKB_CAPACITY, CONTRACT_BIN, CONTRACT_NAME,
+    PACK_BLOCK, USER_CELL_CAPACITY, XUDT_AMOUNT,
 };
 
 const MAX_CYCLES: u64 = 50_000_000;
@@ -880,123 +880,198 @@ async fn shaved_digest_incompatible_rejects_co_bundle_with_digest_ok() {
     assert_eq!(exit(err), ERROR_PARTIAL_DIGEST);
 }
 
-/// A foreign lock whose args merely decode as CidArgs must not skew DigestOk
-/// detection or the DigestIncompatible shortfall aggregate (S).
+/// Foreign lock with CID-shaped args in a DigestIncompatible tx must be rejected
+/// (`MixedCidLock`) — cannot safely ignore spoofs without enabling cross-version
+/// fee reuse.
 #[tokio::test]
-async fn non_cid_cid_shaped_args_ignored_for_s_and_digest_ok() {
+async fn digest_incompatible_rejects_foreign_cid_shaped_lock() {
     require_binary();
     use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
-    for siphon in [false, true] {
-        let mut rpc = FakeRpcClient::default();
-        seed_fakenet_xudt_cell(&mut rpc);
-        let skeleton = prepared_skeleton(&rpc);
-        let process = seed_process_cell(&mut rpc);
-        let intention = seed_intention(
-            &mut rpc,
-            &skeleton,
-            // Unrelated process hash so this Intention stays DigestIncompatible.
-            encode_cid_args(
-                [0xCD; 32],
-                script_to_cid(&user_script()),
-                Payload {
-                    data: b"real-di".to_vec(),
-                },
-            ),
-            CKB_CAPACITY,
-            None,
-            PACK_BLOCK,
-        );
-        // Decoy: always-success lock + valid CID args pointing at the live Process.
-        // Use a distinct embedded user_lock so has_shared_refund_user (args-schema
-        // guard) does not fire — this test isolates fee/DigestOk classification.
-        let decoy_args = encode_cid_args(
-            process_type_hash(),
-            script_to_cid(&dest_script()),
-            Payload {
-                data: b"decoy-cid-args".to_vec(),
-            },
-        );
-        let decoy_lock = always_success_script(decoy_args);
-        let decoy = {
-            let out = fake_outpoint();
-            rpc.insert_fake_cell(
-                out.clone(),
-                CellOutputEx::new_from_scripts(
-                    decoy_lock.clone(),
-                    None,
-                    vec![],
-                    Some(USER_CELL_CAPACITY),
-                )
-                .unwrap(),
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"mixed-foreign"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let decoy_args = encode_cid_args(
+        process_type_hash(),
+        script_to_cid(&dest_script()),
+        Payload {
+            data: b"decoy-cid-args".to_vec(),
+        },
+    );
+    let decoy_lock = always_success_script(decoy_args);
+    let decoy = {
+        let out = fake_outpoint();
+        rpc.insert_fake_cell(
+            out.clone(),
+            CellOutputEx::new_from_scripts(
+                decoy_lock.clone(),
                 None,
-            );
-            out
-        };
-        let shortfall = MAX_REFUND_FEE;
-        let decoy_change = if siphon {
-            USER_CELL_CAPACITY + shortfall
-        } else {
-            USER_CELL_CAPACITY
-        };
-        let ix = Instruction::<FakeRpcClient>::new(vec![
-            Box::new(
-                ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
-                    tx_hash: outpoint_ids(&intention).0,
-                    index: outpoint_ids(&intention).1,
-                    since: None,
-                },
-            ),
-            Box::new(
-                ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
-                    tx_hash: outpoint_ids(&decoy).0,
-                    index: outpoint_ids(&decoy).1,
-                    since: None,
-                },
-            ),
-            Box::new(
-                ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
-                    tx_hash: outpoint_ids(&process).0,
-                    index: outpoint_ids(&process).1,
-                    since: None,
-                },
-            ),
-            Box::new(AddOutputCell {
-                lock_script: user_lock(),
-                type_script: None,
-                data: vec![],
-                capacity: CKB_CAPACITY - shortfall,
-                absolute_capacity: true,
-                type_id: false,
-            }),
-            Box::new(AddOutputCell {
-                lock_script: decoy_lock.into(),
-                type_script: None,
-                data: vec![],
-                capacity: decoy_change,
-                absolute_capacity: true,
-                type_id: false,
-            }),
-            // Process pair so decoy args would look like DigestOk if counted by args alone.
-            Box::new(AddOutputCell {
-                lock_script: dest_lock(),
-                type_script: Some(process_type_script().into()),
-                data: vec![],
-                capacity: CKB_CAPACITY,
-                absolute_capacity: true,
-                type_id: false,
-            }),
-        ]);
-        if siphon {
-            let err = verify(&rpc, skeleton, vec![ix])
-                .await
-                .expect_err("F>=S still rejects shortfall diverted into decoy change");
-            assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
-        } else {
-            verify(&rpc, skeleton, vec![ix])
-                .await
-                .expect("foreign CID-shaped args must not trigger DigestOk / inflate S");
-        }
-    }
+                vec![],
+                Some(USER_CELL_CAPACITY),
+            )
+            .unwrap(),
+            None,
+        );
+        out
+    };
+    let shortfall = 1_000u64;
+    let ix = Instruction::<FakeRpcClient>::new(vec![
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention).0,
+                index: outpoint_ids(&intention).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&decoy).0,
+                index: outpoint_ids(&decoy).1,
+                since: None,
+            },
+        ),
+        Box::new(AddOutputCell {
+            lock_script: user_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: decoy_lock.into(),
+            type_script: None,
+            data: vec![],
+            capacity: USER_CELL_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    ]);
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("foreign CID-shaped lock must MixedCidLock");
+    assert_eq!(exit(err), ERROR_MIXED_CID_LOCK);
+}
+
+/// Two CID identities (Data1 vs Data2) each shaving; F = max(S_i) would pass
+/// broken per-group checks while S_A+S_B > F funds a third-party siphon.
+#[tokio::test]
+async fn digest_incompatible_rejects_cross_identity_fee_reuse() {
+    require_binary();
+    use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let shortfall = 1_000u64;
+    let intention_a = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"id-a"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    // Second Intention: same binary code_hash, Data2 hash_type → distinct identity.
+    let args_b = encode_cid_args(
+        process_type_hash(),
+        script_to_cid(&dest_script()),
+        Payload {
+            data: b"id-b".to_vec(),
+        },
+    );
+    let lock_b = cid_lock(args_b)
+        .to_script(&skeleton)
+        .unwrap()
+        .as_builder()
+        .hash_type(ScriptHashType::Data2)
+        .build();
+    let intention_b = {
+        let out = fake_outpoint();
+        rpc.insert_fake_cell(
+            out.clone(),
+            CellOutputEx::new_from_scripts(lock_b, None, vec![], Some(CKB_CAPACITY)).unwrap(),
+            Some(ckb_cinnabar_calculator::simulation::fake_header_view(
+                PACK_BLOCK, PACK_BLOCK, PACK_BLOCK,
+            )),
+        );
+        out
+    };
+    // Funder lets the siphon cell stay above occupied while absorbing one shortfall
+    // so F = shortfall = max(S_A, S_B) < S_A+S_B (the broken per-group accept case).
+    let siphon_lock = always_success_script(vec![0xDD]);
+    let funder = {
+        let out = fake_outpoint();
+        rpc.insert_fake_cell(
+            out.clone(),
+            CellOutputEx::new_from_scripts(
+                siphon_lock.clone(),
+                None,
+                vec![],
+                Some(USER_CELL_CAPACITY),
+            )
+            .unwrap(),
+            None,
+        );
+        out
+    };
+    let ix = Instruction::<FakeRpcClient>::new(vec![
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention_a).0,
+                index: outpoint_ids(&intention_a).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention_b).0,
+                index: outpoint_ids(&intention_b).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&funder).0,
+                index: outpoint_ids(&funder).1,
+                since: None,
+            },
+        ),
+        Box::new(AddOutputCell {
+            lock_script: user_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: siphon_lock.into(),
+            type_script: None,
+            data: vec![],
+            capacity: USER_CELL_CAPACITY + shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    ]);
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("mixed CID identities must not share DigestIncompatible tx");
+    assert_eq!(exit(err), ERROR_MIXED_CID_LOCK);
 }
 
 #[tokio::test]

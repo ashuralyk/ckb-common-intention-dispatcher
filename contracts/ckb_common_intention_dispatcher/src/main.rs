@@ -7,7 +7,8 @@
 //! from transaction structure (not a witness enum):
 //! - `digest_ok` — matching Process type hash in inputs AND outputs; no user input required
 //! - `digest_incompatible` — no matching Process pair; fee-bounded CKB refund (≤ MAX_REFUND_FEE
-//!   and `tx_fee >= Σ shortfalls`), exact tokens; user not in inputs
+//!   and `tx_fee >= Σ shortfalls` for this program identity), exact tokens; rejects other
+//!   CID lock identities in the same tx (`MixedCidLock`); user not in inputs
 //! - `timeout_burn` — no matching Process pair; user input + timeout headers + **exact** refund
 
 use cid_protocol::{HOP_DIGEST_INCOMPATIBLE, HOP_DIGEST_OK, HOP_TIMEOUT_BURN};

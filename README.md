@@ -78,6 +78,15 @@ capacity. **Do not co-bundle shaved DigestIncompatible refunds with DigestOk**
 must build separate transactions. Exact incompatible refunds may still share a
 tx with DigestOk as today.
 
+**Mixed CID lock identities forbidden on DigestIncompatible:** a DigestIncompatible
+spend rejects the tx if any other input lock decodes as CID args but has a
+different `code_hash` or `hash_type` than the executing script (`MixedCidLock`).
+That covers two deployments, Data1/Data2 aliases, and foreign locks that only
+embed CID-shaped args — they cannot share a DigestIncompatible transaction
+(otherwise each group could accept `F >= S_local` while `S_A+S_B > F`). Same
+identity (same code_hash+hash_type) multi-Intention batches remain OK when
+`F >= Σ shortfalls`.
+
 No Intention-args / encoding change: fixed dual-written `MAX_REFUND_FEE`.
 
 Until aggregate refunds are specified, refund paths accept at most one Intention
@@ -313,7 +322,8 @@ presence/mismatch checks, a failing executable Process, authorized batch digest,
 CellDep-only theft, xUDT capacity theft on both refund paths, DigestIncompatible
 fee-binding (exact / within-cap / beyond-cap CKB+xUDT / wrong lock / token mutation /
 multi-user aggregate fee / third-party siphon / fee reuse / sponsor change /
-occupied floor / shaved+DigestOk co-bundle rejection / TimeoutBurn shaved rejection),
+occupied floor / shaved+DigestOk co-bundle / MixedCidLock for foreign CID-shaped
+locks and cross-identity Data1/Data2 fee reuse / TimeoutBurn shaved rejection),
 non-issuer token collection/change/insufficient balance, missing output with
 xUDT input dependency, timeout boundaries 10799/10800/10801, partial user proceeds,
 and cross-Intention refund reuse. `tests/src/signed.rs` executes the real genesis

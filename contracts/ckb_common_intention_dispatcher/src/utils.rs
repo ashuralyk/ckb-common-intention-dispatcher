@@ -224,12 +224,29 @@ pub fn tx_fee_shannons() -> Result<u64> {
 
 /// True when `lock` is the same CID program as the executing script group.
 ///
-/// Matches `code_hash` + `hash_type` only (args differ per Intention). Ignores
-/// foreign locks that merely embed CID-shaped args so they cannot skew fee
-/// shortfall aggregates or DigestOk detection.
+/// Matches `code_hash` + `hash_type` only (args differ per Intention). Used to
+/// scope same-program `S` / DigestOk scans. DigestIncompatible also fail-closes
+/// on any other CID-shaped identity via [`reject_mixed_cid_lock_inputs`].
 fn is_executing_cid_lock(lock: &Script) -> Result<bool> {
     let current = load_script()?;
     Ok(lock.code_hash() == current.code_hash() && lock.hash_type() == current.hash_type())
+}
+
+/// Fail-closed: DigestIncompatible txs may not share the transaction with any
+/// other CID-shaped lock identity (different deployment, hash_type alias, or a
+/// foreign lock that only embeds CID args). Those cannot be safely merged into
+/// tx-wide `S` without either spoofing or cross-version fee reuse.
+pub fn reject_mixed_cid_lock_inputs() -> Result<()> {
+    let current = load_script()?;
+    for lock in QueryIter::new(load_cell_lock, Source::Input) {
+        if CidArgs::decode(&lock.args().raw_data()).is_err() {
+            continue;
+        }
+        if lock.code_hash() != current.code_hash() || lock.hash_type() != current.hash_type() {
+            return Err(CidError::MixedCidLock.into());
+        }
+    }
+    Ok(())
 }
 
 /// True when some **this-program** CID Intention in this tx takes DigestOk.
@@ -256,8 +273,8 @@ pub fn has_digest_ok_intention() -> Result<bool> {
 /// Skips DigestOk (process pair) and TimeoutBurn (user lock in inputs) so those
 /// paths cannot mint fee-budget and shaved refunds cannot reuse another path's
 /// capacity. Every DigestIncompatible group must compare the **same** aggregate
-/// against tx fee — preventing per-group fee double-counting. Non-CID locks with
-/// CID-shaped args are ignored.
+/// against tx fee — preventing per-group fee double-counting. Callers must run
+/// [`reject_mixed_cid_lock_inputs`] first so other identities are not present.
 pub fn digest_incompatible_total_shortfall() -> Result<u64> {
     let mut total = 0u64;
     let mut index = 0usize;
@@ -307,9 +324,12 @@ pub fn digest_incompatible_total_shortfall() -> Result<u64> {
 
 /// Bind DigestIncompatible capacity haircuts to real miner fee (no diversion).
 ///
-/// Rejects shaved refunds co-bundled with DigestOk (backend must use separate
-/// txs; Process example still requires exact beneficiary capacity).
+/// Rejects other CID lock identities in the same tx (`MixedCidLock`), and shaved
+/// refunds co-bundled with DigestOk. Process example still requires exact
+/// beneficiary capacity — backends must keep shaved refunds in separate txs.
 pub fn fee_covers_digest_incompatible_shortfalls(this_shortfall: u64) -> Result<()> {
+    // Always, including exact (zero shortfall) DigestIncompatible refunds.
+    reject_mixed_cid_lock_inputs()?;
     if this_shortfall > 0 && has_digest_ok_intention()? {
         return Err(CidError::PartialDigest.into());
     }

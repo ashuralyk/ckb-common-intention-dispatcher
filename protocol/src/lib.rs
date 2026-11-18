@@ -91,6 +91,9 @@ pub const ERROR_TIMEOUT_NOT_REACHED: i8 = 26;
 pub const ERROR_HEADER_MISSING: i8 = 27;
 pub const ERROR_ZERO_ASSET: i8 = 28;
 pub const ERROR_UNSUPPORTED_TYPE: i8 = 29;
+/// DigestIncompatible tx contains another CID-shaped lock with a different
+/// `code_hash` / `hash_type` (other deployment, hash_type alias, or foreign spoof).
+pub const ERROR_MIXED_CID_LOCK: i8 = 30;
 
 /// Domain hop names registered in `cinnabar_main!`.
 pub const HOP_DIGEST_OK: &str = "digest_ok";
