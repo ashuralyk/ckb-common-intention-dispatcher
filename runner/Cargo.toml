@@ -1,0 +1,9 @@
+[package]
+edition = "2021"
+name = "ckb_common_intention_dispatcher-runner"
+version = "0.1.0"
+description = "Optional Cinnabar deploy/migrate CLI for this workspace (not part of default host members)"
+publish = false
+
+[dependencies]
+ckb-cinnabar = { workspace = true }
