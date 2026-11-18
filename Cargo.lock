@@ -403,7 +403,7 @@ dependencies = [
 [[package]]
 name = "ckb-cinnabar"
 version = "0.1.0"
-source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=7187a50ea8eebef5ebea68ac0d6e223a64b08ebf#7187a50ea8eebef5ebea68ac0d6e223a64b08ebf"
+source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=8cd49b0dea7306c61d2977a660491f896440251b#8cd49b0dea7306c61d2977a660491f896440251b"
 dependencies = [
  "chrono",
  "ckb-cinnabar-calculator",
@@ -418,7 +418,7 @@ dependencies = [
 [[package]]
 name = "ckb-cinnabar-calculator"
 version = "0.1.0"
-source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=7187a50ea8eebef5ebea68ac0d6e223a64b08ebf#7187a50ea8eebef5ebea68ac0d6e223a64b08ebf"
+source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=8cd49b0dea7306c61d2977a660491f896440251b#8cd49b0dea7306c61d2977a660491f896440251b"
 dependencies = [
  "async-trait",
  "bech32",
@@ -449,12 +449,12 @@ dependencies = [
 [[package]]
 name = "ckb-cinnabar-core"
 version = "0.1.0"
-source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=7187a50ea8eebef5ebea68ac0d6e223a64b08ebf#7187a50ea8eebef5ebea68ac0d6e223a64b08ebf"
+source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=8cd49b0dea7306c61d2977a660491f896440251b#8cd49b0dea7306c61d2977a660491f896440251b"
 
 [[package]]
 name = "ckb-cinnabar-verifier"
 version = "0.1.0"
-source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=7187a50ea8eebef5ebea68ac0d6e223a64b08ebf#7187a50ea8eebef5ebea68ac0d6e223a64b08ebf"
+source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=8cd49b0dea7306c61d2977a660491f896440251b#8cd49b0dea7306c61d2977a660491f896440251b"
 dependencies = [
  "blake2b-ref",
  "ckb-cinnabar-calculator",
@@ -467,7 +467,7 @@ dependencies = [
 [[package]]
 name = "ckb-cinnabar-verifier-macros"
 version = "0.1.0"
-source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=7187a50ea8eebef5ebea68ac0d6e223a64b08ebf#7187a50ea8eebef5ebea68ac0d6e223a64b08ebf"
+source = "git+https://github.com/ashuralyk/ckb-cinnabar?rev=8cd49b0dea7306c61d2977a660491f896440251b#8cd49b0dea7306c61d2977a660491f896440251b"
 dependencies = [
  "proc-macro2",
  "quote",
