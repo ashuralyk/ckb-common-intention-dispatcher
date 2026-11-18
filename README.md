@@ -91,7 +91,10 @@ output to the User Lock must be the refund; with a fee sponsor, keep
 **Redeploy required:** changing refund matching changes the `cid_lock` binary /
 data hash. Rebuild, redeploy, and point new Intentions at the new code hash;
 existing cells locked to an older binary keep the old exact-capacity rule.
-See `deployment/testnet/` metadata notes (do not treat old `data_hash` as current).
+**TimeoutBurn stays exact** after redeploy (only DigestIncompatible gains the
+fee-bound haircut). See `deployment/README.md` for the expected RISC-V
+`data_hash` and how to verify it; `deployment/testnet/` JSON may still list a
+stale deployed hash — do not treat that as current until post-redeploy update.
 
 `TIMEOUT_BLOCKS = 10800` and `MAX_REFUND_FEE = 1_000_000` are dual-written
 on-chain and off-chain. Pack height is the block that committed the Intention;

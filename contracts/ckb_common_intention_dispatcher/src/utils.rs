@@ -10,7 +10,7 @@ use ckb_cinnabar_verifier::{
         error::SysError,
         high_level::{
             load_cell_capacity, load_cell_data, load_cell_lock, load_cell_lock_hash,
-            load_cell_occupied_capacity, load_cell_type, load_header, QueryIter,
+            load_cell_occupied_capacity, load_cell_type, load_header, load_script, QueryIter,
         },
     },
     Result,
@@ -222,9 +222,22 @@ pub fn tx_fee_shannons() -> Result<u64> {
         .ok_or_else(|| CidError::RefundAssetMismatch.into())
 }
 
-/// True when some CID Intention in this tx takes the DigestOk path.
+/// True when `lock` is the same CID program as the executing script group.
+///
+/// Matches `code_hash` + `hash_type` only (args differ per Intention). Ignores
+/// foreign locks that merely embed CID-shaped args so they cannot skew fee
+/// shortfall aggregates or DigestOk detection.
+fn is_executing_cid_lock(lock: &Script) -> Result<bool> {
+    let current = load_script()?;
+    Ok(lock.code_hash() == current.code_hash() && lock.hash_type() == current.hash_type())
+}
+
+/// True when some **this-program** CID Intention in this tx takes DigestOk.
 pub fn has_digest_ok_intention() -> Result<bool> {
     for lock in QueryIter::new(load_cell_lock, Source::Input) {
+        if !is_executing_cid_lock(&lock)? {
+            continue;
+        }
         let Ok(args) = CidArgs::decode(&lock.args().raw_data()) else {
             continue;
         };
@@ -237,12 +250,14 @@ pub fn has_digest_ok_intention() -> Result<bool> {
     Ok(false)
 }
 
-/// Σ(intention_cap − refund_cap) over DigestIncompatible CID inputs only.
+/// Σ(intention_cap − refund_cap) over DigestIncompatible inputs of **this** CID
+/// program only (`code_hash` + `hash_type` of `load_script()`).
 ///
 /// Skips DigestOk (process pair) and TimeoutBurn (user lock in inputs) so those
 /// paths cannot mint fee-budget and shaved refunds cannot reuse another path's
 /// capacity. Every DigestIncompatible group must compare the **same** aggregate
-/// against tx fee — preventing per-group fee double-counting.
+/// against tx fee — preventing per-group fee double-counting. Non-CID locks with
+/// CID-shaped args are ignored.
 pub fn digest_incompatible_total_shortfall() -> Result<u64> {
     let mut total = 0u64;
     let mut index = 0usize;
@@ -252,6 +267,10 @@ pub fn digest_incompatible_total_shortfall() -> Result<u64> {
             Err(SysError::IndexOutOfBound) => break,
             Err(err) => return Err(err.into()),
         };
+        if !is_executing_cid_lock(&lock)? {
+            index += 1;
+            continue;
+        }
         let Ok(args) = CidArgs::decode(&lock.args().raw_data()) else {
             index += 1;
             continue;

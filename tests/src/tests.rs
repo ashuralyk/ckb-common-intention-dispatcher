@@ -31,10 +31,10 @@ use ckb_common_intention_dispatcher_calculator::{
 
 use crate::faker::{
     cid_args, dest_lock, dest_script, outpoint_ids, prepared_skeleton, process_type_hash,
-    script_to_cid, seed_fakenet_xudt_cell, seed_header, seed_intention, seed_minimal_ckb_intention,
-    seed_process_cell, seed_typed_dummy_cell, seed_typed_intention, seed_user_cell, user_address,
-    user_lock, user_script, xudt_type_script, CKB_CAPACITY, CONTRACT_BIN, CONTRACT_NAME,
-    PACK_BLOCK, USER_CELL_CAPACITY, XUDT_AMOUNT,
+    process_type_script, script_to_cid, seed_fakenet_xudt_cell, seed_header, seed_intention,
+    seed_minimal_ckb_intention, seed_process_cell, seed_typed_dummy_cell, seed_typed_intention,
+    seed_user_cell, user_address, user_lock, user_script, xudt_type_script, CKB_CAPACITY,
+    CONTRACT_BIN, CONTRACT_NAME, PACK_BLOCK, USER_CELL_CAPACITY, XUDT_AMOUNT,
 };
 
 const MAX_CYCLES: u64 = 50_000_000;
@@ -878,6 +878,125 @@ async fn shaved_digest_incompatible_rejects_co_bundle_with_digest_ok() {
         .await
         .expect_err("shaved refund must not co-bundle with DigestOk");
     assert_eq!(exit(err), ERROR_PARTIAL_DIGEST);
+}
+
+/// A foreign lock whose args merely decode as CidArgs must not skew DigestOk
+/// detection or the DigestIncompatible shortfall aggregate (S).
+#[tokio::test]
+async fn non_cid_cid_shaped_args_ignored_for_s_and_digest_ok() {
+    require_binary();
+    use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
+    for siphon in [false, true] {
+        let mut rpc = FakeRpcClient::default();
+        seed_fakenet_xudt_cell(&mut rpc);
+        let skeleton = prepared_skeleton(&rpc);
+        let process = seed_process_cell(&mut rpc);
+        let intention = seed_intention(
+            &mut rpc,
+            &skeleton,
+            // Unrelated process hash so this Intention stays DigestIncompatible.
+            encode_cid_args(
+                [0xCD; 32],
+                script_to_cid(&user_script()),
+                Payload {
+                    data: b"real-di".to_vec(),
+                },
+            ),
+            CKB_CAPACITY,
+            None,
+            PACK_BLOCK,
+        );
+        // Decoy: always-success lock + valid CID args pointing at the live Process.
+        // Use a distinct embedded user_lock so has_shared_refund_user (args-schema
+        // guard) does not fire — this test isolates fee/DigestOk classification.
+        let decoy_args = encode_cid_args(
+            process_type_hash(),
+            script_to_cid(&dest_script()),
+            Payload {
+                data: b"decoy-cid-args".to_vec(),
+            },
+        );
+        let decoy_lock = always_success_script(decoy_args);
+        let decoy = {
+            let out = fake_outpoint();
+            rpc.insert_fake_cell(
+                out.clone(),
+                CellOutputEx::new_from_scripts(
+                    decoy_lock.clone(),
+                    None,
+                    vec![],
+                    Some(USER_CELL_CAPACITY),
+                )
+                .unwrap(),
+                None,
+            );
+            out
+        };
+        let shortfall = MAX_REFUND_FEE;
+        let decoy_change = if siphon {
+            USER_CELL_CAPACITY + shortfall
+        } else {
+            USER_CELL_CAPACITY
+        };
+        let ix = Instruction::<FakeRpcClient>::new(vec![
+            Box::new(
+                ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                    tx_hash: outpoint_ids(&intention).0,
+                    index: outpoint_ids(&intention).1,
+                    since: None,
+                },
+            ),
+            Box::new(
+                ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                    tx_hash: outpoint_ids(&decoy).0,
+                    index: outpoint_ids(&decoy).1,
+                    since: None,
+                },
+            ),
+            Box::new(
+                ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                    tx_hash: outpoint_ids(&process).0,
+                    index: outpoint_ids(&process).1,
+                    since: None,
+                },
+            ),
+            Box::new(AddOutputCell {
+                lock_script: user_lock(),
+                type_script: None,
+                data: vec![],
+                capacity: CKB_CAPACITY - shortfall,
+                absolute_capacity: true,
+                type_id: false,
+            }),
+            Box::new(AddOutputCell {
+                lock_script: decoy_lock.into(),
+                type_script: None,
+                data: vec![],
+                capacity: decoy_change,
+                absolute_capacity: true,
+                type_id: false,
+            }),
+            // Process pair so decoy args would look like DigestOk if counted by args alone.
+            Box::new(AddOutputCell {
+                lock_script: dest_lock(),
+                type_script: Some(process_type_script().into()),
+                data: vec![],
+                capacity: CKB_CAPACITY,
+                absolute_capacity: true,
+                type_id: false,
+            }),
+        ]);
+        if siphon {
+            let err = verify(&rpc, skeleton, vec![ix])
+                .await
+                .expect_err("F>=S still rejects shortfall diverted into decoy change");
+            assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
+        } else {
+            verify(&rpc, skeleton, vec![ix])
+                .await
+                .expect("foreign CID-shaped args must not trigger DigestOk / inflate S");
+        }
+    }
 }
 
 #[tokio::test]
