@@ -154,19 +154,16 @@ cargo run -p ckb_common_intention_dispatcher-runner -- --json --dry-run deploy \
 Cargo aliases `deploy` / `migrate` / `consume` / `list` in `.cargo/config.toml`
 forward to this package.
 
-## Upstream ckb-cinnabar template noise
+## Upstream ckb-cinnabar notes
 
-Depending on any package from the `ckb-cinnabar` git revision may still print
-non-fatal Cargo `error:` lines while Cargo walks unexpanded
-`templates/contract/**/Cargo.toml` cargo-generate placeholders (`{{crate_name}}`
-in package names and dependency keys). Those paths are not workspace members of
-this repo or of cinnabar; the build still succeeds.
+Template Cargo manifests under cinnabar’s `templates/contract/` are shipped as
+`Cargo.toml.liquid` (pinned `8cd49b0`), so Cargo no longer emits non-fatal
+`error:` diagnostics while fetching that git dependency.
 
-As of cinnabar PR #6 (pinned `f94937a`), Liquid `{% if use_local_cinnabar %}`
-tags are gone from the copied template manifests, so those specific parse
-errors no longer appear. Eliminating the remaining `{{crate_name}}` noise
-requires a further upstream change (e.g. exclude `templates/` from the git
-tree Cargo indexes, or keep template manifests outside paths Cargo walks).
+Contract ELF hashes are **not** guaranteed reproducible across machines,
+`CARGO_HOME` layouts, or checkout path differences; treat
+`deployment/testnet/*.json` `data_hash` values as metadata for already-deployed
+artifacts, not as a local rebuild oracle.
 
 ## Layout
 
