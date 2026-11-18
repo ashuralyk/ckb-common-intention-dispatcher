@@ -1,9 +1,10 @@
 //! Assemble and offline-sign a CKB-only Intention create tx.
 
 use ckb_cinnabar_calculator::{
-    address::{Address, AddressPayload},
     instruction::Instruction,
-    operation::basic::{AddCellDep, AddSecp256k1SighashSignatures},
+    operation::basic::{
+        AddCellDep, AddInputCellByOutPoint, AddOutputCell, AddSecp256k1SighashSignatures,
+    },
     re_exports::{
         ckb_hash::blake2b_256,
         ckb_jsonrpc_types,
@@ -22,7 +23,7 @@ use ckb_cinnabar_calculator::{
     TransactionCalculator,
 };
 use ckb_common_intention_dispatcher_calculator::{
-    create_intention, encode_cid_args, Payload, CONTRACT_NAME,
+    cid_lock, encode_cid_args, Payload, CONTRACT_NAME,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -32,6 +33,10 @@ use crate::request::{CreateRequest, NamedDep, ScriptJson};
 
 /// Environment variable holding a 32-byte hex secp256k1 private key.
 pub const PRIVKEY_ENV: &str = "CID_INTENTION_PRIVKEY";
+
+fn hex_digit_count(s: &str) -> usize {
+    s.chars().filter(|c| c.is_ascii_hexdigit()).count()
+}
 
 #[derive(Debug, Error)]
 pub enum CliError {
@@ -55,18 +60,45 @@ pub enum CliError {
     Json(#[from] serde_json::Error),
     #[error("rpc: {0}")]
     Rpc(String),
+    /// Short policy / fail-closed messages (must not carry raw hex dumps).
     #[error("network guard: {0}")]
     NetworkGuard(String),
+    /// Public chain identifiers — safe to surface via [`CliError::safe_message`].
+    #[error("genesis mismatch: node={node} expected={expected}")]
+    GenesisMismatch { node: String, expected: String },
 }
 
 impl CliError {
-    /// Redact anything that might look like key material in Display paths we control.
+    /// Operator-facing text: actionable genesis diagnostics stay visible; raw
+    /// config/RPC-controlled hex floods (possible key material) are omitted.
     pub fn safe_message(&self) -> String {
-        let raw = self.to_string();
-        if raw.len() > 8 && raw.chars().filter(|c| c.is_ascii_hexdigit()).count() > 60 {
-            "error (details omitted to avoid leaking hex material)".into()
-        } else {
-            raw
+        match self {
+            CliError::GenesisMismatch { node, expected } => {
+                format!("genesis mismatch: node={node} expected={expected}")
+            }
+            CliError::NetworkGuard(msg) => {
+                // Do not blanket-trust config-controlled strings that may embed secrets.
+                if hex_digit_count(msg) > 40 || msg.len() > 160 {
+                    "network guard: details omitted".into()
+                } else {
+                    format!("network guard: {msg}")
+                }
+            }
+            CliError::Rpc(msg) => {
+                if hex_digit_count(msg) > 60 || msg.len() > 200 {
+                    "rpc: details omitted".into()
+                } else {
+                    format!("rpc: {msg}")
+                }
+            }
+            other => {
+                let raw = other.to_string();
+                if raw.len() > 8 && hex_digit_count(&raw) > 60 {
+                    "error (details omitted to avoid leaking hex material)".into()
+                } else {
+                    raw
+                }
+            }
         }
     }
 }
@@ -192,12 +224,52 @@ fn add_named_dep(
     Ok(())
 }
 
+/// Signed Intention plus FakeRpc/skeleton retained for offline VM verification.
+pub struct SignedIntentionBundle {
+    pub tx_json: Value,
+    pub rpc: FakeRpcClient,
+    pub skeleton: TransactionSkeleton,
+}
+
 /// Build and offline-sign an Intention create transaction.
 ///
 /// `secret` must never be logged or written into the returned JSON.
 pub fn create_signed_intention(req: &CreateRequest, secret: &SecretKey) -> Result<Value, CliError> {
+    Ok(create_signed_intention_bundle(req, secret)?.tx_json)
+}
+
+/// Same as [`create_signed_intention`], but keeps FakeRpc + skeleton for tests
+/// (e.g. TransactionSimulator sighash verification with synthetic keys).
+pub fn create_signed_intention_bundle(
+    req: &CreateRequest,
+    secret: &SecretKey,
+) -> Result<SignedIntentionBundle, CliError> {
+    create_signed_intention_bundle_inner(req, secret, &[])
+}
+
+/// Like [`create_signed_intention_bundle`], but seeds additional same-lock live cells
+/// into FakeRpc before outpoint-pinned selection (proves substitutes cannot win).
+pub fn create_signed_intention_with_same_lock_decoy(
+    req: &CreateRequest,
+    secret: &SecretKey,
+    decoy_tx_hash: &str,
+    decoy_index: u32,
+    decoy_capacity: u64,
+) -> Result<SignedIntentionBundle, CliError> {
+    create_signed_intention_bundle_inner(
+        req,
+        secret,
+        &[(decoy_tx_hash, decoy_index, decoy_capacity)],
+    )
+}
+
+fn create_signed_intention_bundle_inner(
+    req: &CreateRequest,
+    secret: &SecretKey,
+    same_lock_decoys: &[(&str, u32, u64)],
+) -> Result<SignedIntentionBundle, CliError> {
     assert_unique_outpoints(req)?;
-    let network = network_of(&req.network)?;
+    let _network = network_of(&req.network)?;
 
     if req.cid_lock_dep.name != CONTRACT_NAME {
         return Err(CliError::InvalidRequest(format!(
@@ -242,7 +314,22 @@ pub fn create_signed_intention(req: &CreateRequest, secret: &SecretKey) -> Resul
     let user_lock = req.funding.lock.to_cid_script()?;
     let args = encode_cid_args(process_type_hash, user_lock, payload);
 
+    let funding_out = outpoint(&req.funding.tx_hash, req.funding.index)?;
+    let funding_tx_hash = h256_to_hash(&H256(decode_hash32(&req.funding.tx_hash)?));
+
     let mut rpc = FakeRpcClient::default();
+    // Seed decoys first so address-ordered scans would prefer them if used.
+    for (tx, idx, cap) in same_lock_decoys {
+        insert_cell(
+            &mut rpc,
+            tx,
+            *idx,
+            funding_lock.clone(),
+            None,
+            Vec::new(),
+            Some(*cap),
+        )?;
+    }
     insert_cell(
         &mut rpc,
         &req.funding.tx_hash,
@@ -279,13 +366,39 @@ pub fn create_signed_intention(req: &CreateRequest, secret: &SecretKey) -> Resul
         add_named_dep(&rpc, &mut skeleton, dep)?;
     }
 
-    let address = Address::new(network, AddressPayload::from(funding_lock.clone()));
-    let create =
-        create_intention::<FakeRpcClient>(address, args.clone(), req.intention_capacity, None);
+    // Pin funding by explicit outpoint (CKB-only create path; no address scan).
+    let create = Instruction::new(vec![
+        Box::new(AddInputCellByOutPoint {
+            tx_hash: funding_tx_hash,
+            index: req.funding.index,
+            since: None,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: cid_lock(args),
+            type_script: None,
+            data: Vec::new(),
+            capacity: req.intention_capacity,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    ]);
     TransactionCalculator::default()
         .instruction(create)
         .apply_skeleton(&rpc, &mut skeleton)
         .map_err(|e| CliError::Calculator(e.to_string()))?;
+
+    // Enforce outpoint contract before fee selection can pull same-lock substitutes.
+    if skeleton.inputs.len() != 1 {
+        return Err(CliError::Calculator(format!(
+            "expected 1 input after outpoint pin, got {}",
+            skeleton.inputs.len()
+        )));
+    }
+    if skeleton.inputs[0].input.previous_output() != funding_out {
+        return Err(CliError::Calculator(
+            "funding previous_output does not match requested outpoint".into(),
+        ));
+    }
 
     skeleton
         .balance(
@@ -295,6 +408,19 @@ pub fn create_signed_intention(req: &CreateRequest, secret: &SecretKey) -> Resul
             ChangeReceiver::Script(funding_lock.clone().into()),
         )
         .map_err(|e| CliError::Calculator(e.to_string()))?;
+
+    // Re-assert after balance: still exactly the requested funding outpoint (no substitutes).
+    if skeleton.inputs.len() != 1 {
+        return Err(CliError::Calculator(format!(
+            "expected 1 input after balance, got {}",
+            skeleton.inputs.len()
+        )));
+    }
+    if skeleton.inputs[0].input.previous_output() != funding_out {
+        return Err(CliError::Calculator(
+            "funding previous_output changed after balance".into(),
+        ));
+    }
 
     let sign = AddSecp256k1SighashSignatures {
         user_lock_scripts: vec![ScriptEx::from(funding_lock.clone())],
@@ -306,12 +432,6 @@ pub fn create_signed_intention(req: &CreateRequest, secret: &SecretKey) -> Resul
         .map_err(|e| CliError::Calculator(e.to_string()))?;
 
     // Structural checks (no network).
-    if skeleton.inputs.len() != 1 {
-        return Err(CliError::Calculator(format!(
-            "expected 1 input, got {}",
-            skeleton.inputs.len()
-        )));
-    }
     if skeleton.outputs.len() < 2 {
         return Err(CliError::Calculator(
             "expected intention + change outputs".into(),
@@ -341,7 +461,7 @@ pub fn create_signed_intention(req: &CreateRequest, secret: &SecretKey) -> Resul
         return Err(CliError::Calculator("missing sighash witness".into()));
     }
 
-    let view = skeleton.into_transaction_view();
+    let view = skeleton.clone().into_transaction_view();
     let json_tx = ckb_jsonrpc_types::TransactionView::from(view);
     let mut value = serde_json::to_value(&json_tx)?;
     // Attach non-secret metadata useful for operators.
@@ -360,7 +480,11 @@ pub fn create_signed_intention(req: &CreateRequest, secret: &SecretKey) -> Resul
             "refusing to emit output that contains key material".into(),
         ));
     }
-    Ok(value)
+    Ok(SignedIntentionBundle {
+        tx_json: value,
+        rpc,
+        skeleton,
+    })
 }
 
 /// Expose process type hash derivation for tests.

@@ -19,13 +19,13 @@ Lean host binary in this contract repo that:
 | Concern | Choice |
 |---------|--------|
 | Asset | CKB only (no xUDT) |
-| Inputs | Explicit funding cell + deps in offline request JSON |
+| Inputs | Explicit funding outpoint + deps in offline request JSON (pinned by outpoint; not address scan) |
 | Process identity | Full Process **state type script** `{code_hash,hash_type,args}` → `calc_script_hash`; never assume code-cell Type-ID hash equals state identity |
 | Payload | Required beneficiary lock → `Payload::from_script` (Process example semantics) |
 | User lock | Funding lock (= payer) |
 | Fee / change | Explicit `fee_shannons`; change to payer via skeleton `balance` |
 | Signing | `CID_INTENTION_PRIVKEY` env (32-byte hex); never CLI flags / files / `.env` / logs / JSON |
-| Broadcast | `send` subcommand only; requires `--network testnet` + `--genesis-hash`; fail-closed on mainnet / genesis mismatch |
+| Broadcast | `send` subcommand only; requires `--network testnet` + `--genesis-hash`; fail-closed on mainnet / genesis mismatch; `safe_message` keeps structured genesis hashes actionable while omitting hex-flooded guard/RPC strings |
 | Coin selection | Not in v1 (no online UTXO gather) |
 
 ## Request JSON (create)
@@ -98,6 +98,7 @@ cargo run -p cid-intention-cli -- send \
 cargo test -p cid-intention-cli
 ```
 
-Covers offline create (fee/witness/args/leakage/wrong key/duplicates) and
+Covers offline create (fee/witness/args/leakage/wrong key/duplicates,
+outpoint pin vs same-lock decoy, TransactionSimulator sighash VM verify) and
 `send` against a local HTTP JSON-RPC mock (success, mainnet refusal, genesis
-mismatch, redacted credential errors).
+mismatch with process-level hash diagnostics, redacted credential errors).

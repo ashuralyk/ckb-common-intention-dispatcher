@@ -164,11 +164,10 @@ pub fn send_signed_transaction(opts: &SendOptions, signed: &Value) -> Result<Str
     let got = decode_hash32(genesis_s)?;
     let want = decode_hash32(&opts.genesis_hash)?;
     if got != want {
-        return Err(CliError::NetworkGuard(format!(
-            "genesis mismatch: node={} expected={}",
-            encode_hex(&got),
-            encode_hex(&want)
-        )));
+        return Err(CliError::GenesisMismatch {
+            node: encode_hex(&got),
+            expected: encode_hex(&want),
+        });
     }
 
     let result = rpc_call(

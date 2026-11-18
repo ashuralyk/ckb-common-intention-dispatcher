@@ -3,13 +3,17 @@
 use std::sync::{Mutex, OnceLock};
 
 use cid_intention_cli::{
-    create_signed_intention, parse_privkey, process_type_hash_of, CliError, CreateRequest,
-    ScriptJson, PRIVKEY_ENV,
+    create_signed_intention, create_signed_intention_bundle,
+    create_signed_intention_with_same_lock_decoy, parse_privkey, process_type_hash_of, CliError,
+    CreateRequest, ScriptJson, PRIVKEY_ENV,
 };
-use ckb_cinnabar_calculator::re_exports::{
-    ckb_hash::blake2b_256,
-    ckb_types::{core::ScriptHashType, packed::Script, prelude::*},
-    secp256k1::{PublicKey, Secp256k1, SecretKey},
+use ckb_cinnabar_calculator::{
+    re_exports::{
+        ckb_hash::blake2b_256,
+        ckb_types::{core::ScriptHashType, packed::Script, prelude::*},
+        secp256k1::{PublicKey, Secp256k1, SecretKey},
+    },
+    simulation::TransactionSimulator,
 };
 use serde_json::json;
 
@@ -146,6 +150,21 @@ fn create_signed_tx_shape_fee_witness_and_args() {
     let outputs = transaction["outputs"].as_array().unwrap();
     let witnesses = transaction["witnesses"].as_array().unwrap();
     assert_eq!(inputs.len(), 1);
+    assert_eq!(
+        inputs[0]["previous_output"]["tx_hash"].as_str().unwrap(),
+        req.funding.tx_hash
+    );
+    assert_eq!(
+        u32::from_str_radix(
+            inputs[0]["previous_output"]["index"]
+                .as_str()
+                .unwrap()
+                .trim_start_matches("0x"),
+            16
+        )
+        .unwrap(),
+        req.funding.index
+    );
     assert!(outputs.len() >= 2);
     assert!(!witnesses.is_empty());
     assert_ne!(witnesses[0], json!("0x"));
@@ -253,4 +272,77 @@ fn cli_reads_env_and_writes_output_without_leaking_key() {
 #[test]
 fn parse_privkey_rejects_bad_lengths() {
     assert!(matches!(parse_privkey("0x11"), Err(CliError::PrivkeyEnv)));
+}
+
+#[test]
+fn funding_outpoint_pinned_despite_alternate_same_lock_cell() {
+    let secret = key(0x42);
+    let req = fixture_request(&secret);
+    let decoy = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let bundle = create_signed_intention_with_same_lock_decoy(
+        &req,
+        &secret,
+        decoy,
+        0,
+        900_000_000_000,
+    )
+    .unwrap();
+    assert_eq!(bundle.skeleton.inputs.len(), 1);
+    let prev = bundle.skeleton.inputs[0].input.previous_output();
+    let want_tx = format!("0x{}", hex::encode(prev.tx_hash().as_slice()));
+    assert_eq!(want_tx, req.funding.tx_hash);
+    let idx: u32 = prev.index().unpack();
+    assert_eq!(idx, req.funding.index);
+    assert_ne!(want_tx, decoy);
+
+    let inner = bundle
+        .tx_json
+        .get("inner")
+        .or_else(|| bundle.tx_json.get("transaction"))
+        .unwrap_or(&bundle.tx_json);
+    let transaction = if inner.get("inputs").is_some() {
+        inner
+    } else {
+        inner.get("transaction").unwrap_or(inner)
+    };
+    assert_eq!(
+        transaction["inputs"][0]["previous_output"]["tx_hash"]
+            .as_str()
+            .unwrap(),
+        req.funding.tx_hash
+    );
+}
+
+#[tokio::test]
+async fn signed_intention_passes_sighash_vm_verification() {
+    let secret = key(0x42);
+    let req = fixture_request(&secret);
+    let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
+    assert!(
+        !bundle.skeleton.witnesses.is_empty(),
+        "witness must be present"
+    );
+    let ok = TransactionSimulator::default()
+        .skeleton(bundle.skeleton.clone())
+        .link_cell_to_header(bundle.rpc.get_outpoint_to_headers())
+        .async_verify(&bundle.rpc, vec![], 50_000_000)
+        .await
+        .is_ok();
+    assert!(ok, "signed create tx must pass secp sighash VM verify");
+
+    // Tamper output → signature must fail (proves verify is meaningful).
+    let mut bad = bundle.skeleton;
+    bad.outputs[0].output = bad.outputs[0]
+        .output
+        .clone()
+        .as_builder()
+        .capacity(199_000_000_000u64)
+        .build();
+    let bad_ok = TransactionSimulator::default()
+        .skeleton(bad)
+        .link_cell_to_header(bundle.rpc.get_outpoint_to_headers())
+        .async_verify(&bundle.rpc, vec![], 50_000_000)
+        .await
+        .is_ok();
+    assert!(!bad_ok, "tampered tx must fail sighash VM verify");
 }

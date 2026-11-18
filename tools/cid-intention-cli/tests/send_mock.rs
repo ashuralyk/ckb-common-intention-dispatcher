@@ -144,20 +144,53 @@ fn send_rejects_mainnet_chain_from_node() {
 
 #[test]
 fn send_rejects_genesis_mismatch() {
+    let node = format!("0x{}", hex::encode([0xAA; 32]));
+    let expected = format!("0x{}", hex::encode([0xBB; 32]));
+    let node_c = node.clone();
     let url = spawn_mock(Arc::new(Mutex::new(Box::new(
         move |method, _| match method {
             "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
-            "get_block_hash" => json!(format!("0x{}", hex::encode([0xAA; 32]))),
+            "get_block_hash" => json!(node_c.clone()),
             _ => json!(null),
         },
     ))));
     let opts = SendOptions {
         rpc_url: url,
         network: "testnet".into(),
-        genesis_hash: format!("0x{}", hex::encode([0xBB; 32])),
+        genesis_hash: expected.clone(),
     };
     let err = send_signed_transaction(&opts, &sample_tx()).unwrap_err();
-    assert!(matches!(err, CliError::NetworkGuard(_)));
+    assert!(matches!(err, CliError::GenesisMismatch { .. }));
+    let msg = err.safe_message();
+    assert!(msg.contains(&node), "safe_message missing node hash: {msg}");
+    assert!(
+        msg.contains(&expected),
+        "safe_message missing expected hash: {msg}"
+    );
+    assert!(
+        !msg.contains("details omitted"),
+        "genesis mismatch must not be blanketed"
+    );
+}
+
+#[test]
+fn safe_message_keeps_genesis_hashes_but_omits_hex_flood_guards() {
+    let node = format!("0x{}", hex::encode([0x11; 32]));
+    let expected = format!("0x{}", hex::encode([0x22; 32]));
+    let msg = CliError::GenesisMismatch {
+        node: node.clone(),
+        expected: expected.clone(),
+    }
+    .safe_message();
+    assert!(msg.contains(&node));
+    assert!(msg.contains(&expected));
+
+    // Synthetic secret-shaped payload must not pass through NetworkGuard safely.
+    let secretish = format!("0x{}", hex::encode([0x42u8; 32]));
+    let flooded = CliError::NetworkGuard(format!("injected config dump {secretish}"));
+    let omitted = flooded.safe_message();
+    assert!(!omitted.contains(&secretish));
+    assert!(omitted.contains("omitted"));
 }
 
 #[test]
@@ -183,4 +216,54 @@ fn send_surfaces_rpc_error_without_url_credentials() {
     let msg = err.safe_message();
     assert!(!msg.contains("s3cret"));
     assert!(matches!(err, CliError::Rpc(_)));
+}
+
+#[test]
+fn cli_send_genesis_mismatch_prints_hashes_not_credentials() {
+    let node = format!("0x{}", hex::encode([0xAA; 32]));
+    let expected = format!("0x{}", hex::encode([0xBB; 32]));
+    let node_c = node.clone();
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, _| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+            "get_block_hash" => json!(node_c.clone()),
+            _ => json!(null),
+        },
+    ))));
+    let credentialed = url.replace("http://", "http://user:s3cret@");
+    let dir = tempfile::tempdir().unwrap();
+    let tx_path = dir.path().join("tx.json");
+    std::fs::write(&tx_path, serde_json::to_vec(&sample_tx()).unwrap()).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cid-intention-cli"))
+        .args([
+            "send",
+            "--tx",
+            tx_path.to_str().unwrap(),
+            "--rpc-url",
+            &credentialed,
+            "--network",
+            "testnet",
+            "--genesis-hash",
+            &expected,
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stderr.contains(&node),
+        "stderr missing node genesis: {stderr}"
+    );
+    assert!(
+        stderr.contains(&expected),
+        "stderr missing expected genesis: {stderr}"
+    );
+    assert!(!stderr.contains("s3cret"), "credential leaked: {stderr}");
+    assert!(!stdout.contains("s3cret"));
+    assert!(
+        !stderr.contains("details omitted"),
+        "process path must not blank genesis diagnostics: {stderr}"
+    );
 }
