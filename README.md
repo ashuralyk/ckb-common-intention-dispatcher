@@ -156,14 +156,17 @@ forward to this package.
 
 ## Upstream ckb-cinnabar template noise
 
-Depending on any package from the `ckb-cinnabar` git revision may print
-non-fatal `error:` lines while Cargo walks unexpanded
-`templates/contract/**/Cargo.toml` placeholders (`{{crate_name}}`,
-`{% if use_local_cinnabar %}`). Those paths are not workspace members of this
-repo or of cinnabar; the build still succeeds. Fixing the noise requires an
-upstream change in [ashuralyk/ckb-cinnabar](https://github.com/ashuralyk/ckb-cinnabar)
-(e.g. exclude `templates/` from the published layout or stop shipping raw
-liquid `Cargo.toml` files in the git tree Cargo indexes).
+Depending on any package from the `ckb-cinnabar` git revision may still print
+non-fatal Cargo `error:` lines while Cargo walks unexpanded
+`templates/contract/**/Cargo.toml` cargo-generate placeholders (`{{crate_name}}`
+in package names and dependency keys). Those paths are not workspace members of
+this repo or of cinnabar; the build still succeeds.
+
+As of cinnabar `7187a50` (PR #6), Liquid `{% if use_local_cinnabar %}` tags are
+gone from the copied template manifests, so those specific parse errors no
+longer appear. Eliminating the remaining `{{crate_name}}` noise requires a
+further upstream change (e.g. exclude `templates/` from the git tree Cargo
+indexes, or keep template manifests outside paths Cargo walks).
 
 ## Layout
 

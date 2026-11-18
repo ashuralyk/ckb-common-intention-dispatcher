@@ -23,9 +23,9 @@ members = [
 ]
 
 [workspace.dependencies]
-ckb-cinnabar = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "66dbd9a4e1d3d94c9d6f8c5c08ecab700a0f026e" }
-ckb-cinnabar-calculator = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "66dbd9a4e1d3d94c9d6f8c5c08ecab700a0f026e" }
-ckb-cinnabar-verifier = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "66dbd9a4e1d3d94c9d6f8c5c08ecab700a0f026e" }
+ckb-cinnabar = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "7187a50ea8eebef5ebea68ac0d6e223a64b08ebf" }
+ckb-cinnabar-calculator = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "7187a50ea8eebef5ebea68ac0d6e223a64b08ebf" }
+ckb-cinnabar-verifier = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "7187a50ea8eebef5ebea68ac0d6e223a64b08ebf" }
 ckb-ssri-std = { git = "https://github.com/ashuralyk/ckb-ssri-std", rev = "8c2c245" }
 
 [profile.release]
