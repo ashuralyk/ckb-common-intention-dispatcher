@@ -1,5 +1,5 @@
 [alias]
-deploy = "run -- deploy"
-migrate = "run -- migrate"
-consume = "run -- consume"
-list = "run -- list"
+deploy = "run -p ckb_common_intention_dispatcher-runner -- deploy"
+migrate = "run -p ckb_common_intention_dispatcher-runner -- migrate"
+consume = "run -p ckb_common_intention_dispatcher-runner -- consume"
+list = "run -p ckb_common_intention_dispatcher-runner -- list"

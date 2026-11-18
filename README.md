@@ -76,20 +76,45 @@ the block that committed the Intention; judge height is the newest header dep.
 
 This is a Cinnabar project (not Capsule / `deployment.toml`).
 
+### Host crates (default workspace members)
+
+From a clean clone, the root default members are host libraries only
+(`cid-protocol`, the two calculators, and `cid-process-executor`). RISC-V
+contracts and the optional deploy runner are workspace members but **not**
+defaults, so plain Cargo commands succeed on the host target:
+
 ```bash
-make prepare   # rustup target add riscv64imac-unknown-none-elf
-make build     # RISC-V binary → build/release/ckb_common_intention_dispatcher
-make test      # FakeRpc + native CKB-VM, all cases
+# System prerequisite for host crates that pull ckb-cinnabar-calculator → reqwest:
+#   Debian/Ubuntu: sudo apt-get install -y libssl-dev pkg-config
+#   Fedora:        sudo dnf install openssl-devel pkgconf-pkg-config
+#   macOS:         usually covered by the system LibreSSL / Xcode CLT
+cargo check --locked
+cargo build --locked
+cargo test --locked
 ```
 
-Both `make build` and `make test` must exit 0. Tests load this contract from `build/release/` and the
-official xUDT RISC-V binary from `tests/binaries/xudt`.
+### RISC-V contracts and FakeRpc tests
+
+```bash
+make prepare   # rustup target add riscv64imac-unknown-none-elf
+make build     # RISC-V binaries → build/release/
+make test      # FakeRpc + native CKB-VM (needs make build first)
+```
+
+Both `make build` and `make test` must exit 0. Tests load contracts from
+`build/release/` and the official xUDT RISC-V binary from `tests/binaries/xudt`.
 
 To build CID and the Process example into `build/release/` without a full
 `make build` clean:
 
 ```bash
 ./scripts/build-all-contracts.sh
+```
+
+Build a single contract (used by downstream CI), e.g.:
+
+```bash
+make CONTRACT=cid_process_example build
 ```
 
 ## Process Example
@@ -113,17 +138,32 @@ Usage: [docs/process-example-usage.md](docs/process-example-usage.md)
 cd tests && cargo test process_example -- --nocapture
 ```
 
-Cargo may print non-fatal parse errors for `ckb-cinnabar`’s
-`templates/contract` placeholders (`{{crate_name}}`). Those files are not
-workspace members; the build still succeeds.
+## Optional deploy runner
 
-Dry-run deploy (needs a reachable indexer):
+The Cinnabar deploy/migrate CLI lives in `runner/` (package
+`ckb_common_intention_dispatcher-runner`). It is **not** a default member, so
+it is not built by plain `cargo check/build/test`. It needs the same OpenSSL
+headers as above, plus a reachable indexer for live deploy commands.
 
 ```bash
-cargo run -- --json --dry-run deploy \
+cargo run -p ckb_common_intention_dispatcher-runner -- --json --dry-run deploy \
   --contract-name ckb_common_intention_dispatcher --tag v0.1.0 \
   --payer-address ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsq28phxutezqvjgfv5q38gn5kwek4m9km3cmajeqs
 ```
+
+Cargo aliases `deploy` / `migrate` / `consume` / `list` in `.cargo/config.toml`
+forward to this package.
+
+## Upstream ckb-cinnabar template noise
+
+Depending on any package from the `ckb-cinnabar` git revision may print
+non-fatal `error:` lines while Cargo walks unexpanded
+`templates/contract/**/Cargo.toml` placeholders (`{{crate_name}}`,
+`{% if use_local_cinnabar %}`). Those paths are not workspace members of this
+repo or of cinnabar; the build still succeeds. Fixing the noise requires an
+upstream change in [ashuralyk/ckb-cinnabar](https://github.com/ashuralyk/ckb-cinnabar)
+(e.g. exclude `templates/` from the published layout or stop shipping raw
+liquid `Cargo.toml` files in the git tree Cargo indexes).
 
 ## Layout
 
@@ -138,7 +178,7 @@ cargo run -- --json --dry-run deploy \
 | `tests/` | FakeRpc universe (CID + `process_example`) |
 | `tests/binaries/xudt` | Real xUDT RISC-V (not always-success) |
 | `build/release/` | This lock’s RISC-V binary |
-| `src/main.rs` | `ckb_cinnabar::dispatch()` runner |
+| `runner/` | Optional `ckb_cinnabar::dispatch()` deploy CLI (non-default member) |
 
 Most unit scenarios use always-success user locks; the signed integration scenarios
 use the real genesis secp256k1 lock. Process cells use an executable test-only
@@ -212,7 +252,8 @@ skeleton, since instructions may have already inserted earlier operations.
 
 ## Security regression coverage and CI
 
-GitHub Actions runs formatting, clippy, protocol tests, RISC-V build, CKB-VM
+GitHub Actions runs the root default host `cargo check` / `cargo build` /
+`cargo test`, formatting, clippy, protocol tests, RISC-V build, CKB-VM
 regressions, and a pinned SHA-256 check of the bundled official xUDT binary. The
 built CID binary and its SHA-256 are uploaded together. Configure the repository's
 branch rules to require the `verify` job before merge; workflow files alone cannot

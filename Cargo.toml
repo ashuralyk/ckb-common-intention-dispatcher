@@ -1,8 +1,17 @@
 [workspace]
 resolver = "2"
 
+# Host-first defaults: plain `cargo check/build/test` at the root must not try to
+# link RISC-V no_std contract bins for the host target, and must not pull the
+# optional Cinnabar deploy CLI (OpenSSL / indexer) into every developer build.
+default-members = [
+  "protocol",
+  "calculator/intention",
+  "calculator/process",
+  "crates/cid-process-executor",
+]
+
 members = [
-  # @@INSERTION_POINT@@
   "protocol",
   "calculator/intention",
   "calculator/process",
@@ -10,6 +19,7 @@ members = [
   "contracts/ckb_common_intention_dispatcher",
   "contracts/cid_process_example",
   "crates/cid-process-executor",
+  "runner",
 ]
 
 [workspace.dependencies]
@@ -17,14 +27,6 @@ ckb-cinnabar = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "66dbd
 ckb-cinnabar-calculator = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "66dbd9a4e1d3d94c9d6f8c5c08ecab700a0f026e" }
 ckb-cinnabar-verifier = { git = "https://github.com/ashuralyk/ckb-cinnabar", rev = "66dbd9a4e1d3d94c9d6f8c5c08ecab700a0f026e" }
 ckb-ssri-std = { git = "https://github.com/ashuralyk/ckb-ssri-std", rev = "8c2c245" }
-
-[package]
-edition = "2021"
-name = "ckb_common_intention_dispatcher-runner"
-version = "0.1.0"
-
-[dependencies]
-ckb-cinnabar = { workspace = true }
 
 [profile.release]
 codegen-units = 1

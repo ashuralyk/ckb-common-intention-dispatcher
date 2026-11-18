@@ -14,14 +14,20 @@ jobs:
         with:
           targets: riscv64imac-unknown-none-elf
           components: rustfmt, clippy
-      - name: Install RISC-V capable clang
-        run: sudo apt-get update && sudo apt-get install -y clang-18
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang-18 libssl-dev pkg-config
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check bundled xUDT binary
         run: echo 'e9b92e5783f692f6ee99ca20eeda5f3da282e0f4010eb4fbd3db4e3058239349  tests/binaries/xudt' | sha256sum --check
+      - name: Host default check
+        run: cargo check --locked
+      - name: Host default build
+        run: cargo build --locked
+      - name: Host default tests
+        run: cargo test --locked
       - name: Lint host crates
-        run: cargo clippy --locked -p cid-protocol -p ckb_common_intention_dispatcher-calculator -p ckb_common_intention_dispatcher-tests --all-targets -- -D warnings
+        run: cargo clippy --locked -p cid-protocol -p ckb_common_intention_dispatcher-calculator -p cid_process_example-calculator -p cid-process-executor -p ckb_common_intention_dispatcher-tests --all-targets -- -D warnings
       - name: Protocol tests
         run: cargo test --locked -p cid-protocol
       - name: Build RISC-V contract
