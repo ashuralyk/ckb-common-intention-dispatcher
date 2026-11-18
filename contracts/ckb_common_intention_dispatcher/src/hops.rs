@@ -1,10 +1,16 @@
 use cid_protocol::TIMEOUT_BLOCKS;
-use ckb_cinnabar_verifier::{re_exports::ckb_std::debug, Result, Verification};
+use ckb_cinnabar_verifier::{
+    re_exports::ckb_std::{ckb_constants::Source, debug, high_level::load_cell_capacity},
+    Result, Verification,
+};
 
 use crate::{
     context::Context,
     error::CidError,
-    utils::{load_judge_block_number, load_pack_block_number, refund_assets_match},
+    utils::{
+        fee_covers_digest_incompatible_shortfalls, intention_capacity, load_judge_block_number,
+        load_pack_block_number, refund_assets_match_exact, refund_assets_match_fee_window,
+    },
 };
 
 #[derive(Default)]
@@ -28,12 +34,17 @@ pub struct DigestIncompatible;
 impl Verification<Context> for DigestIncompatible {
     fn verify(&mut self, name: &str, ctx: &mut Context) -> Result<Option<&str>> {
         debug!("Entering [{name}]");
-        // Refund may burn ≤ MAX_REFUND_FEE of CKB capacity as tx fee; tokens exact.
+        // Keyless path: capacity may fund miner fee up to MAX_REFUND_FEE, but only
+        // when tx fee covers the tx-wide DigestIncompatible shortfall aggregate.
         let refund = ctx.refund_output.ok_or(CidError::RefundMissing)?;
         let asset = ctx.asset.as_ref().ok_or(CidError::ZeroAsset)?;
-        if !refund_assets_match(refund, asset)? {
+        if !refund_assets_match_fee_window(refund, asset)? {
             return Err(CidError::RefundAssetMismatch.into());
         }
+        let want = intention_capacity(asset);
+        let got = load_cell_capacity(refund, Source::Output)?;
+        let shortfall = want.checked_sub(got).ok_or(CidError::RefundAssetMismatch)?;
+        fee_covers_digest_incompatible_shortfalls(shortfall)?;
         Ok(None)
     }
 }
@@ -47,9 +58,10 @@ impl Verification<Context> for TimeoutBurn {
         if !ctx.user_lock_in_inputs {
             return Err(CidError::UnknownBranch.into());
         }
+        // User-authorized path: exact refund only; fee comes from user inputs.
         let refund = ctx.refund_output.ok_or(CidError::RefundMissing)?;
         let asset = ctx.asset.as_ref().ok_or(CidError::ZeroAsset)?;
-        if !refund_assets_match(refund, asset)? {
+        if !refund_assets_match_exact(refund, asset)? {
             return Err(CidError::RefundAssetMismatch.into());
         }
         let pack = load_pack_block_number()?;

@@ -156,31 +156,156 @@ pub enum IntentionAsset {
     },
 }
 
-pub fn refund_assets_match(index: usize, expected: &IntentionAsset) -> Result<bool> {
+fn refund_tokens_and_type_match(
+    index: usize,
+    expected: &IntentionAsset,
+) -> Result<(u64, u64, bool)> {
     let capacity = load_cell_capacity(index, Source::Output)?;
     let occupied = load_cell_occupied_capacity(index, Source::Output)?;
     let data = load_cell_data(index, Source::Output)?;
     let type_script = load_cell_type(index, Source::Output)?;
-    match (expected, type_script) {
-        (IntentionAsset::Ckb { capacity: want }, None) => {
-            Ok(data.is_empty() && cid_protocol::refund_capacity_allowed(capacity, *want, occupied))
-        }
+    let tokens_ok = match (expected, type_script) {
+        (IntentionAsset::Ckb { .. }, None) => data.is_empty(),
         (
             IntentionAsset::Xudt {
-                capacity: want,
-                amount,
-                type_hash,
+                amount, type_hash, ..
             },
             Some(type_script),
         ) => {
             let got_hash: [u8; 32] = type_script.calc_script_hash().unpack();
             if &got_hash != type_hash {
-                return Ok(false);
+                false
+            } else {
+                parse_xudt_amount(&data)? == *amount
             }
-            let got = parse_xudt_amount(&data)?;
-            Ok(got == *amount && cid_protocol::refund_capacity_allowed(capacity, *want, occupied))
         }
-        _ => Ok(false),
+        _ => false,
+    };
+    Ok((capacity, occupied, tokens_ok))
+}
+
+/// TimeoutBurn: exact capacity + exact tokens/type (user can fund fees separately).
+pub fn refund_assets_match_exact(index: usize, expected: &IntentionAsset) -> Result<bool> {
+    let want = match expected {
+        IntentionAsset::Ckb { capacity } => *capacity,
+        IntentionAsset::Xudt { capacity, .. } => *capacity,
+    };
+    let (got, _occupied, tokens_ok) = refund_tokens_and_type_match(index, expected)?;
+    Ok(tokens_ok && got == want)
+}
+
+/// DigestIncompatible: tokens/type exact; CKB capacity within [`MAX_REFUND_FEE`] ceiling.
+/// Caller must also enforce tx-wide [`fee_covers_digest_incompatible_shortfalls`].
+pub fn refund_assets_match_fee_window(index: usize, expected: &IntentionAsset) -> Result<bool> {
+    let want = match expected {
+        IntentionAsset::Ckb { capacity } => *capacity,
+        IntentionAsset::Xudt { capacity, .. } => *capacity,
+    };
+    let (got, occupied, tokens_ok) = refund_tokens_and_type_match(index, expected)?;
+    Ok(tokens_ok && cid_protocol::refund_capacity_allowed(got, want, occupied))
+}
+
+fn sum_capacities(source: Source) -> Result<u64> {
+    let mut sum = 0u64;
+    for cap in QueryIter::new(load_cell_capacity, source) {
+        sum = sum.checked_add(cap).ok_or(CidError::RefundAssetMismatch)?;
+    }
+    Ok(sum)
+}
+
+/// Miner fee in shannons: Σ input capacity − Σ output capacity.
+pub fn tx_fee_shannons() -> Result<u64> {
+    let inputs = sum_capacities(Source::Input)?;
+    let outputs = sum_capacities(Source::Output)?;
+    inputs
+        .checked_sub(outputs)
+        .ok_or_else(|| CidError::RefundAssetMismatch.into())
+}
+
+/// True when some CID Intention in this tx takes the DigestOk path.
+pub fn has_digest_ok_intention() -> Result<bool> {
+    for lock in QueryIter::new(load_cell_lock, Source::Input) {
+        let Ok(args) = CidArgs::decode(&lock.args().raw_data()) else {
+            continue;
+        };
+        if has_matching_process(&args.process_type_hash, Source::Input)
+            && has_matching_process(&args.process_type_hash, Source::Output)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Σ(intention_cap − refund_cap) over DigestIncompatible CID inputs only.
+///
+/// Skips DigestOk (process pair) and TimeoutBurn (user lock in inputs) so those
+/// paths cannot mint fee-budget and shaved refunds cannot reuse another path's
+/// capacity. Every DigestIncompatible group must compare the **same** aggregate
+/// against tx fee — preventing per-group fee double-counting.
+pub fn digest_incompatible_total_shortfall() -> Result<u64> {
+    let mut total = 0u64;
+    let mut index = 0usize;
+    loop {
+        let lock = match load_cell_lock(index, Source::Input) {
+            Ok(lock) => lock,
+            Err(SysError::IndexOutOfBound) => break,
+            Err(err) => return Err(err.into()),
+        };
+        let Ok(args) = CidArgs::decode(&lock.args().raw_data()) else {
+            index += 1;
+            continue;
+        };
+        if has_matching_process(&args.process_type_hash, Source::Input)
+            && has_matching_process(&args.process_type_hash, Source::Output)
+        {
+            index += 1;
+            continue;
+        }
+        let user = packed_script(&args.entry.user_lock)?;
+        let user_hash = script_hash_bytes(&user);
+        if has_input_lock_hash(&user_hash) {
+            // TimeoutBurn: exact refund; no shortfall credit toward fee.
+            index += 1;
+            continue;
+        }
+        let Some(refund_idx) = find_output_by_lock_hash(&user_hash) else {
+            index += 1;
+            continue;
+        };
+        let want = load_cell_capacity(index, Source::Input)?;
+        let got = load_cell_capacity(refund_idx, Source::Output)?;
+        if got > want {
+            return Err(CidError::RefundAssetMismatch.into());
+        }
+        total = total
+            .checked_add(want - got)
+            .ok_or(CidError::RefundAssetMismatch)?;
+        index += 1;
+    }
+    Ok(total)
+}
+
+/// Bind DigestIncompatible capacity haircuts to real miner fee (no diversion).
+///
+/// Rejects shaved refunds co-bundled with DigestOk (backend must use separate
+/// txs; Process example still requires exact beneficiary capacity).
+pub fn fee_covers_digest_incompatible_shortfalls(this_shortfall: u64) -> Result<()> {
+    if this_shortfall > 0 && has_digest_ok_intention()? {
+        return Err(CidError::PartialDigest.into());
+    }
+    let total = digest_incompatible_total_shortfall()?;
+    let fee = tx_fee_shannons()?;
+    if !cid_protocol::fee_covers_shortfalls(fee, total) {
+        return Err(CidError::RefundAssetMismatch.into());
+    }
+    Ok(())
+}
+
+pub fn intention_capacity(asset: &IntentionAsset) -> u64 {
+    match asset {
+        IntentionAsset::Ckb { capacity } => *capacity,
+        IntentionAsset::Xudt { capacity, .. } => *capacity,
     }
 }
 

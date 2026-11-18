@@ -57,31 +57,34 @@ refund guard below applies only to refund paths. Without a matching Process
 pair, exact refund and timeout rules remain available; arbitrary spending fails.
 
 Refunds must go to the exact User Lock. xUDT refunds preserve both the full type
-hash and token amount. **CKB capacity** on a refund output may be reduced by at
-most `MAX_REFUND_FEE` (= `0.01 CKB` = `1_000_000` shannons) so a keyless
-`digest_incompatible` assembler can pay the mempool fee from the Intention
-itself without fee inputs or keys. The refund capacity must also stay
-`<= Intention capacity` and `>=` the refund cell's occupied capacity.
-`DigestOk` is unchanged: Process scripts still own asset destinations.
+hash and token amount.
 
-The fee bound is **per Intention** (each refund output checked against its own
-Intention). An aggregate tx-wide cap would let an assembler concentrate the
-shortfall onto one user while other Intentions refund exactly. The shortfall may
-be burned as miner fee or paid to other outputs — CID cannot force miner-only
-burn without fragile tx-wide accounting — so `MAX_REFUND_FEE` is a hard cap on
-user loss (at most `0.01 CKB` per Intention), not a fee oracle. Honest keyless
-assemblers should set `shortfall == paid_fee` with no siphon outputs. A
-size-derived on-chain cap is not reliable (weight depends on deps/witnesses the
-lock cannot fully bound), so the protocol uses this fixed dual-written constant
-rather than a new Intention-args field (no v0.1 encoding change).
+**DigestIncompatible (keyless) fee haircut:** refund CKB capacity may be at most
+`MAX_REFUND_FEE` (= `0.01 CKB` = `1_000_000` shannons) below the Intention, and
+must stay `>=` the refund cell's occupied capacity. That ceiling alone is not
+enough: Verify also requires `tx_fee >= Σ shortfalls` over **every**
+DigestIncompatible Intention in the transaction (same aggregate in each lock
+group). Equivalently, non-refund outputs must be funded by non-Intention inputs,
+so a shortfall cannot be redirected to a third party and cannot be double-counted
+across groups. `MAX_REFUND_FEE` is only a per-Intention ceiling on how much of
+that fee one refund may contribute — never a skim allowance.
+
+**TimeoutBurn** keeps **exact** capacity refunds (user can add fee inputs).
+**DigestOk** is unchanged. Process example still requires exact beneficiary
+capacity. **Do not co-bundle shaved DigestIncompatible refunds with DigestOk**
+(CID rejects shortfall > 0 when any DigestOk Intention is present); backends
+must build separate transactions. Exact incompatible refunds may still share a
+tx with DigestOk as today.
+
+No Intention-args / encoding change: fixed dual-written `MAX_REFUND_FEE`.
 
 Until aggregate refunds are specified, refund paths accept at most one Intention
 per User Lock per transaction, including different payloads and deployment aliases.
 The guard conservatively counts any input lock whose args decode as CID v0.1
 with that User Lock, even if it belongs to another program.
 This prevents two script groups from counting the same refund twice. The first
-output to the User Lock must be the refund (capacity within the fee window);
-append fee change afterwards when a separate fee sponsor is used.
+output to the User Lock must be the refund; with a fee sponsor, keep
+`sponsor_in >= sponsor_change` so fee still covers the Intention shortfall.
 
 **Redeploy required:** changing refund matching changes the `cid_lock` binary /
 data hash. Rebuild, redeploy, and point new Intentions at the new code hash;
@@ -242,10 +245,12 @@ A standard secp256k1 integration should:
 
 1. Add CID, xUDT (recipes handle this), and the real secp256k1 code/data deps.
 2. Apply the recipe, Process code deps/witnesses, and any server/sponsor inputs.
-3. Balance CKB with a separate change output when a fee sponsor is available;
-   otherwise, for keyless `digest_incompatible`, set the User Lock refund
-   capacity to `intention_capacity - fee` with `fee ∈ (0, MAX_REFUND_FEE]`
-   (and still `>=` occupied capacity). Do not change xUDT amounts.
+3. For keyless `digest_incompatible` without a sponsor: set refund capacity to
+   `intention_capacity - fee` with `fee ∈ (0, MAX_REFUND_FEE]`, `>=` occupied,
+   and ensure the tx has no other outputs that would make `tx_fee < Σ shortfalls`.
+   With a sponsor, fund change so `tx_fee >= Σ shortfalls` still holds. Never
+   co-bundle shaved refunds with DigestOk. TimeoutBurn / signed refunds keep
+   exact capacity and pay fees from user/sponsor inputs. Do not change xUDT amounts.
 4. Sign every input lock group (when any), then check actual fees against the
    chosen budget and the node's fee rate. Do not alter the transaction after signing.
 5. Dry-run the final signed transaction against a CKB node before broadcasting.
@@ -279,8 +284,8 @@ let tx = skeleton.clone().into_transaction_view();
 let size = tx.data().serialized_size_in_block() as u64;
 let required_fee = size.checked_mul(rpc.min_fee_rate()?).unwrap().div_ceil(1000);
 assert!(paid_fee >= required_fee);
-// If too low and a fee sponsor is present, rebuild with a higher approved fee.
-// Keyless DigestIncompatible may instead shave the refund by at most MAX_REFUND_FEE.
+// Keyless DigestIncompatible: shave refund by exactly the miner fee (≤ MAX_REFUND_FEE)
+// with tx_fee covering the tx-wide shortfall aggregate — never divert into other outputs.
 // Dry-run and broadcast `tx` using your node/client only after all checks pass.
 ```
 
@@ -300,9 +305,11 @@ enforce branch protection.
 
 Tests include CKB/xUDT delegation without a User Lock input, Process pair
 presence/mismatch checks, a failing executable Process, authorized batch digest,
-CellDep-only theft, xUDT capacity theft on both refund paths, bounded refund-fee
-deduction (exact / within-cap / beyond-cap / wrong lock / token mutation / multi-user
-batch), non-issuer token collection/change/insufficient balance, missing output with
+CellDep-only theft, xUDT capacity theft on both refund paths, DigestIncompatible
+fee-binding (exact / within-cap / beyond-cap CKB+xUDT / wrong lock / token mutation /
+multi-user aggregate fee / third-party siphon / fee reuse / sponsor change /
+occupied floor / shaved+DigestOk co-bundle rejection / TimeoutBurn shaved rejection),
+non-issuer token collection/change/insufficient balance, missing output with
 xUDT input dependency, timeout boundaries 10799/10800/10801, partial user proceeds,
 and cross-Intention refund reuse. `tests/src/signed.rs` executes the real genesis
 secp256k1 script and real signatures for create/digest/refund/timeout, checks fee

@@ -171,7 +171,7 @@ async fn signed_paths_balance_change_and_bind_outputs() {
                 .iter()
                 .all(|i| i.output.lock_script() != owner_lock));
         }
-        // Explicit fee budget via sponsor input; refunds may also shave ≤ MAX_REFUND_FEE.
+        // Explicit fee budget via sponsor input; TimeoutBurn/signed paths keep exact refunds.
         let fee = 10_000;
         skeleton
             .balance(

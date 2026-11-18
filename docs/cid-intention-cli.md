@@ -67,9 +67,10 @@ Lean host binary in this contract repo that:
 
 `process_type_script` must describe the **live Process cell's type script**, not
 the code cell alone. `cid_lock_dep.data` must be the CID lock binary so
-`ScriptEx::Reference` can resolve Data1. After a CID lock redeploy (e.g. the
-`MAX_REFUND_FEE` refund window), refresh `cid_lock_dep` tx/outpoint/`data` to
-the new binary; Intention args encoding is unchanged.
+`ScriptEx::Reference` can resolve Data1. After a CID lock redeploy (e.g.
+DigestIncompatible fee-binding), refresh `cid_lock_dep` tx/outpoint/`data` to
+the new binary; Intention args encoding is unchanged. This CLI only creates
+Intentions — it does not assemble refunds.
 
 ## Usage
 

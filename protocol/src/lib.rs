@@ -22,32 +22,46 @@ pub const PROCESS_TYPE_HASH_LEN: usize = 32;
 /// and off-chain Calculate/tests **must** stay in sync.
 pub const TIMEOUT_BLOCKS: u64 = 10800;
 
-/// Maximum CKB capacity (shannons) a refund output may fall short of its
-/// Intention. Dual-written: on-chain Verify and off-chain assemblers **must**
-/// stay in sync.
+/// Ceiling on how much CKB capacity (shannons) one DigestIncompatible refund
+/// may contribute toward the transaction miner fee. Dual-written: on-chain
+/// Verify and off-chain assemblers **must** stay in sync.
 ///
 /// `0.01 CKB` (= `1_000_000` shannons). At testnet `min_fee_rate = 1000`
 /// shannons/KW this covers roughly a megabyte of tx weight; even at 100× that
-/// rate it still covers a ~10 KB refund tx. The bound is **per Intention**
-/// (each refund output independently), so a keyless assembler cannot take more
-/// than this from any one user by batching. The shortfall may be burned as
-/// miner fee or paid to other outputs — the lock cannot force miner-only burn
-/// without fragile tx-wide accounting — so treat this as a hard cap on user
-/// loss, not a fee oracle. No Intention-args field: a fixed protocol constant
+/// rate it still covers a ~10 KB refund tx.
+///
+/// This is **only a ceiling**, never a license to skim. DigestIncompatible also
+/// requires `tx_fee >= sum(shortfalls)` over every DigestIncompatible Intention
+/// in the transaction (`fee_covers_shortfalls`), so a shortfall cannot fund
+/// other outputs and cannot be double-counted across lock groups. TimeoutBurn
+/// keeps exact capacity. No Intention-args field: a fixed protocol constant
 /// avoids a v0.1 encoding/version break.
 pub const MAX_REFUND_FEE: u64 = 1_000_000;
 
-/// True when a refund output's CKB capacity is within the allowed fee window.
-///
-/// Rules (CKB-only and xUDT refunds; token amount/type are checked separately):
+/// True when a DigestIncompatible refund output's CKB capacity is within the
+/// per-Intention fee ceiling (token amount/type checked separately):
 /// - `got <= want` (no capacity inflation on the refund cell)
-/// - `got >= want.saturating_sub(MAX_REFUND_FEE)` (bounded shortfall)
+/// - `got >= want.saturating_sub(MAX_REFUND_FEE)` (ceiling)
 /// - `got >= occupied` (refund cell must remain liveable)
+///
+/// Callers must still enforce [`fee_covers_shortfalls`] over the whole tx.
 pub fn refund_capacity_allowed(got: u64, want: u64, occupied: u64) -> bool {
     if got > want || got < occupied {
         return false;
     }
     got >= want.saturating_sub(MAX_REFUND_FEE)
+}
+
+/// True when miner fee covers the aggregate DigestIncompatible shortfall.
+///
+/// Let `S` be Σ(intention_cap − refund_cap) over DigestIncompatible inputs and
+/// `F = Σinputs − Σoutputs`. Then `F >= S` iff non-refund outputs are fully
+/// funded by non-Intention inputs — so Intention shortfalls cannot be redirected
+/// into third-party outputs. Each verifying lock group must use the **same**
+/// tx-wide `S` (not its own shortfall alone) so fee cannot be reused across
+/// Intention groups.
+pub fn fee_covers_shortfalls(fee: u64, total_shortfall: u64) -> bool {
+    fee >= total_shortfall
 }
 
 /// Standard xUDT amount width (little-endian `u128`).
@@ -260,5 +274,18 @@ mod tests {
         let tight = occupied + MAX_REFUND_FEE / 2;
         assert!(refund_capacity_allowed(occupied, tight, occupied));
         assert!(!refund_capacity_allowed(occupied - 1, tight, occupied));
+    }
+
+    #[test]
+    fn fee_must_cover_aggregate_shortfall() {
+        assert!(fee_covers_shortfalls(MAX_REFUND_FEE, MAX_REFUND_FEE));
+        assert!(fee_covers_shortfalls(MAX_REFUND_FEE + 1, MAX_REFUND_FEE));
+        assert!(!fee_covers_shortfalls(MAX_REFUND_FEE - 1, MAX_REFUND_FEE));
+        // Two intentions each shaving MAX require 2× fee — no reuse of one fee.
+        assert!(!fee_covers_shortfalls(MAX_REFUND_FEE, MAX_REFUND_FEE * 2));
+        assert!(fee_covers_shortfalls(
+            MAX_REFUND_FEE * 2,
+            MAX_REFUND_FEE * 2
+        ));
     }
 }

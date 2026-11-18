@@ -149,7 +149,8 @@ fn collect_output_obligations(
         } else {
             // Refund branch (DigestIncompatible and TimeoutBurn): unique-assign
             // the user_lock output, never the payload. TimeoutBurn still requires
-            // a full refund via refund_assets_match.
+            // a full (exact capacity) refund. Shaved DigestIncompatible refunds
+            // must not be co-bundled with DigestOk; CID enforces that separately.
             let Ok(user) = packed_script(&cid.entry.user_lock) else {
                 continue;
             };
