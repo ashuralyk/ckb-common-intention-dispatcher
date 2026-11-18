@@ -239,6 +239,10 @@ pub fn digest_ok<T: RPC>(
 }
 
 /// Incompatible digest: destroy + refund assets to User Lock (user not in inputs).
+///
+/// `capacity` may be up to [`MAX_REFUND_FEE`] below the Intention capacity so a
+/// keyless assembler can pay the mempool fee from the refund cell itself.
+/// Token amounts (when present) must stay exact; only CKB capacity may shrink.
 pub fn digest_incompatible<T: RPC>(
     intention: (Hash256, u32),
     user_lock: ScriptEx,
@@ -308,9 +312,9 @@ fn refund_burn<T: RPC>(
 }
 
 pub use cid_protocol::{
-    CidArgs, CidEntry, Payload, Script as CidScript, CID_VERSION, ERROR_ARGS_INVALID,
-    ERROR_HEADER_MISSING, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH,
+    refund_capacity_allowed, CidArgs, CidEntry, Payload, Script as CidScript, CID_VERSION,
+    ERROR_ARGS_INVALID, ERROR_HEADER_MISSING, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH,
     ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED,
     ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET, HOP_DIGEST_INCOMPATIBLE,
-    HOP_DIGEST_OK, HOP_TIMEOUT_BURN, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
+    HOP_DIGEST_OK, HOP_TIMEOUT_BURN, MAX_REFUND_FEE, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
 };

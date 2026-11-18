@@ -22,6 +22,34 @@ pub const PROCESS_TYPE_HASH_LEN: usize = 32;
 /// and off-chain Calculate/tests **must** stay in sync.
 pub const TIMEOUT_BLOCKS: u64 = 10800;
 
+/// Maximum CKB capacity (shannons) a refund output may fall short of its
+/// Intention. Dual-written: on-chain Verify and off-chain assemblers **must**
+/// stay in sync.
+///
+/// `0.01 CKB` (= `1_000_000` shannons). At testnet `min_fee_rate = 1000`
+/// shannons/KW this covers roughly a megabyte of tx weight; even at 100× that
+/// rate it still covers a ~10 KB refund tx. The bound is **per Intention**
+/// (each refund output independently), so a keyless assembler cannot take more
+/// than this from any one user by batching. The shortfall may be burned as
+/// miner fee or paid to other outputs — the lock cannot force miner-only burn
+/// without fragile tx-wide accounting — so treat this as a hard cap on user
+/// loss, not a fee oracle. No Intention-args field: a fixed protocol constant
+/// avoids a v0.1 encoding/version break.
+pub const MAX_REFUND_FEE: u64 = 1_000_000;
+
+/// True when a refund output's CKB capacity is within the allowed fee window.
+///
+/// Rules (CKB-only and xUDT refunds; token amount/type are checked separately):
+/// - `got <= want` (no capacity inflation on the refund cell)
+/// - `got >= want.saturating_sub(MAX_REFUND_FEE)` (bounded shortfall)
+/// - `got >= occupied` (refund cell must remain liveable)
+pub fn refund_capacity_allowed(got: u64, want: u64, occupied: u64) -> bool {
+    if got > want || got < occupied {
+        return false;
+    }
+    got >= want.saturating_sub(MAX_REFUND_FEE)
+}
+
 /// Standard xUDT amount width (little-endian `u128`).
 pub const XUDT_AMOUNT_LEN: usize = 16;
 
@@ -204,5 +232,33 @@ mod tests {
         };
         let payload = Payload::from_script(&script).unwrap();
         assert_eq!(payload.to_script().unwrap(), script);
+    }
+
+    #[test]
+    fn refund_capacity_window() {
+        let want = 200_000_000_000u64;
+        let occupied = 6_100_000_000u64; // 61 CKB typical secp cell floor
+        assert!(refund_capacity_allowed(want, want, occupied));
+        assert!(refund_capacity_allowed(
+            want - MAX_REFUND_FEE,
+            want,
+            occupied
+        ));
+        assert!(refund_capacity_allowed(
+            want - MAX_REFUND_FEE / 2,
+            want,
+            occupied
+        ));
+        assert!(!refund_capacity_allowed(
+            want - MAX_REFUND_FEE - 1,
+            want,
+            occupied
+        ));
+        assert!(!refund_capacity_allowed(want + 1, want, occupied));
+        assert!(!refund_capacity_allowed(occupied - 1, want, occupied));
+        // Fee room collapses when want is only slightly above occupied.
+        let tight = occupied + MAX_REFUND_FEE / 2;
+        assert!(refund_capacity_allowed(occupied, tight, occupied));
+        assert!(!refund_capacity_allowed(occupied - 1, tight, occupied));
     }
 }

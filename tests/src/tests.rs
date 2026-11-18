@@ -22,15 +22,16 @@ use ckb_cinnabar_calculator::{
     CalculatorError, TransactionCalculator,
 };
 use ckb_common_intention_dispatcher_calculator::{
-    cid_lock, create_intention, digest_incompatible, digest_ok, timeout_burn, ERROR_ARGS_INVALID,
-    ERROR_HEADER_MISSING, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH,
-    ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED,
-    ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
+    cid_lock, create_intention, digest_incompatible, digest_ok, encode_cid_args, timeout_burn,
+    Payload, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING, ERROR_PARTIAL_DIGEST,
+    ERROR_PROCESS_MISMATCH, ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING,
+    ERROR_TIMEOUT_NOT_REACHED, ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET,
+    MAX_REFUND_FEE, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
 };
 
 use crate::faker::{
-    cid_args, dest_lock, outpoint_ids, prepared_skeleton, process_type_hash,
-    seed_fakenet_xudt_cell, seed_header, seed_intention, seed_minimal_ckb_intention,
+    cid_args, dest_lock, dest_script, outpoint_ids, prepared_skeleton, process_type_hash,
+    script_to_cid, seed_fakenet_xudt_cell, seed_header, seed_intention, seed_minimal_ckb_intention,
     seed_process_cell, seed_typed_dummy_cell, seed_typed_intention, seed_user_cell, user_address,
     user_lock, user_script, xudt_type_script, CKB_CAPACITY, CONTRACT_BIN, CONTRACT_NAME,
     PACK_BLOCK, USER_CELL_CAPACITY, XUDT_AMOUNT,
@@ -314,6 +315,160 @@ async fn digest_incompatible_xudt() {
     verify(&rpc, skeleton, vec![ix])
         .await
         .expect("digest_incompatible xUDT");
+}
+
+#[tokio::test]
+async fn digest_incompatible_refund_fee_within_cap() {
+    require_binary();
+    for (label, fee, xudt) in [
+        ("ckb-exact", 0u64, None),
+        ("ckb-half-cap", MAX_REFUND_FEE / 2, None),
+        ("ckb-full-cap", MAX_REFUND_FEE, None),
+        (
+            "xudt-full-cap",
+            MAX_REFUND_FEE,
+            Some((xudt_type_script(), XUDT_AMOUNT)),
+        ),
+    ] {
+        let mut rpc = FakeRpcClient::default();
+        seed_fakenet_xudt_cell(&mut rpc);
+        let skeleton = prepared_skeleton(&rpc);
+        let intention = seed_intention(
+            &mut rpc,
+            &skeleton,
+            cid_args(process_type_hash(), label.as_bytes()),
+            CKB_CAPACITY,
+            xudt.clone(),
+            PACK_BLOCK,
+        );
+        let ix = digest_incompatible::<FakeRpcClient>(
+            outpoint_ids(&intention),
+            user_lock(),
+            CKB_CAPACITY - fee,
+            xudt,
+        );
+        verify(&rpc, skeleton, vec![ix])
+            .await
+            .unwrap_or_else(|e| panic!("refund fee within cap ({label}): {e:?}"));
+    }
+}
+
+#[tokio::test]
+async fn digest_incompatible_refund_fee_beyond_cap_rejected() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"fee-over"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let ix = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        user_lock(),
+        CKB_CAPACITY - MAX_REFUND_FEE - 1,
+        None,
+    );
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("fee beyond MAX_REFUND_FEE");
+    assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
+}
+
+#[tokio::test]
+async fn digest_incompatible_wrong_lock_rejected() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"wrong-lock"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    // Refund to a different lock: no User Lock output → not DigestIncompatible.
+    let ix = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        dest_lock(),
+        CKB_CAPACITY - MAX_REFUND_FEE,
+        None,
+    );
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("wrong refund lock");
+    assert_eq!(exit(err), ERROR_UNKNOWN_BRANCH);
+}
+
+#[tokio::test]
+async fn digest_incompatible_token_amount_change_rejected() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let xudt = xudt_type_script();
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"token-mut"),
+        CKB_CAPACITY,
+        Some((xudt.clone(), XUDT_AMOUNT)),
+        PACK_BLOCK,
+    );
+    let ix = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        user_lock(),
+        CKB_CAPACITY - MAX_REFUND_FEE,
+        Some((xudt, XUDT_AMOUNT - 1)),
+    );
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("token amount must stay exact");
+    assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
+}
+
+#[tokio::test]
+async fn digest_incompatible_batch_two_users_fee_within_cap() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+
+    let user_a = user_lock();
+    let user_b = dest_lock();
+    let args_a = cid_args(process_type_hash(), b"batch-a");
+    let args_b = encode_cid_args(
+        process_type_hash(),
+        script_to_cid(&dest_script()),
+        Payload {
+            data: b"batch-b".to_vec(),
+        },
+    );
+    let intention_a = seed_intention(&mut rpc, &skeleton, args_a, CKB_CAPACITY, None, PACK_BLOCK);
+    let intention_b = seed_intention(&mut rpc, &skeleton, args_b, CKB_CAPACITY, None, PACK_BLOCK);
+
+    // Per-Intention cap: each user may burn up to MAX_REFUND_FEE independently.
+    let refund_a = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention_a),
+        user_a,
+        CKB_CAPACITY - MAX_REFUND_FEE,
+        None,
+    );
+    let refund_b = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention_b),
+        user_b,
+        CKB_CAPACITY - MAX_REFUND_FEE / 2,
+        None,
+    );
+    verify(&rpc, skeleton, vec![refund_a, refund_b])
+        .await
+        .expect("multi-user batch refunds with per-Intention fee caps");
 }
 
 #[tokio::test]

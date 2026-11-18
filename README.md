@@ -29,8 +29,8 @@ enum:
 | Hop | When | What CID checks |
 |-----|------|-----------------|
 | `digest_ok` | Committed Process type hash present in **both inputs and outputs** | Destroy; Process scripts enforce execution; no User Lock input/signature required |
-| `digest_incompatible` | No matching Process pair, User Lock refund present, User Lock absent from inputs | Destroy + exact CKB capacity and token refund |
-| `timeout_burn` | User Lock in inputs, no matching Process pair, headers prove `judge - pack >= 10800` | Destroy + exact refund + User Lock authorization |
+| `digest_incompatible` | No matching Process pair, User Lock refund present, User Lock absent from inputs | Destroy + User Lock refund; token amount/type exact; CKB capacity within fee window |
+| `timeout_burn` | User Lock in inputs, no matching Process pair, headers prove `judge - pack >= 10800` | Destroy + same refund rules + User Lock authorization |
 
 **Delegated execution:** the user chooses `process_type_hash` when creating
 an Intention. For `digest_ok`, CID finds that exact full type-script hash on
@@ -56,21 +56,41 @@ the one-input/no-output rule still applies to each CID lock group. The shared
 refund guard below applies only to refund paths. Without a matching Process
 pair, exact refund and timeout rules remain available; arbitrary spending fails.
 
-Refunds preserve the Intention's **exact capacity**, and xUDT refunds preserve
-both the full type hash and token amount. Fees come from separate funding inputs.
+Refunds must go to the exact User Lock. xUDT refunds preserve both the full type
+hash and token amount. **CKB capacity** on a refund output may be reduced by at
+most `MAX_REFUND_FEE` (= `0.01 CKB` = `1_000_000` shannons) so a keyless
+`digest_incompatible` assembler can pay the mempool fee from the Intention
+itself without fee inputs or keys. The refund capacity must also stay
+`<= Intention capacity` and `>=` the refund cell's occupied capacity.
+`DigestOk` is unchanged: Process scripts still own asset destinations.
+
+The fee bound is **per Intention** (each refund output checked against its own
+Intention). An aggregate tx-wide cap would let an assembler concentrate the
+shortfall onto one user while other Intentions refund exactly. The shortfall may
+be burned as miner fee or paid to other outputs — CID cannot force miner-only
+burn without fragile tx-wide accounting — so `MAX_REFUND_FEE` is a hard cap on
+user loss (at most `0.01 CKB` per Intention), not a fee oracle. Honest keyless
+assemblers should set `shortfall == paid_fee` with no siphon outputs. A
+size-derived on-chain cap is not reliable (weight depends on deps/witnesses the
+lock cannot fully bound), so the protocol uses this fixed dual-written constant
+rather than a new Intention-args field (no v0.1 encoding change).
+
 Until aggregate refunds are specified, refund paths accept at most one Intention
 per User Lock per transaction, including different payloads and deployment aliases.
 The guard conservatively counts any input lock whose args decode as CID v0.1
 with that User Lock, even if it belongs to another program.
 This prevents two script groups from counting the same refund twice. The first
-output to the User Lock must be the exact refund; append fee change afterwards.
+output to the User Lock must be the refund (capacity within the fee window);
+append fee change afterwards when a separate fee sponsor is used.
 
-Existing deployed binaries are unchanged by this source fix. Rebuild/redeploy
-and use the new code hash for new Intentions; existing cells locked to the old
-binary do not automatically acquire these protections.
+**Redeploy required:** changing refund matching changes the `cid_lock` binary /
+data hash. Rebuild, redeploy, and point new Intentions at the new code hash;
+existing cells locked to an older binary keep the old exact-capacity rule.
+See `deployment/testnet/` metadata notes (do not treat old `data_hash` as current).
 
-`TIMEOUT_BLOCKS = 10800` is dual-written on-chain and off-chain. Pack height is
-the block that committed the Intention; judge height is the newest header dep.
+`TIMEOUT_BLOCKS = 10800` and `MAX_REFUND_FEE = 1_000_000` are dual-written
+on-chain and off-chain. Pack height is the block that committed the Intention;
+judge height is the newest header dep.
 
 ## Build and test
 
@@ -222,9 +242,12 @@ A standard secp256k1 integration should:
 
 1. Add CID, xUDT (recipes handle this), and the real secp256k1 code/data deps.
 2. Apply the recipe, Process code deps/witnesses, and any server/sponsor inputs.
-3. Balance CKB with a separate change output, preserving exact refund outputs.
-4. Sign every input lock group, then check actual fees against the chosen budget
-   and the node's fee rate. Do not alter the transaction after signing.
+3. Balance CKB with a separate change output when a fee sponsor is available;
+   otherwise, for keyless `digest_incompatible`, set the User Lock refund
+   capacity to `intention_capacity - fee` with `fee ∈ (0, MAX_REFUND_FEE]`
+   (and still `>=` occupied capacity). Do not change xUDT amounts.
+4. Sign every input lock group (when any), then check actual fees against the
+   chosen budget and the node's fee rate. Do not alter the transaction after signing.
 5. Dry-run the final signed transaction against a CKB node before broadcasting.
 
 Example finalization with an explicit fee budget (shannons); `signatures` is an
@@ -256,7 +279,8 @@ let tx = skeleton.clone().into_transaction_view();
 let size = tx.data().serialized_size_in_block() as u64;
 let required_fee = size.checked_mul(rpc.min_fee_rate()?).unwrap().div_ceil(1000);
 assert!(paid_fee >= required_fee);
-// If too low, rebuild and re-sign with a higher approved fee; never shave refunds.
+// If too low and a fee sponsor is present, rebuild with a higher approved fee.
+// Keyless DigestIncompatible may instead shave the refund by at most MAX_REFUND_FEE.
 // Dry-run and broadcast `tx` using your node/client only after all checks pass.
 ```
 
@@ -276,9 +300,10 @@ enforce branch protection.
 
 Tests include CKB/xUDT delegation without a User Lock input, Process pair
 presence/mismatch checks, a failing executable Process, authorized batch digest,
-CellDep-only theft, xUDT capacity theft on both refund paths,
-non-issuer token collection/change/insufficient balance, missing output with xUDT
-input dependency, timeout boundaries 10799/10800/10801, partial user proceeds,
+CellDep-only theft, xUDT capacity theft on both refund paths, bounded refund-fee
+deduction (exact / within-cap / beyond-cap / wrong lock / token mutation / multi-user
+batch), non-issuer token collection/change/insufficient balance, missing output with
+xUDT input dependency, timeout boundaries 10799/10800/10801, partial user proceeds,
 and cross-Intention refund reuse. `tests/src/signed.rs` executes the real genesis
 secp256k1 script and real signatures for create/digest/refund/timeout, checks fee
 and change, and rejects missing funding signatures and post-signing output mutations. Digest

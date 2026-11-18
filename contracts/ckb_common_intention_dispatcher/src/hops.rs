@@ -28,6 +28,7 @@ pub struct DigestIncompatible;
 impl Verification<Context> for DigestIncompatible {
     fn verify(&mut self, name: &str, ctx: &mut Context) -> Result<Option<&str>> {
         debug!("Entering [{name}]");
+        // Refund may burn ≤ MAX_REFUND_FEE of CKB capacity as tx fee; tokens exact.
         let refund = ctx.refund_output.ok_or(CidError::RefundMissing)?;
         let asset = ctx.asset.as_ref().ok_or(CidError::ZeroAsset)?;
         if !refund_assets_match(refund, asset)? {

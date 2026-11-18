@@ -158,10 +158,13 @@ pub enum IntentionAsset {
 
 pub fn refund_assets_match(index: usize, expected: &IntentionAsset) -> Result<bool> {
     let capacity = load_cell_capacity(index, Source::Output)?;
+    let occupied = load_cell_occupied_capacity(index, Source::Output)?;
     let data = load_cell_data(index, Source::Output)?;
     let type_script = load_cell_type(index, Source::Output)?;
     match (expected, type_script) {
-        (IntentionAsset::Ckb { capacity: want }, None) => Ok(capacity == *want && data.is_empty()),
+        (IntentionAsset::Ckb { capacity: want }, None) => {
+            Ok(data.is_empty() && cid_protocol::refund_capacity_allowed(capacity, *want, occupied))
+        }
         (
             IntentionAsset::Xudt {
                 capacity: want,
@@ -175,7 +178,7 @@ pub fn refund_assets_match(index: usize, expected: &IntentionAsset) -> Result<bo
                 return Ok(false);
             }
             let got = parse_xudt_amount(&data)?;
-            Ok(got == *amount && capacity == *want)
+            Ok(got == *amount && cid_protocol::refund_capacity_allowed(capacity, *want, occupied))
         }
         _ => Ok(false),
     }
