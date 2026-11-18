@@ -138,6 +138,20 @@ Usage: [docs/process-example-usage.md](docs/process-example-usage.md)
 cd tests && cargo test process_example -- --nocapture
 ```
 
+## Optional Intention CLI
+
+CKB-only offline Intention creator (non-default member). See
+[docs/cid-intention-cli.md](docs/cid-intention-cli.md).
+
+```bash
+cargo run -p cid-intention-cli -- create --request req.json --output tx.json
+cargo run -p cid-intention-cli -- send --tx tx.json --rpc-url http://127.0.0.1:8114 \
+  --network testnet --genesis-hash 0x…
+```
+
+Signing uses `CID_INTENTION_PRIVKEY` (env only). `create` never broadcasts;
+`send` never reads a key. Do not point CI/agents at public RPCs.
+
 ## Optional deploy runner
 
 The Cinnabar deploy/migrate CLI lives in `runner/` (package
@@ -179,6 +193,7 @@ artifacts, not as a local rebuild oracle.
 | `tests/binaries/xudt` | Real xUDT RISC-V (not always-success) |
 | `build/release/` | This lock’s RISC-V binary |
 | `runner/` | Optional `ckb_cinnabar::dispatch()` deploy CLI (non-default member) |
+| `tools/cid-intention-cli/` | Offline CKB Intention create + env-key sign; explicit testnet `send` (non-default) |
 
 Most unit scenarios use always-success user locks; the signed integration scenarios
 use the real genesis secp256k1 lock. Process cells use an executable test-only

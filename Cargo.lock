@@ -323,6 +323,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cid-intention-cli"
+version = "0.1.0"
+dependencies = [
+ "cid-protocol",
+ "ckb-cinnabar-calculator",
+ "ckb-system-scripts 0.5.4",
+ "ckb_common_intention_dispatcher-calculator",
+ "clap",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cid-process-executor"
 version = "0.1.0"
 dependencies = [
@@ -2811,7 +2828,9 @@ dependencies = [
  "cookie",
  "cookie_store",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",
