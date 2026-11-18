@@ -30,7 +30,7 @@ enum:
 |-----|------|-----------------|
 | `digest_ok` | Committed Process type hash present in **both inputs and outputs** | Destroy; Process scripts enforce execution; no User Lock input/signature required |
 | `digest_incompatible` | No matching Process pair, User Lock refund present, User Lock absent from inputs | Destroy + User Lock refund; token amount/type exact; CKB capacity within fee window |
-| `timeout_burn` | User Lock in inputs, no matching Process pair, headers prove `judge - pack >= 10800` | Destroy + same refund rules + User Lock authorization |
+| `timeout_burn` | User Lock in inputs, no matching Process pair, headers prove `judge - pack >= 10800` | Destroy + exact capacity/token refund + User Lock authorization |
 
 **Delegated execution:** the user chooses `process_type_hash` when creating
 an Intention. For `digest_ok`, CID finds that exact full type-script hash on
@@ -64,10 +64,12 @@ hash and token amount.
 must stay `>=` the refund cell's occupied capacity. That ceiling alone is not
 enough: Verify also requires `tx_fee >= Σ shortfalls` over **every**
 DigestIncompatible Intention in the transaction (same aggregate in each lock
-group). Equivalently, non-refund outputs must be funded by non-Intention inputs,
-so a shortfall cannot be redirected to a third party and cannot be double-counted
-across groups. `MAX_REFUND_FEE` is only a per-Intention ceiling on how much of
-that fee one refund may contribute — never a skim allowance.
+group). Equivalently, non-refund outputs must be funded by inputs that are **not**
+counted in `S` (non-DigestIncompatible inputs — sponsors, TimeoutBurn/user cells,
+DigestOk Process cells, etc.), so a shortfall cannot be redirected to a third
+party and cannot be double-counted across groups. `MAX_REFUND_FEE` is only a
+per-Intention ceiling on how much of that fee one refund may contribute — never
+a skim allowance.
 
 **TimeoutBurn** keeps **exact** capacity refunds (user can add fee inputs).
 **DigestOk** is unchanged. Process example still requires exact beneficiary

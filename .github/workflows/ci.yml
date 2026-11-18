@@ -27,9 +27,11 @@ jobs:
       - name: Host default tests
         run: cargo test --locked
       - name: Lint host crates
-        run: cargo clippy --locked -p cid-protocol -p ckb_common_intention_dispatcher-calculator -p cid_process_example-calculator -p cid-process-executor -p ckb_common_intention_dispatcher-tests --all-targets -- -D warnings
+        run: cargo clippy --locked -p cid-protocol -p ckb_common_intention_dispatcher-calculator -p cid_process_example-calculator -p cid-process-executor -p ckb_common_intention_dispatcher-tests -p cid-intention-cli --all-targets -- -D warnings
       - name: Protocol tests
         run: cargo test --locked -p cid-protocol
+      - name: Intention CLI tests
+        run: cargo test --locked -p cid-intention-cli
       - name: Build RISC-V contract
         run: make build CLANG=clang-18 CARGO_ARGS=--locked
       - name: Lint contract

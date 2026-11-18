@@ -56,10 +56,10 @@ pub fn refund_capacity_allowed(got: u64, want: u64, occupied: u64) -> bool {
 ///
 /// Let `S` be Σ(intention_cap − refund_cap) over DigestIncompatible inputs and
 /// `F = Σinputs − Σoutputs`. Then `F >= S` iff non-refund outputs are fully
-/// funded by non-Intention inputs — so Intention shortfalls cannot be redirected
-/// into third-party outputs. Each verifying lock group must use the **same**
-/// tx-wide `S` (not its own shortfall alone) so fee cannot be reused across
-/// Intention groups.
+/// funded by inputs **not** counted in `S` (non-DigestIncompatible inputs) — so
+/// DigestIncompatible shortfalls cannot be redirected into third-party outputs.
+/// Each verifying lock group must use the **same** tx-wide `S` (not its own
+/// shortfall alone) so fee cannot be reused across Intention groups.
 pub fn fee_covers_shortfalls(fee: u64, total_shortfall: u64) -> bool {
     fee >= total_shortfall
 }
