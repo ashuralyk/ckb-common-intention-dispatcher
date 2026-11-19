@@ -7,3 +7,4 @@ edition = "2021"
 ckb-cinnabar-calculator = { workspace = true }
 cid-protocol = { path = "../../protocol" }
 cid-process-executor = { path = "../../crates/cid-process-executor" }
+cid-process-example-policy = { path = "../../crates/cid-process-example-policy" }

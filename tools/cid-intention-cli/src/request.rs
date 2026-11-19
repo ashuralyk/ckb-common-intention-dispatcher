@@ -10,8 +10,8 @@ pub struct CreateRequest {
     pub network: String,
     pub fee_shannons: u64,
     /// Requested Intention capacity (shannons). Defaults to the example Process
-    /// deposit minimum. The effective capacity also covers the protocol floor
-    /// and occupied capacity, and must meet the example Process minimum.
+    /// deposit minimum. Effective capacity is `max(requested, occupied)` and
+    /// must meet the example Process minimum (protocol has no Intention floor).
     #[serde(default = "default_intention_capacity")]
     pub intention_capacity: u64,
     pub funding: FundingCell,

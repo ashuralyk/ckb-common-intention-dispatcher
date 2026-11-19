@@ -29,15 +29,9 @@ pub const DEFAULT_PROCESS_STATE_CAPACITY: u64 = 300_0000_0000;
 
 /// Example Process minimum CKB deposit (shannons): **600 CKB**.
 ///
-/// Process-local (not protocol). Dual-written with
-/// `contracts/cid_process_example/src/deposit.rs` — keep both literals identical.
-pub const MIN_DEPOSIT_CAPACITY: u64 = 600_0000_0000;
-
-/// True when a CKB-only Intention capacity meets the example deposit minimum.
-#[inline]
-pub fn ckb_deposit_capacity_ok(capacity: u64, has_type_script: bool) -> bool {
-    has_type_script || capacity >= MIN_DEPOSIT_CAPACITY
-}
+/// Process-owned (not protocol). Single source:
+/// `crates/cid-process-example-policy`.
+pub use cid_process_example_policy::{ckb_deposit_capacity_ok, MIN_DEPOSIT_CAPACITY};
 
 /// Fee rate (shannons/KW) used when balancing Process state create txs.
 /// Matches testnet `min_fee_rate` and the example Process assemble fee rate.

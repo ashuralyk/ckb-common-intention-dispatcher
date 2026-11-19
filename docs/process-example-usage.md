@@ -87,7 +87,7 @@ beneficiary, and rejects capacities below its Process-local minimum:
 
 | Constant | Value | Where |
 |----------|-------|--------|
-| `MIN_DEPOSIT_CAPACITY` | 600 CKB | Dual-written: `contracts/cid_process_example/src/deposit.rs` + `calculator/process` |
+| `MIN_DEPOSIT_CAPACITY` | 600 CKB | `crates/cid-process-example-policy` (shared by on-chain contract + calculator/CLI) |
 
 Enforced in Process lock Verify (own DigestOk only), `Process.assemble`, and the
 calculator draft path. xUDT Intentions are not subject to this CKB deposit

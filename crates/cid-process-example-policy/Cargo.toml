@@ -1,0 +1,9 @@
+[package]
+name = "cid-process-example-policy"
+version = "0.1.0"
+edition = "2021"
+
+# Process-owned constants/helpers shared by the RISC-V example contract and the
+# host calculator/CLI. Not protocol — other Processes define their own policy.
+[lib]
+path = "src/lib.rs"
