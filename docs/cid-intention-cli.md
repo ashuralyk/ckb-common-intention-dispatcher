@@ -154,7 +154,9 @@ and `registry_post` for `POST http://127.0.0.1:9101/v1/processes`:
 }
 ```
 
-`send` live-verifies both CID and Process code Type ID celldeps before broadcast.
+`send` live-verifies the Process lock Type ID and the exact `cid_code_type_id`
+recorded in create-process metadata (not any other live TYPE_ID) before
+broadcast, and fails closed on dead celldeps.
 
 ## Usage
 

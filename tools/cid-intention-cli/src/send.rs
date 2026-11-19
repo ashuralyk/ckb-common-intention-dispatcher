@@ -44,6 +44,8 @@ fn strip_tx_metadata(mut value: Value) -> Value {
         obj.remove("identity_type_id_args");
         obj.remove("process_type_script");
         obj.remove("registry_post");
+        obj.remove("cid_code_type_id");
+        obj.remove("cid_code_type_id_args");
         obj.remove("fee_shannons");
         obj.remove("fee_rate");
     }
@@ -351,12 +353,33 @@ fn process_state_lock_type_id_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, C
     Ok(out)
 }
 
-/// Live-verify Process **and** CID code Type IDs for Process state creates.
+/// CID code Type ID recorded by `create-process` for send-time binding.
+fn cid_code_type_id_from_metadata(signed: &Value) -> Result<Option<[u8; 32]>, CliError> {
+    let Some(hex) = signed
+        .get("cid_code_type_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            signed
+                .get("inner")
+                .and_then(|i| i.get("cid_code_type_id"))
+                .and_then(|v| v.as_str())
+        })
+    else {
+        return Ok(None);
+    };
+    Ok(Some(decode_hash32(hex)?))
+}
+
+/// Live-verify Process **and** the exact CID code Type ID for Process creates.
 ///
 /// Intention lock checks are a no-op on Process create (no CID args outputs), so
-/// this path must explicitly require a live CID TYPE_ID celldep in addition to
-/// the Process code Type ID matching the state lock.
-fn assert_live_process_and_cid_code_type_ids(url: &str, tx: &Value) -> Result<(), CliError> {
+/// this path requires `cid_code_type_id` metadata from create-process and a live
+/// celldep whose TYPE_ID script hash equals that value.
+fn assert_live_process_and_cid_code_type_ids(
+    url: &str,
+    tx: &Value,
+    signed: &Value,
+) -> Result<(), CliError> {
     let want_process = process_state_lock_type_id_code_hashes(tx)?;
     if want_process.is_empty() {
         return Ok(());
@@ -367,6 +390,11 @@ fn assert_live_process_and_cid_code_type_ids(url: &str, tx: &Value) -> Result<()
             "Process state Type ID lock present but cell_deps is empty".into(),
         ));
     }
+    let want_cid = cid_code_type_id_from_metadata(signed)?.ok_or_else(|| {
+        CliError::NetworkGuard(
+            "Process create missing cid_code_type_id metadata; refusing send".into(),
+        )
+    })?;
     let live_type_ids = collect_live_type_id_script_hashes(url, tx)?;
     for want in &want_process {
         if !live_type_ids.iter().any(|got| got == want) {
@@ -376,13 +404,10 @@ fn assert_live_process_and_cid_code_type_ids(url: &str, tx: &Value) -> Result<()
             ));
         }
     }
-    // CID code dep must also be live Type ID and distinct from Process code.
-    let has_cid = live_type_ids
-        .iter()
-        .any(|got| want_process.iter().all(|p| p != got));
-    if !has_cid {
+    if !live_type_ids.iter().any(|got| got == &want_cid) {
         return Err(CliError::NetworkGuard(
-            "Process create requires a live CID code Type ID celldep; refusing send".into(),
+            "Process create CID code Type ID does not match any live celldep TYPE_ID script hash; refusing send"
+                .into(),
         ));
     }
     Ok(())
@@ -410,7 +435,7 @@ pub fn send_signed_transaction(opts: &SendOptions, signed: &Value) -> Result<Str
     }
 
     assert_live_cid_type_id_matches_intention(&opts.rpc_url, &tx)?;
-    assert_live_process_and_cid_code_type_ids(&opts.rpc_url, &tx)?;
+    assert_live_process_and_cid_code_type_ids(&opts.rpc_url, &tx, signed)?;
 
     let result = rpc_call(
         &opts.rpc_url,

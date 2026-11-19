@@ -227,6 +227,13 @@ pub fn create_signed_process_state_bundle(
         )));
     }
     let cid_type_script = require_code_type_id_script(&req.cid_lock_dep, "cid_lock_dep")?;
+    let cid_code_type_id = script_hash32(&cid_type_script);
+    let cid_code_type_id_args = {
+        let raw = cid_type_script.args().raw_data();
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&raw);
+        a
+    };
     let process_code_type = require_code_type_id_script(&req.process_code_dep, "process_code_dep")?;
     let process_code_type_hash = script_hash32(&process_code_type);
     let process_code_type_id_args = {
@@ -487,6 +494,16 @@ pub fn create_signed_process_state_bundle(
             serde_json::to_value(&process_type_script)?,
         );
         obj.insert("registry_post".into(), registry_post);
+        // Bind send-time CID live Type ID check to the create request (not any
+        // other live TYPE_ID celldep).
+        obj.insert(
+            "cid_code_type_id".into(),
+            Value::String(encode_hex(&cid_code_type_id)),
+        );
+        obj.insert(
+            "cid_code_type_id_args".into(),
+            Value::String(encode_hex(&cid_code_type_id_args)),
+        );
         obj.insert(
             "fee_shannons".into(),
             Value::Number(serde_json::Number::from(paid_fee)),

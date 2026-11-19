@@ -334,6 +334,8 @@ fn create_process_output_sends_after_stripping_metadata() {
                 assert!(tx.get("identity_type_id").is_none());
                 assert!(tx.get("state_outpoint").is_none());
                 assert!(tx.get("process_type_script").is_none());
+                assert!(tx.get("cid_code_type_id").is_none());
+                assert!(tx.get("cid_code_type_id_args").is_none());
                 serde_json::from_value::<ckb_jsonrpc_types::Transaction>(tx.clone())
                     .expect("process create→send payload must be a Transaction");
                 *saw_send_c.lock().unwrap() = true;
@@ -418,7 +420,57 @@ fn send_rejects_process_create_without_live_cid_type_id_dep() {
     };
     let err = send_signed_transaction(&opts, &created).unwrap_err();
     match err {
-        CliError::NetworkGuard(msg) => assert!(msg.contains("live CID code Type ID"), "{msg}"),
+        CliError::NetworkGuard(msg) => assert!(
+            msg.contains("CID code Type ID") || msg.contains("cid_code_type_id"),
+            "{msg}"
+        ),
+        other => panic!("expected NetworkGuard, got {other:?}"),
+    }
+}
+
+#[test]
+fn send_rejects_process_create_with_mismatched_cid_code_type_id_metadata() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let mut created = create_signed_process_state(&req, &secret).unwrap();
+    // Corrupt metadata so send demands a TYPE_ID that is not live on any celldep.
+    created.as_object_mut().unwrap().insert(
+        "cid_code_type_id".into(),
+        json!(format!("0x{}", hex::encode([0xEEu8; 32]))),
+    );
+    let genesis = h256(0xAB);
+    let genesis_c = genesis.clone();
+    let cid_tx = req.cid_lock_dep.tx_hash.clone();
+    let cid_type = req.cid_lock_dep.type_script.clone().unwrap();
+    let process_tx = req.process_code_dep.tx_hash.clone();
+    let process_type = req.process_code_dep.type_script.clone().unwrap();
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, params| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+            "get_block_hash" => json!(genesis_c.clone()),
+            "get_live_cell" => {
+                let op = &params.as_array().unwrap()[0];
+                let txh = op["tx_hash"].as_str().unwrap_or("");
+                if txh.eq_ignore_ascii_case(&cid_tx) {
+                    live_typed_cell(&cid_type)
+                } else if txh.eq_ignore_ascii_case(&process_tx) {
+                    live_typed_cell(&process_type)
+                } else {
+                    live_untyped_cell()
+                }
+            }
+            "send_transaction" => json!(h256(0xFF)),
+            _ => json!({"error": {"code": -1, "message": "unknown"}}),
+        },
+    ))));
+    let opts = SendOptions {
+        rpc_url: url,
+        network: "testnet".into(),
+        genesis_hash: genesis,
+    };
+    let err = send_signed_transaction(&opts, &created).unwrap_err();
+    match err {
+        CliError::NetworkGuard(msg) => assert!(msg.contains("CID code Type ID"), "{msg}"),
         other => panic!("expected NetworkGuard, got {other:?}"),
     }
 }

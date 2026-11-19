@@ -351,6 +351,23 @@ fn create_intention_fee_covers_rate_1000_serialized_size_in_block() {
 }
 
 #[test]
+fn create_intention_bumps_sub_min_fee_shannons_to_rate_1000() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    req.fee_shannons = 1; // far below rate-1000 min for a create tx
+                          // Funding must still clear early headroom (max(1, 1_000_000) + change dust).
+    req.funding.capacity = req.intention_capacity + 1_000_000 + 61_0000_0000 + 10_0000_0000;
+    let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
+    let (paid, need) = assert_fee_covers_rate(&bundle.skeleton, MIN_FEE_RATE).unwrap();
+    assert!(need > 1, "min fee must exceed the sub-min request");
+    assert_eq!(
+        paid, need,
+        "sub-min fee_shannons must bump to rate-1000 min"
+    );
+    assert!(paid > req.fee_shannons);
+}
+
+#[test]
 fn create_process_state_shape_type_id_registry_and_no_key_leak() {
     let secret = key(0x42);
     let req = fixture_process_request(&secret);
@@ -409,6 +426,13 @@ fn create_process_state_shape_type_id_registry_and_no_key_leak() {
     assert!(tx["state_outpoint"]["tx_hash"].as_str().is_some());
     assert_eq!(tx["state_outpoint"]["index"].as_u64().unwrap(), 0);
     assert_eq!(tx["fee_rate"].as_u64().unwrap(), 1000);
+    let cid_type = req.cid_lock_dep.type_script.as_ref().unwrap();
+    let expected_cid = process_type_hash_of(cid_type).unwrap();
+    assert_eq!(
+        tx["cid_code_type_id"].as_str().unwrap(),
+        format!("0x{}", hex::encode(expected_cid))
+    );
+    assert_eq!(tx["cid_code_type_id_args"].as_str().unwrap(), cid_type.args);
 
     // Intention CLI can target this identity via process_type_script.
     let pts = &tx["process_type_script"];

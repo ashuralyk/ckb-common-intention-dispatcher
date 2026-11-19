@@ -361,11 +361,14 @@ fn create_signed_intention_bundle_inner(
         return Err(CliError::LockKeyMismatch);
     }
 
-    // Change needs a realistic minimum; require funding covers intention + fee + 61 CKB dust floor.
+    // Headroom uses effective fee budget: max(requested, conservative rate-1000
+    // estimate). Exact effective_fee is re-checked after placeholders below.
     const MIN_CHANGE: u64 = 61_0000_0000;
+    const FEE_HEADROOM: u64 = 1_000_000; // covers >1KB at rate 1000
+    let fee_budget = req.fee_shannons.max(FEE_HEADROOM);
     let need = req
         .intention_capacity
-        .checked_add(req.fee_shannons)
+        .checked_add(fee_budget)
         .and_then(|v| v.checked_add(MIN_CHANGE))
         .ok_or(CliError::InsufficientFunds)?;
     if req.funding.capacity < need {
@@ -506,6 +509,15 @@ fn create_signed_intention_bundle_inner(
     install_sighash_witness_placeholders(&mut skeleton);
     let min_fee = min_fee_for_skeleton(&skeleton, MIN_FEE_RATE);
     let effective_fee = req.fee_shannons.max(min_fee);
+    // Exact headroom with effective_fee (may exceed the early estimate).
+    let need_exact = req
+        .intention_capacity
+        .checked_add(effective_fee)
+        .and_then(|v| v.checked_add(MIN_CHANGE))
+        .ok_or(CliError::InsufficientFunds)?;
+    if req.funding.capacity < need_exact {
+        return Err(CliError::InsufficientFunds);
+    }
     apply_fee_by_shrinking_change(&mut skeleton, change_index, effective_fee)?;
 
     let sign = AddSecp256k1SighashSignatures {
