@@ -97,13 +97,20 @@ This prevents two script groups from counting the same refund twice. The first
 output to the User Lock must be the refund; with a fee sponsor, keep
 `sponsor_in >= sponsor_change` so fee still covers the Intention shortfall.
 
-**Redeploy required:** changing refund matching changes the `cid_lock` binary /
-data hash. Rebuild, redeploy, and point new Intentions at the new code hash;
-existing cells locked to an older binary keep the old exact-capacity rule.
-**TimeoutBurn stays exact** after redeploy (only DigestIncompatible gains the
-fee-bound haircut). See `deployment/README.md` for the expected RISC-V
-`data_hash` and how to verify it; `deployment/testnet/` JSON may still list a
-stale deployed hash — do not treat that as current until post-redeploy update.
+**Redeploy / Type ID:** changing refund matching changes the `cid_lock` binary /
+data hash. Rebuild and migrate under the **same Type ID**; new Intentions must
+lock with `hash_type=type` and `code_hash=type_id` (see Intention CLI) so they
+track the live code cell across upgrades. Existing cells locked to an older
+**data hash** (`data1`) stay bound to that binary until spent — but spending
+them still requires a **live CellDep** that contains those exact old bytes
+(CKB code locating). Before a Type-ID migration that consumes the only live
+copy of the old binary: settle (digest/refund/timeout) those Intentions first,
+**or** keep the exact old binary available in a separate live code cell that
+spends can CellDep. **TimeoutBurn stays exact** after redeploy (only
+DigestIncompatible gains the fee-bound haircut). See `deployment/README.md`
+for the expected RISC-V `data_hash` and how to verify it; `deployment/testnet/`
+JSON may still list a stale deployed hash — do not treat that as current until
+the owner updates it post-redeploy.
 
 `TIMEOUT_BLOCKS = 10800` and `MAX_REFUND_FEE = 1_000_000` are dual-written
 on-chain and off-chain. Pack height is the block that committed the Intention;
@@ -179,6 +186,11 @@ cd tests && cargo test process_example -- --nocapture
 
 CKB-only offline Intention creator (non-default member). See
 [docs/cid-intention-cli.md](docs/cid-intention-cli.md).
+
+Intentions are locked to the CID code cell by **Type ID** (`lock.hash_type=type`,
+`lock.code_hash` = hash of the code cell's Type ID type script). The create
+request's `cid_lock_dep` must include that `type_script` and point at the live
+code outpoint; missing type script fails closed (no `data1` / data-hash fallback).
 
 ```bash
 cargo run -p cid-intention-cli -- create --request req.json --output tx.json

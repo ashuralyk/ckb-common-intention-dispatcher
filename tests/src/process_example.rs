@@ -11,7 +11,7 @@ use ckb_cinnabar_calculator::{
     re_exports::ckb_types::{
         core::ScriptHashType,
         packed::{OutPoint, Script},
-        prelude::{Builder, Entity, Pack},
+        prelude::{Builder, Entity, Pack, Unpack},
     },
     rpc::Network,
     simulation::{
@@ -22,7 +22,8 @@ use ckb_cinnabar_calculator::{
     CalculatorError, TransactionCalculator,
 };
 use ckb_common_intention_dispatcher_calculator::{
-    digest_incompatible, digest_ok, encode_cid_args, timeout_burn, Payload, TIMEOUT_BLOCKS,
+    cid_lock, digest_incompatible, digest_ok, encode_cid_args, timeout_burn, Payload,
+    TIMEOUT_BLOCKS,
 };
 
 use crate::faker::{
@@ -108,11 +109,20 @@ fn dest_script_data2() -> Script {
 }
 
 fn prepared_process_skeleton(rpc: &FakeRpcClient) -> TransactionSkeleton {
+    prepared_process_skeleton_with_cid_type_id(rpc, None)
+}
+
+/// When `cid_type_id_args` is set, the CID code celldep carries a Type ID type
+/// script so `ScriptEx::Reference` / Intention locks resolve as `hash_type=type`.
+fn prepared_process_skeleton_with_cid_type_id(
+    rpc: &FakeRpcClient,
+    cid_type_id_args: Option<[u8; 32]>,
+) -> TransactionSkeleton {
     let prepare = Instruction::<FakeRpcClient>::new(vec![
         Box::new(AddFakeAlwaysSuccessCelldep {}),
         Box::new(AddFakeContractCelldepByName {
             contract: CONTRACT_NAME.into(),
-            type_id_args: None,
+            type_id_args: cid_type_id_args.map(Into::into),
             contract_binary_path: CONTRACT_BIN.into(),
         }),
         Box::new(AddFakeContractCelldepByName {
@@ -226,6 +236,62 @@ fn apply_transfer_to(
 #[tokio::test]
 async fn single_intention_digest_real_ssri() {
     assert_digest_counts(1);
+}
+
+/// Intention locked via Type ID (`hash_type=type`, `code_hash` = Type ID script
+/// hash) must still DigestOk through the CID lock + Process example.
+#[tokio::test]
+async fn type_id_referenced_intention_digest_ok() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let cid_type_id_args = [0x71u8; 32];
+    let mut skeleton = prepared_process_skeleton_with_cid_type_id(&rpc, Some(cid_type_id_args));
+
+    let resolved = cid_lock(vec![]).to_script(&skeleton).expect("cid lock");
+    let ht: u8 = resolved.hash_type().into();
+    assert_eq!(
+        ht, 1,
+        "CID Reference must resolve to hash_type=type when dep has Type ID"
+    );
+    let code: [u8; 32] = resolved.code_hash().unpack();
+    let data_hash = blake2b_256(std::fs::read(format!("{CONTRACT_BIN}/{CONTRACT_NAME}")).unwrap());
+    assert_ne!(
+        code, data_hash,
+        "Type ID code_hash must not be the binary data hash"
+    );
+
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process = seed_process_example_cell(&mut rpc, type_script);
+    let args = beneficiary_args(process_hash, &dest_script());
+    let intention = seed_intention(&mut rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
+
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .expect("assemble type-id DigestOk");
+
+    let in_lock = skeleton.inputs[0].output.lock_script();
+    let in_ht: u8 = in_lock.hash_type().into();
+    assert_eq!(in_ht, 1, "seeded Intention must use hash_type=type");
+    let in_code: [u8; 32] = in_lock.code_hash().unpack();
+    assert_eq!(in_code, code);
+
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("Type-ID-referenced Intention DigestOk must pass CID + Process VM");
 }
 
 #[tokio::test]

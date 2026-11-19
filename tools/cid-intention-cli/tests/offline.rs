@@ -99,10 +99,104 @@ fn create_signed_tx_shape_fee_witness_and_args() {
     let args_bytes = hex::decode(args.trim_start_matches("0x")).unwrap();
     assert_eq!(&args_bytes[..32], &pth);
 
+    let lock = &transaction["outputs"][0]["lock"];
+    assert_eq!(
+        lock["hash_type"].as_str().unwrap(),
+        "type",
+        "CID Intention lock must use Type ID reference"
+    );
+    let type_script = req.cid_lock_dep.type_script.as_ref().unwrap();
+    let expected_code = process_type_hash_of(type_script).unwrap();
+    assert_eq!(
+        lock["code_hash"].as_str().unwrap(),
+        format!("0x{}", hex::encode(expected_code)),
+        "code_hash must be the Type ID type-script hash"
+    );
+
     assert_eq!(
         tx["process_type_hash"].as_str().unwrap(),
         format!("0x{}", hex::encode(pth))
     );
+}
+
+#[test]
+fn cid_lock_resolves_to_type_id_script_hash() {
+    let secret = key(0x42);
+    let req = fixture_request(&secret);
+    let type_script = req.cid_lock_dep.type_script.as_ref().unwrap();
+    let expected = process_type_hash_of(type_script).unwrap();
+    let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
+    let lock = bundle.skeleton.outputs[0].lock_script();
+    let code: [u8; 32] = lock.code_hash().unpack();
+    let ht: u8 = lock.hash_type().into();
+    assert_eq!(ht, 1, "hash_type must be type");
+    assert_eq!(code, expected);
+}
+
+#[test]
+fn missing_cid_lock_type_script_rejected() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    req.cid_lock_dep.type_script = None;
+    let err = create_signed_intention(&req, &secret).unwrap_err();
+    match err {
+        CliError::InvalidRequest(msg) => {
+            assert!(
+                msg.contains("type_script") && msg.contains("required"),
+                "unexpected message: {msg}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[test]
+fn cid_lock_type_script_must_be_type_id() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    let mut bad = req.cid_lock_dep.type_script.clone().unwrap();
+    bad.hash_type = "data1".into();
+    req.cid_lock_dep.type_script = Some(bad);
+    let err = create_signed_intention(&req, &secret).unwrap_err();
+    assert!(matches!(err, CliError::InvalidRequest(_)));
+}
+
+#[test]
+fn cid_lock_type_script_args_short_rejected() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    let mut bad = req.cid_lock_dep.type_script.clone().unwrap();
+    bad.args = format!("0x{}", hex::encode([0xABu8; 16]));
+    req.cid_lock_dep.type_script = Some(bad);
+    let err = create_signed_intention(&req, &secret).unwrap_err();
+    match err {
+        CliError::InvalidRequest(msg) => {
+            assert!(
+                msg.contains("exactly 32 bytes") && msg.contains("got 16"),
+                "unexpected message: {msg}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[test]
+fn cid_lock_type_script_args_long_rejected() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    let mut bad = req.cid_lock_dep.type_script.clone().unwrap();
+    bad.args = format!("0x{}", hex::encode([0xABu8; 33]));
+    req.cid_lock_dep.type_script = Some(bad);
+    let err = create_signed_intention(&req, &secret).unwrap_err();
+    match err {
+        CliError::InvalidRequest(msg) => {
+            assert!(
+                msg.contains("exactly 32 bytes") && msg.contains("got 33"),
+                "unexpected message: {msg}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
 }
 
 #[test]

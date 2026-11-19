@@ -20,7 +20,7 @@ use ckb_cinnabar_calculator::{
     simulation::FakeRpcClient,
     skeleton::{CellOutputEx, ChangeReceiver, ScriptEx, TransactionSkeleton},
     types::{h256_to_hash, DepType},
-    TransactionCalculator,
+    TransactionCalculator, TYPE_ID_CODE_HASH,
 };
 use ckb_common_intention_dispatcher_calculator::{
     cid_lock, encode_cid_args, Payload, CONTRACT_NAME,
@@ -155,6 +155,41 @@ fn script_hash32(script: &Script) -> [u8; 32] {
     out
 }
 
+/// Fail-closed: Intention CID locks must reference the code cell by Type ID.
+///
+/// Without a type script on the dep cell, `ScriptEx::Reference` would silently
+/// fall back to `hash_type=data1` + data hash — which strands Intentions across
+/// Type-ID upgrades. No data-hash opt-in in v1.
+fn require_cid_lock_type_script(dep: &NamedDep) -> Result<Script, CliError> {
+    let Some(type_json) = &dep.type_script else {
+        return Err(CliError::InvalidRequest(
+            "cid_lock_dep.type_script is required (Type ID); refusing data-hash CID lock reference"
+                .into(),
+        ));
+    };
+    let ht = type_json.parse_hash_type()?;
+    if ht != 1 {
+        return Err(CliError::InvalidRequest(format!(
+            "cid_lock_dep.type_script.hash_type must be `type` (got `{}`); Type ID cells use hash_type=type",
+            type_json.hash_type
+        )));
+    }
+    let type_script = packed_script(type_json)?;
+    let code: [u8; 32] = type_script.code_hash().unpack();
+    if code != TYPE_ID_CODE_HASH {
+        return Err(CliError::InvalidRequest(
+            "cid_lock_dep.type_script.code_hash must be the TYPE_ID code hash".into(),
+        ));
+    }
+    let args_len = type_script.args().raw_data().len();
+    if args_len != 32 {
+        return Err(CliError::InvalidRequest(format!(
+            "cid_lock_dep.type_script.args must be exactly 32 bytes (got {args_len})"
+        )));
+    }
+    Ok(type_script)
+}
+
 fn lock_for_key(secret: &SecretKey, hash_type: ScriptHashType, code_hash: [u8; 32]) -> Script {
     let pubkey = PublicKey::from_secret_key(&Secp256k1::new(), secret).serialize();
     let args = blake2b_256(pubkey)[..20].to_vec();
@@ -276,6 +311,7 @@ fn create_signed_intention_bundle_inner(
             "cid_lock_dep.name must be `{CONTRACT_NAME}`"
         )));
     }
+    let cid_type_script = require_cid_lock_type_script(&req.cid_lock_dep)?;
     if req.sighash_deps.len() < 2 {
         return Err(CliError::InvalidRequest(
             "sighash_deps must include secp code and data cells".into(),
@@ -316,6 +352,7 @@ fn create_signed_intention_bundle_inner(
 
     let funding_out = outpoint(&req.funding.tx_hash, req.funding.index)?;
     let funding_tx_hash = h256_to_hash(&H256(decode_hash32(&req.funding.tx_hash)?));
+    let expected_cid_code_hash = script_hash32(&cid_type_script);
 
     let mut rpc = FakeRpcClient::default();
     // Seed decoys first so address-ordered scans would prefer them if used.
@@ -339,22 +376,28 @@ fn create_signed_intention_bundle_inner(
         decode_hex(&req.funding.data)?,
         Some(req.funding.capacity),
     )?;
+    // Seed the live CID code cell **with** its Type ID type script so
+    // `ScriptEx::Reference` resolves to hash_type=type (never Data1).
     insert_cell(
         &mut rpc,
         &req.cid_lock_dep.tx_hash,
         req.cid_lock_dep.index,
         Script::default(),
-        None,
+        Some(cid_type_script.clone()),
         decode_hex(&req.cid_lock_dep.data)?,
         None,
     )?;
     for dep in &req.sighash_deps {
+        let typ = match &dep.type_script {
+            Some(s) => Some(packed_script(s)?),
+            None => None,
+        };
         insert_cell(
             &mut rpc,
             &dep.tx_hash,
             dep.index,
             Script::default(),
-            None,
+            typ,
             decode_hex(&dep.data)?,
             None,
         )?;
@@ -442,6 +485,13 @@ fn create_signed_intention_bundle_inner(
         return Err(CliError::Calculator("intention capacity mismatch".into()));
     }
     let lock = intention_out.lock_script();
+    let lock_code: [u8; 32] = lock.code_hash().unpack();
+    let lock_ht: u8 = lock.hash_type().into();
+    if lock_ht != 1 || lock_code != expected_cid_code_hash {
+        return Err(CliError::Calculator(format!(
+            "intention lock must resolve to Type ID reference (hash_type=type, code_hash=type_script_hash); got hash_type={lock_ht}"
+        )));
+    }
     let lock_args = lock.args().raw_data();
     if lock_args.len() < 32 || lock_args[..32] != process_type_hash {
         return Err(CliError::Calculator(
