@@ -342,6 +342,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cid-process-example-policy"
+version = "0.1.0"
+
+[[package]]
 name = "cid-process-executor"
 version = "0.1.0"
 dependencies = [
@@ -367,6 +371,7 @@ dependencies = [
 name = "cid_process_example"
 version = "0.1.0"
 dependencies = [
+ "cid-process-example-policy",
  "cid-protocol",
  "ckb-cinnabar-verifier",
  "ckb-ssri-std",
@@ -377,6 +382,7 @@ dependencies = [
 name = "cid_process_example-calculator"
 version = "0.1.0"
 dependencies = [
+ "cid-process-example-policy",
  "cid-process-executor",
  "cid-protocol",
  "ckb-cinnabar-calculator",
