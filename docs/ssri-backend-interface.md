@@ -57,7 +57,7 @@ are Process responsibilities; submit the returned bytes unchanged.
 - **stdin:** packed molecule `Transaction` **draft**. Each Process defines its
   own draft preconditions. For `cid_process_example`, the draft must include:
   - `raw.inputs`: Intention + Process state out points (and any Process-owned
-    funding cells)
+    funding cells — see funding rules below)
   - `raw.cell_deps`: at least CID lock code, Process code, and any official
     xUDT code deps needed to execute the returned tx
   - `header_deps` / `witnesses` as the Process documents (may be empty)
@@ -75,6 +75,13 @@ deps/header_deps, and attaches one empty witness per input (complete witness
 vector — backend must not fill any). If fee would drop the state cell below
 occupied capacity, assemble returns `CapacityInsufficient` (37).
 
+**Funding inputs (example):** the Process is keyless and cannot sign. Assemble
+emits an empty witness for every input, so funding cells must be spendable with
+an empty witness — specifically AlwaysSuccess (`code_hash` =
+`blake2b_256(always_success)`, `hash_type = Data1`). Funding that uses the same
+Process lock as the state cell is also rejected (would break on-chain 1→1).
+Unsupported funding locks return `UnsupportedFundingLock` (38) at assemble time.
+
 ## Host-query syscalls (ckb-ssri-std)
 
 Process SDK wrappers live in `contracts/cid_process_example/src/host.rs` and
@@ -90,7 +97,7 @@ same catalog through the `HostQuery` trait (`MockHost` implements all seven) in
 | `get_header` | 2327 | header by hash |
 | `get_header_by_number` | 2337 | header by number (tip / deps) |
 | `get_block_hash` | 2347 | block hash by number (tip probe) |
-| `get_cells` | 2367 | indexer search (counterparties) |
+| `get_cells` | 2367 | indexer search (counterparties); order = `(block_number, tx_index, output_index)` |
 
 ### Calling convention (`syscall_load`)
 
@@ -116,6 +123,11 @@ header_by_number(n) / block_hash(n)       -> tip / header info
 `SearchKey` / `Pagination` encodings are the ckb-indexer molecule tables
 documented in `ckb-ssri-std` (`indexer.rs`).
 
+`MockHost::get_cells` matches ckb-indexer ordering and metadata: results sort by
+`(block_number, tx_index, output_index)` (Asc/Desc), and each `IndexerCell`
+carries those fields. Missing `HostCell::{block_number,tx_index}` defaults to
+`0` (callers that care about first-cell / pagination must set them).
+
 ## Executor API (Rust)
 
 ```rust
@@ -130,8 +142,12 @@ let assembled: AssembledTx = executor.assemble(&draft, host)?;
 ```
 
 Calculator helpers require a **live** [`ProcessStateCell`] (no fabricated
-defaults). Resolve via `resolve_process_state_by_type` when you have the TYPE_ID
-type script, or pass the cell explicitly to `process_digest_ok_with_process`.
+defaults). **Documented submit entry:** `process_digest_ok_with_extras` with
+non-empty `AssembleExtras.cell_deps` (CID + Process + any xUDT) and optional
+AlwaysSuccess funding. It returns the packed [`AssembledTx`] for byte-identical
+submit. `process_digest_ok_with_process` is a thinner helper that still requires
+non-empty `cell_deps` (cannot silently emit a dep-less tx). Resolve state via
+`resolve_process_state_by_type` when you have the TYPE_ID type script.
 
 ## Intention CLI
 

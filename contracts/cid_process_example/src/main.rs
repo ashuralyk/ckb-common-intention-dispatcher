@@ -15,6 +15,7 @@ const ERROR_UNSUPPORTED_ASSET: i8 = 34;
 const ERROR_TYPE_ID_INVALID: i8 = 35;
 const ERROR_HOST_QUERY_FAILED: i8 = 36;
 const ERROR_CAPACITY_INSUFFICIENT: i8 = 37;
+const ERROR_UNSUPPORTED_FUNDING_LOCK: i8 = 38;
 
 define_errors!(ProcessError, {
     ReadFailed = CUSTOM_ERROR_START,  // 20
@@ -27,6 +28,8 @@ define_errors!(ProcessError, {
     TypeIdInvalid = ERROR_TYPE_ID_INVALID,              // 35
     HostQueryFailed = ERROR_HOST_QUERY_FAILED,          // 36
     CapacityInsufficient = ERROR_CAPACITY_INSUFFICIENT, // 37
+    // Funding lock not spendable with empty witness (keyless Process).
+    UnsupportedFundingLock = ERROR_UNSUPPORTED_FUNDING_LOCK, // 38
 });
 
 #[derive(Default)]

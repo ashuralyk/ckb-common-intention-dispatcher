@@ -29,8 +29,10 @@ pub struct HostCell {
     pub data: Vec<u8>,
     /// Optional block hash that committed this cell (`get_live_cell`).
     pub block_hash: Option<[u8; 32]>,
-    /// Optional block number (indexer `get_cells`).
+    /// Optional block number (indexer `get_cells`). Missing → `0`.
     pub block_number: Option<u64>,
+    /// Optional tx index within the block (indexer `get_cells`). Missing → `0`.
+    pub tx_index: Option<u32>,
 }
 
 impl HostCell {
@@ -40,6 +42,7 @@ impl HostCell {
             data,
             block_hash: None,
             block_number: None,
+            tx_index: None,
         }
     }
 }
@@ -79,6 +82,9 @@ pub trait HostQuery {
     /// `search_key` is molecule `SearchKey` bytes; `order` is 0=Asc / 1=Desc;
     /// `last_cursor` is the prior page cursor (empty = start). Page size is
     /// bounded by `limit` exactly as ckb-ssri-std on-chain `page_window`.
+    ///
+    /// Result order matches ckb-indexer: `(block_number, tx_index, output_index)`
+    /// ascending (or descending). Missing metadata defaults to `0`.
     fn get_cells(
         &self,
         search_key: &[u8],
@@ -375,8 +381,8 @@ impl HostQuery for MockHost {
             .iter()
             .filter(|(_, cell)| cell_matches(&key, cell))
             .collect();
-        // Stable order by out_point bytes for Asc; reverse for Desc.
-        matched.sort_by(|a, b| a.0.cmp(b.0));
+        // ckb-indexer orders by (block_number, tx_index, output_index).
+        matched.sort_by_key(|a| indexer_order_key(a.0, a.1));
         if matches!(order, Order::Desc) {
             matched.reverse();
         }
@@ -392,7 +398,7 @@ impl HostQuery for MockHost {
                 output_data: with_data.then(|| cell.data.clone()),
                 out_point: IndexerOutPoint::from(&out_point),
                 block_number: cell.block_number.unwrap_or(0),
-                tx_index: 0,
+                tx_index: cell.tx_index.unwrap_or(0),
             });
         }
         let pagination = Pagination {
@@ -536,6 +542,19 @@ fn script_raw_len(script: &ckb_types::packed::Script) -> u64 {
     (32 + 1 + script.args().raw_data().len()) as u64
 }
 
+/// ckb-indexer live-cell key suffix: `block_number ‖ tx_index ‖ output_index`
+/// (each big-endian in the DB key; comparison order is numeric ascending).
+fn indexer_order_key(op_bytes: &[u8], cell: &HostCell) -> (u64, u32, u32) {
+    let output_index = OutPoint::from_slice(op_bytes)
+        .map(|op| op.index().unpack())
+        .unwrap_or(0);
+    (
+        cell.block_number.unwrap_or(0),
+        cell.tx_index.unwrap_or(0),
+        output_index,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,6 +686,7 @@ mod tests {
                 data: vec![1],
                 block_hash: None,
                 block_number: Some(8),
+                tx_index: Some(0),
             },
         );
         host.insert_cell_ex(
@@ -679,6 +699,7 @@ mod tests {
                 data: vec![2],
                 block_hash: None,
                 block_number: Some(9),
+                tx_index: Some(0),
             },
         );
 
@@ -809,5 +830,86 @@ mod tests {
         .unwrap();
         assert_eq!(page.objects.len(), 1);
         assert_eq!(page.objects[0].out_point, IndexerOutPoint::from(&with_type));
+    }
+
+    #[test]
+    fn get_cells_orders_by_block_tx_output_index() {
+        let host = MockHost::new();
+        let lock = PackedScript::new_builder()
+            .code_hash(Byte32::from_slice(&[0x11; 32]).unwrap())
+            .hash_type(0u8.into())
+            .args([0xaa].pack())
+            .build();
+        // Outpoint bytes would sort A (0x01) before B (0x02) before C (0x03),
+        // but indexer order is (block, tx_index, output_index).
+        let out_a = OutPoint::new_builder()
+            .tx_hash(Byte32::from_slice(&[0x01; 32]).unwrap())
+            .index(5u32.pack())
+            .build();
+        let out_b = OutPoint::new_builder()
+            .tx_hash(Byte32::from_slice(&[0x02; 32]).unwrap())
+            .index(0u32.pack())
+            .build();
+        let out_c = OutPoint::new_builder()
+            .tx_hash(Byte32::from_slice(&[0x03; 32]).unwrap())
+            .index(1u32.pack())
+            .build();
+        let mk = |op: OutPoint, block: u64, tx_index: u32| {
+            host.insert_cell_ex(
+                op,
+                HostCell {
+                    output: CellOutput::new_builder()
+                        .capacity(100u64.pack())
+                        .lock(lock.clone())
+                        .build(),
+                    data: vec![],
+                    block_hash: None,
+                    block_number: Some(block),
+                    tx_index: Some(tx_index),
+                },
+            );
+        };
+        // Asc indexer order should be: C (block 1, tx 0, idx 1), B (block 2, tx 0),
+        // A (block 2, tx 1) — not outpoint-byte order A,B,C.
+        mk(out_a.clone(), 2, 1);
+        mk(out_b.clone(), 2, 0);
+        mk(out_c.clone(), 1, 0);
+
+        let key = SearchKey {
+            script: Script {
+                code_hash: [0x11; 32],
+                hash_type: 0,
+                args: vec![0xaa],
+            },
+            script_type: ScriptType::Lock,
+            script_search_mode: Some(SearchMode::Exact),
+            filter: None,
+            with_data: Some(false),
+            group_by_transaction: None,
+        };
+        let key_bytes = serde_molecule::to_vec(&key, false).unwrap();
+        let page: Pagination = serde_molecule::from_slice(
+            &HostQuery::get_cells(&host, &key_bytes, 0, 10, &[]).unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(page.objects.len(), 3);
+        assert_eq!(page.objects[0].out_point, IndexerOutPoint::from(&out_c));
+        assert_eq!(page.objects[0].block_number, 1);
+        assert_eq!(page.objects[0].tx_index, 0);
+        assert_eq!(page.objects[1].out_point, IndexerOutPoint::from(&out_b));
+        assert_eq!(page.objects[1].block_number, 2);
+        assert_eq!(page.objects[1].tx_index, 0);
+        assert_eq!(page.objects[2].out_point, IndexerOutPoint::from(&out_a));
+        assert_eq!(page.objects[2].block_number, 2);
+        assert_eq!(page.objects[2].tx_index, 1);
+
+        let desc: Pagination = serde_molecule::from_slice(
+            &HostQuery::get_cells(&host, &key_bytes, 1, 10, &[]).unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(desc.objects[0].out_point, IndexerOutPoint::from(&out_a));
+        assert_eq!(desc.objects[2].out_point, IndexerOutPoint::from(&out_c));
     }
 }

@@ -15,6 +15,15 @@ const BATCH_MAX: u32 = 4;
 const FEE_RATE: u64 = 1000;
 const SHANNONS_PER_BYTE: u64 = 100_000_000;
 
+/// `blake2b_256` of the bundled always-success binary (`ckb-always-success-script`),
+/// referenced with `hash_type = Data1`. Funding inputs must use this lock because
+/// assemble emits empty witnesses and the Process is keyless (cannot sign secp).
+const ALWAYS_SUCCESS_CODE_HASH: [u8; 32] = [
+    0xe6, 0x83, 0xb0, 0x41, 0x39, 0x34, 0x47, 0x68, 0x34, 0x84, 0x99, 0xc2, 0x3e, 0xb1, 0x32, 0x6d,
+    0x5a, 0x52, 0xd6, 0xdb, 0x00, 0x6c, 0x0d, 0x2f, 0xec, 0xe0, 0x0a, 0x83, 0x1f, 0x36, 0x60, 0xd7,
+];
+const HASH_TYPE_DATA1: u8 = 2;
+
 // Default lock code_hash for beneficiary outputs (placeholder for raw lock_args tests)
 const DEFAULT_LOCK_CODE_HASH: [u8; 32] = [
     0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
@@ -68,10 +77,10 @@ pub fn assemble_handler(
     let _ = host::block_hash(0);
 
     let mut intentions = Vec::new();
-    let mut process_cell: Option<&LoadedInput> = None;
+    let mut process_idx: Option<usize> = None;
     let mut process_type_hash: Option<[u8; 32]> = None;
 
-    for item in &loaded {
+    for (idx, item) in loaded.iter().enumerate() {
         let lock = item.cell.output.lock();
         let args = lock.args().raw_data();
         if let Ok(cid) = CidArgs::decode(&args) {
@@ -90,8 +99,8 @@ pub fn assemble_handler(
             });
         } else if item.cell.output.type_().is_some() {
             // Candidate Process state cell (TYPE_ID type); keep the first.
-            if process_cell.is_none() {
-                process_cell = Some(item);
+            if process_idx.is_none() {
+                process_idx = Some(idx);
             }
         }
     }
@@ -101,7 +110,8 @@ pub fn assemble_handler(
         return Err(ProcessError::IncompatibleBatch);
     }
 
-    let process = process_cell.ok_or(ProcessError::ReadFailed)?;
+    let process_idx = process_idx.ok_or(ProcessError::ReadFailed)?;
+    let process = &loaded[process_idx];
     if let Some(pth) = process_type_hash {
         let typ = process
             .cell
@@ -113,6 +123,21 @@ pub fn assemble_handler(
         if hash != pth {
             return Err(ProcessError::IncompatibleBatch);
         }
+    }
+
+    // Funding inputs (neither Intention nor Process state) must be spendable
+    // with the empty witnesses this keyless Process emits. Same Process lock
+    // would also break on-chain 1→1 Transfer.
+    let process_lock = process.cell.output.lock();
+    for (idx, item) in loaded.iter().enumerate() {
+        if idx == process_idx {
+            continue;
+        }
+        let lock = item.cell.output.lock();
+        if CidArgs::decode(&lock.args().raw_data()).is_ok() {
+            continue;
+        }
+        validate_funding_lock(&lock, &process_lock)?;
     }
 
     // Preserve draft inputs as-is (including `since` on funding / timed cells).
@@ -205,6 +230,22 @@ fn fee_from_tx_size(molecule_len: u64) -> u64 {
     // so assemble never underpays the node min fee at `FEE_RATE`.
     let weight = molecule_len.saturating_add(4);
     weight.saturating_mul(FEE_RATE) / 1000
+}
+
+fn validate_funding_lock(lock: &Script, process_lock: &Script) -> Result<(), ProcessError> {
+    if lock.as_slice() == process_lock.as_slice() {
+        return Err(ProcessError::UnsupportedFundingLock);
+    }
+    if !is_always_success_lock(lock) {
+        return Err(ProcessError::UnsupportedFundingLock);
+    }
+    Ok(())
+}
+
+fn is_always_success_lock(lock: &Script) -> bool {
+    let code: [u8; 32] = lock.code_hash().unpack();
+    let hash_type: u8 = lock.hash_type().into();
+    code == ALWAYS_SUCCESS_CODE_HASH && hash_type == HASH_TYPE_DATA1
 }
 
 fn occupied_capacity_shannons(output: &CellOutput, data_len: usize) -> u64 {

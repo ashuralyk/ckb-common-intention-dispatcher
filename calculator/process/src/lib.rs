@@ -58,12 +58,26 @@ pub struct DraftCellDep {
     pub data: Vec<u8>,
 }
 
-/// Optional Process-owned funding cell / cell_dep included in the draft so
-/// assemble can demonstrate capacity/fee balance and dep preservation.
+/// Optional Process-owned funding cells plus required draft `cell_deps`.
+///
+/// `cell_deps` must be non-empty on the submit path (CID lock code, Process
+/// code, and any xUDT code). Funding cells, if any, must use AlwaysSuccess
+/// (`Data1`) — the example Process is keyless and emits empty witnesses.
 #[derive(Clone, Debug, Default)]
 pub struct AssembleExtras {
     pub funding_cells: Vec<ProcessStateCell>,
     pub cell_deps: Vec<DraftCellDep>,
+}
+
+fn require_submit_cell_deps(extras: &AssembleExtras) -> Result<()> {
+    if extras.cell_deps.is_empty() {
+        return Err(CalculatorError::Other(
+            "cell_deps required for submit: pass CID, Process, and any xUDT code deps \
+             via process_digest_ok_with_extras (or process_digest_ok_with_process)"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Load the Process binary from build/release/<name>
@@ -250,8 +264,9 @@ fn require_process_matches_intentions(
 
 /// Process digest without a live state cell — always errors after batch bounds.
 ///
-/// Callers must use [`process_digest_ok_with_process`] with a live
-/// [`ProcessStateCell`], or [`resolve_process_state_by_type`] via RPC.
+/// Callers must use [`process_digest_ok_with_extras`] (submit) or
+/// [`process_digest_ok_with_process`] with a live [`ProcessStateCell`] and
+/// non-empty code deps, or [`resolve_process_state_by_type`] via RPC.
 pub fn process_digest_ok<T: RPC>(
     _rpc: &T,
     intentions: Vec<IntentionCell>,
@@ -276,27 +291,37 @@ pub fn process_digest_ok<T: RPC>(
     ))
 }
 
-/// Assemble with an explicit live Process state cell (required).
+/// Shape-check / offline helper with required code deps.
+///
+/// Prefer [`process_digest_ok_with_extras`] for submit (returns packed
+/// [`AssembledTx`]). This entry cannot silently emit a dep-less tx: `cell_deps`
+/// must be non-empty (CID, Process, and any xUDT code).
 pub fn process_digest_ok_with_process<T: RPC>(
     rpc: &T,
     intentions: Vec<IntentionCell>,
     process: ProcessStateCell,
+    cell_deps: Vec<DraftCellDep>,
     bin_dir: &str,
 ) -> Result<(TransactionSkeleton, Vec<Instruction<T>>)> {
     let (skeleton, _assembled, instructions) = process_digest_ok_with_extras(
         rpc,
         intentions,
         process,
-        AssembleExtras::default(),
+        AssembleExtras {
+            funding_cells: vec![],
+            cell_deps,
+        },
         bin_dir,
     )?;
     Ok((skeleton, instructions))
 }
 
-/// Assemble with optional Process-owned funding inputs and draft cell_deps.
+/// Documented submit entry: live Process state, required `cell_deps`, optional
+/// AlwaysSuccess funding inputs.
 ///
 /// Returns the skeleton (witnesses preserved as raw bytes), the packed
 /// [`AssembledTx`] for byte-identical submit, and instructions (empty).
+/// Rejects empty `cell_deps` so a dep-less tx cannot be produced silently.
 pub fn process_digest_ok_with_extras<T: RPC>(
     _rpc: &T,
     intentions: Vec<IntentionCell>,
@@ -319,6 +344,7 @@ pub fn process_digest_ok_with_extras<T: RPC>(
         )));
     }
 
+    require_submit_cell_deps(&extras)?;
     require_process_matches_intentions(&process, &intentions)?;
     let (draft, host, known) = build_draft_and_host(&intentions, &process, &extras)?;
     let assembled = executor
@@ -395,6 +421,9 @@ mod tests {
         Bytes as PackedBytes, WitnessArgs,
     };
     use ckb_cinnabar_calculator::re_exports::ckb_types::prelude::Unpack;
+    use ckb_cinnabar_calculator::simulation::{
+        always_success_script, fake_outpoint, FakeRpcClient,
+    };
 
     fn sample_type_id() -> Script {
         Script::new_builder()
@@ -409,6 +438,53 @@ mod tests {
                 .pack(),
             )
             .build()
+    }
+
+    fn sample_code_dep() -> DraftCellDep {
+        let dep_out = fake_outpoint();
+        DraftCellDep {
+            cell_dep: CellDep::new_builder()
+                .out_point(dep_out)
+                .dep_type(DepType::Code)
+                .build(),
+            output: CellOutput::new_builder()
+                .capacity(10_000_000_000u64)
+                .lock(
+                    Script::new_builder()
+                        .code_hash([0xDD; 32].pack())
+                        .hash_type(ScriptHashType::Data1)
+                        .build(),
+                )
+                .build(),
+            data: vec![0xCA, 0xFE],
+        }
+    }
+
+    fn sample_process_and_intention() -> (ProcessStateCell, Vec<IntentionCell>) {
+        let type_id = sample_type_id();
+        let pth: [u8; 32] = type_id.calc_script_hash().unpack();
+        let lock_args = CidArgs::new(pth, CidScript::default(), Payload::default())
+            .encode()
+            .unwrap();
+        let process = ProcessStateCell {
+            out_point: fake_outpoint(),
+            lock: Script::new_builder()
+                .code_hash([0xAA; 32].pack())
+                .hash_type(ScriptHashType::Data1)
+                .build(),
+            type_script: type_id,
+            capacity: 200_000_000_000,
+            data: vec![],
+        };
+        let intentions = vec![IntentionCell {
+            out_point: fake_outpoint(),
+            lock_args,
+            capacity: 100_000_000_000,
+            data: vec![],
+            type_script: None,
+            lock: None,
+        }];
+        (process, intentions)
     }
 
     #[test]
@@ -453,9 +529,33 @@ mod tests {
     }
 
     #[test]
-    fn test_process_digest_complete_tx_outputs() {
-        use ckb_cinnabar_calculator::simulation::{fake_outpoint, FakeRpcClient};
+    fn test_process_digest_rejects_empty_cell_deps() {
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!("Skipping test: binary not built at {bin_path}");
+            return;
+        }
+        let rpc = FakeRpcClient::default();
+        let (process, intentions) = sample_process_and_intention();
+        let err = process_digest_ok_with_extras(
+            &rpc,
+            intentions,
+            process,
+            AssembleExtras::default(),
+            bin_dir,
+        )
+        .err()
+        .expect("empty cell_deps must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("cell_deps required"),
+            "expected cell_deps required error, got {msg}"
+        );
+    }
 
+    #[test]
+    fn test_process_digest_complete_tx_outputs() {
         let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
         let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
         if !std::path::Path::new(&bin_path).exists() {
@@ -464,42 +564,23 @@ mod tests {
         }
 
         let rpc = FakeRpcClient::default();
-        let type_id = sample_type_id();
-        let pth: [u8; 32] = type_id.calc_script_hash().unpack();
-        let lock_args = CidArgs::new(pth, CidScript::default(), Payload::default())
-            .encode()
-            .unwrap();
-
-        let process = ProcessStateCell {
-            out_point: fake_outpoint(),
-            lock: Script::new_builder()
-                .code_hash([0xAA; 32].pack())
-                .hash_type(ScriptHashType::Data1)
-                .build(),
-            type_script: type_id,
-            capacity: 200_000_000_000,
-            data: vec![],
-        };
-
-        let intentions = vec![IntentionCell {
-            out_point: fake_outpoint(),
-            lock_args,
-            capacity: 100_000_000_000,
-            data: vec![0xaa, 0xbb],
-            type_script: None,
-            lock: None,
-        }];
+        let (process, mut intentions) = sample_process_and_intention();
+        intentions[0].data = vec![0xaa, 0xbb];
         let (skeleton, assembled, _) = process_digest_ok_with_extras(
             &rpc,
             intentions,
             process,
-            AssembleExtras::default(),
+            AssembleExtras {
+                funding_cells: vec![],
+                cell_deps: vec![sample_code_dep()],
+            },
             bin_dir,
         )
         .expect("digest n=1");
         assert_eq!(skeleton.inputs.len(), 2);
         assert_eq!(skeleton.outputs.len(), 2);
         assert!(skeleton.outputs[0].capacity_shannons() < 200_000_000_000);
+        assert!(!assembled.cell_deps.is_empty());
         // Submit path: packed bytes survive skeleton round-trip with plain witnesses.
         let round = assembled_tx_round_trip_bytes(&assembled).expect("round-trip");
         assert_eq!(round, assembled.as_molecule_bytes());
@@ -531,8 +612,6 @@ mod tests {
 
     #[test]
     fn test_skeleton_preserves_extra_input_and_cell_dep() {
-        use ckb_cinnabar_calculator::simulation::{fake_outpoint, FakeRpcClient};
-
         let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
         let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
         if !std::path::Path::new(&bin_path).exists() {
@@ -541,23 +620,46 @@ mod tests {
         }
 
         let rpc = FakeRpcClient::default();
-        let type_id = sample_type_id();
-        let pth: [u8; 32] = type_id.calc_script_hash().unpack();
-        let lock_args = CidArgs::new(pth, CidScript::default(), Payload::default())
-            .encode()
-            .unwrap();
-
-        let process = ProcessStateCell {
+        let (process, intentions) = sample_process_and_intention();
+        let funding = ProcessStateCell {
             out_point: fake_outpoint(),
-            lock: Script::new_builder()
-                .code_hash([0xAA; 32].pack())
-                .hash_type(ScriptHashType::Data1)
-                .build(),
-            type_script: type_id,
-            capacity: 200_000_000_000,
+            lock: always_success_script(vec![]),
+            type_script: Script::default(),
+            capacity: 50_000_000_000,
             data: vec![],
         };
-        let funding = ProcessStateCell {
+        let dep = sample_code_dep();
+        let cell_dep = dep.cell_dep.clone();
+        let extras = AssembleExtras {
+            funding_cells: vec![funding.clone()],
+            cell_deps: vec![dep],
+        };
+        let (skeleton, _, _) =
+            process_digest_ok_with_extras(&rpc, intentions, process, extras, bin_dir)
+                .expect("digest with AlwaysSuccess funding");
+        assert_eq!(skeleton.inputs.len(), 3);
+        assert_eq!(skeleton.celldeps.len(), 1);
+        assert_eq!(skeleton.celldeps[0].celldep.as_slice(), cell_dep.as_slice());
+        assert!(skeleton
+            .inputs
+            .iter()
+            .any(|i| i.input.previous_output() == funding.out_point));
+        assert_eq!(skeleton.witnesses.len(), 3);
+    }
+
+    #[test]
+    fn test_assemble_rejects_unsupported_funding_lock() {
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!("Skipping test: binary not built at {bin_path}");
+            return;
+        }
+        let rpc = FakeRpcClient::default();
+        let (process, intentions) = sample_process_and_intention();
+
+        // Secp-like / arbitrary lock: empty witness cannot unlock it.
+        let bad_funding = ProcessStateCell {
             out_point: fake_outpoint(),
             lock: Script::new_builder()
                 .code_hash([0xFE; 32].pack())
@@ -567,47 +669,48 @@ mod tests {
             capacity: 50_000_000_000,
             data: vec![],
         };
-        let dep_out = fake_outpoint();
-        let cell_dep = CellDep::new_builder()
-            .out_point(dep_out)
-            .dep_type(DepType::Code)
-            .build();
-        let dep_output = CellOutput::new_builder()
-            .capacity(10_000_000_000u64)
-            .lock(
-                Script::new_builder()
-                    .code_hash([0xDD; 32].pack())
-                    .hash_type(ScriptHashType::Data1)
-                    .build(),
-            )
-            .build();
+        let err = process_digest_ok_with_extras(
+            &rpc,
+            intentions.clone(),
+            process.clone(),
+            AssembleExtras {
+                funding_cells: vec![bad_funding],
+                cell_deps: vec![sample_code_dep()],
+            },
+            bin_dir,
+        )
+        .err()
+        .expect("non-AlwaysSuccess funding must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("38") || msg.contains("Incompatible") || msg.contains("assemble"),
+            "expected UnsupportedFundingLock via assemble, got {msg}"
+        );
 
-        let intentions = vec![IntentionCell {
+        // Same Process lock as state would break on-chain 1→1.
+        let same_lock_funding = ProcessStateCell {
             out_point: fake_outpoint(),
-            lock_args,
-            capacity: 100_000_000_000,
+            lock: process.lock.clone(),
+            type_script: Script::default(),
+            capacity: 50_000_000_000,
             data: vec![],
-            type_script: None,
-            lock: None,
-        }];
-        let extras = AssembleExtras {
-            funding_cells: vec![funding.clone()],
-            cell_deps: vec![DraftCellDep {
-                cell_dep: cell_dep.clone(),
-                output: dep_output,
-                data: vec![0xCA, 0xFE],
-            }],
         };
-        let (skeleton, _, _) =
-            process_digest_ok_with_extras(&rpc, intentions, process, extras, bin_dir)
-                .expect("digest with extras");
-        assert_eq!(skeleton.inputs.len(), 3);
-        assert_eq!(skeleton.celldeps.len(), 1);
-        assert_eq!(skeleton.celldeps[0].celldep.as_slice(), cell_dep.as_slice());
-        assert!(skeleton
-            .inputs
-            .iter()
-            .any(|i| i.input.previous_output() == funding.out_point));
-        assert_eq!(skeleton.witnesses.len(), 3);
+        let err = process_digest_ok_with_extras(
+            &rpc,
+            intentions,
+            process,
+            AssembleExtras {
+                funding_cells: vec![same_lock_funding],
+                cell_deps: vec![sample_code_dep()],
+            },
+            bin_dir,
+        )
+        .err()
+        .expect("same-Process-lock funding must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("38") || msg.contains("Incompatible") || msg.contains("assemble"),
+            "expected UnsupportedFundingLock for same Process lock, got {msg}"
+        );
     }
 }

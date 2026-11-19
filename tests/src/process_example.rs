@@ -57,6 +57,23 @@ fn require_binaries() {
     );
 }
 
+/// Minimal non-empty code dep so `process_digest_ok_with_process` cannot emit a
+/// dep-less tx (submit path requires CID/Process/xUDT deps).
+fn minimal_code_deps() -> Vec<DraftCellDep> {
+    let out = fake_outpoint();
+    vec![DraftCellDep {
+        cell_dep: ckb_cinnabar_calculator::re_exports::ckb_types::packed::CellDep::new_builder()
+            .out_point(out)
+            .dep_type(ckb_cinnabar_calculator::re_exports::ckb_types::core::DepType::Code)
+            .build(),
+        output: CellOutput::new_builder()
+            .capacity(10_000_000_000u64)
+            .lock(always_success_script(vec![]))
+            .build(),
+        data: vec![0xDE, 0xAD],
+    }]
+}
+
 fn process_example_binary() -> Vec<u8> {
     std::fs::read(format!("{CONTRACT_BIN}/{PROCESS_CONTRACT_NAME}")).unwrap()
 }
@@ -210,9 +227,14 @@ fn assert_digest_counts(n: usize) {
     let pth = process_example_type_hash(&process.type_script);
     let intentions: Vec<IntentionCell> = (0..n as u32).map(|i| mock_intention(i, pth)).collect();
     let rpc = FakeRpcClient::default();
-    let (skeleton, _instructions) =
-        process_digest_ok_with_process(&rpc, intentions, process, CONTRACT_BIN)
-            .unwrap_or_else(|e| panic!("should assemble skeleton for {n} intention(s): {e}"));
+    let (skeleton, _instructions) = process_digest_ok_with_process(
+        &rpc,
+        intentions,
+        process,
+        minimal_code_deps(),
+        CONTRACT_BIN,
+    )
+    .unwrap_or_else(|e| panic!("should assemble skeleton for {n} intention(s): {e}"));
     // Process cell + n intentions
     assert_eq!(
         skeleton.inputs.len(),
@@ -371,9 +393,15 @@ async fn reject_count_exceeds_max_real_ssri() {
     let pth = process_example_type_hash(&process.type_script);
     let intentions: Vec<IntentionCell> = (0..5).map(|i| mock_intention(i, pth)).collect();
     let rpc = FakeRpcClient::default();
-    let err = process_digest_ok_with_process(&rpc, intentions, process, CONTRACT_BIN)
-        .err()
-        .expect("should reject 5 intentions (> BATCH_MAX=4)");
+    let err = process_digest_ok_with_process(
+        &rpc,
+        intentions,
+        process,
+        minimal_code_deps(),
+        CONTRACT_BIN,
+    )
+    .err()
+    .expect("should reject 5 intentions (> BATCH_MAX=4)");
     match err {
         ckb_cinnabar_calculator::CalculatorError::Other(msg) => {
             assert!(
@@ -902,6 +930,7 @@ async fn assemble_and_verify_data2_beneficiary() {
             lock: None,
         }],
         process,
+        minimal_code_deps(),
         CONTRACT_BIN,
     )
     .expect("assemble Data2 payload");

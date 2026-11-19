@@ -21,7 +21,7 @@ See also [`ssri-backend-interface.md`](./ssri-backend-interface.md).
 |------|------|
 | `contracts/cid_process_example/` | RISC-V Process lock + SSRI + host SDK wrappers |
 | `crates/cid-process-executor/` | Offline SSRI VM + `MockHost` for cell/tip queries |
-| `calculator/process/` | `process_digest_ok` / `_with_process` → full-tx skeleton |
+| `calculator/process/` | submit: `process_digest_ok_with_extras` (required deps); `_with_process` also requires deps |
 | `tests/src/process_example.rs` | FakeRpc + SSRI round-trips |
 
 ## Build / test
@@ -38,9 +38,11 @@ cd tests && cargo test process_example -- --nocapture
 
 - **Process.batch** — `(min, max)` = `(1, 4)` as 8 LE bytes  
 - **Process.assemble** — stdin = molecule `Transaction` draft (Intention + Process
-  inputs); stdout = complete molecule `Transaction` (inputs, outputs,
-  outputs_data, cell_deps, header_deps, witnesses). Cells are loaded via
-  ckb-ssri-std host queries (`find_cell_by_out_point`, …).
+  inputs + optional AlwaysSuccess funding; required code `cell_deps`); stdout =
+  complete molecule `Transaction` (inputs, outputs, outputs_data, cell_deps,
+  header_deps, witnesses). Cells are loaded via ckb-ssri-std host queries
+  (`find_cell_by_out_point`, …). Keyless Process: funding must be AlwaysSuccess
+  (`Data1`); secp / same-Process-lock funding → `UnsupportedFundingLock` (38).
 
 ## On-chain verification (Process **lock**)
 
@@ -70,6 +72,7 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 | 35 | `TypeIdInvalid` (missing / non-TYPE_ID / continuity break / smuggled Type ID) |
 | 36 | `HostQueryFailed` |
 | 37 | `CapacityInsufficient` (fee would drop state below occupied capacity) |
+| 38 | `UnsupportedFundingLock` (funding not AlwaysSuccess / same Process lock) |
 
 ## Capacity / fee (example assemble)
 
