@@ -33,6 +33,13 @@ pub const DEFAULT_PROCESS_STATE_CAPACITY: u64 = 300_0000_0000;
 /// `crates/cid-process-example-policy`.
 pub use cid_process_example_policy::{ckb_deposit_capacity_ok, MIN_DEPOSIT_CAPACITY};
 
+pub use cid_protocol::{
+    intention_belongs_to_process, intention_process_type_id, FilterCell, FilterRequest,
+    IntentionRouteError, FILTER_ACCEPTED, FILTER_DEPOSIT_BELOW_MINIMUM, FILTER_MALFORMED_CELL,
+    FILTER_MALFORMED_DIGEST, FILTER_NOT_INTENTION, FILTER_PROCESS_MISMATCH,
+    FILTER_UNSUPPORTED_ACTION, FILTER_UNSUPPORTED_ASSET,
+};
+
 /// Fee rate (shannons/KW) used when balancing Process state create txs.
 /// Matches testnet `min_fee_rate` and the example Process assemble fee rate.
 pub const CREATE_FEE_RATE: u64 = 1000;
@@ -227,6 +234,58 @@ pub fn load_process_binary(bin_dir: &str) -> Result<Vec<u8>> {
     std::fs::read(&path).map_err(|e| {
         CalculatorError::Other(format!("failed to load Process binary at {}: {}", path, e))
     })
+}
+
+/// Build a [`FilterCell`] from an [`IntentionCell`] (packed out_point + output + data).
+pub fn intention_to_filter_cell(intention: &IntentionCell) -> Result<FilterCell> {
+    let output = intention_output(intention)?;
+    Ok(FilterCell {
+        out_point: intention.out_point.as_slice().to_vec(),
+        output: output.as_slice().to_vec(),
+        data: intention.data.clone(),
+    })
+}
+
+/// Call SSRI `Process.filter` for Intentions already routed to one Process.
+///
+/// `process_type_hash` is this Process instance identity (state TYPE_ID hash).
+/// `cid_code_type_id_hash` is the CID lock code Type ID script hash used for
+/// ownership checks. Returns one reason code per input, same order.
+///
+/// Sequencer flow: scan → [`intention_process_type_id`] group → this filter →
+/// assemble accepted cells.
+pub fn process_filter(
+    process_type_hash: [u8; 32],
+    cid_code_type_id_hash: [u8; 32],
+    intentions: &[IntentionCell],
+    bin_dir: &str,
+) -> Result<Vec<i8>> {
+    let mut cells = Vec::with_capacity(intentions.len());
+    for intention in intentions {
+        cells.push(intention_to_filter_cell(intention)?);
+    }
+    process_filter_cells(process_type_hash, cid_code_type_id_hash, &cells, bin_dir)
+}
+
+/// Like [`process_filter`] but takes pre-encoded [`FilterCell`]s.
+pub fn process_filter_cells(
+    process_type_hash: [u8; 32],
+    cid_code_type_id_hash: [u8; 32],
+    cells: &[FilterCell],
+    bin_dir: &str,
+) -> Result<Vec<i8>> {
+    let binary = load_process_binary(bin_dir)?;
+    let executor = ProcessExecutor::new(binary);
+    let req = FilterRequest {
+        process_type_hash,
+        cid_code_type_id_hash,
+        cells: cells.to_vec(),
+    };
+    let bytes = cid_protocol::encode_filter_request(&req)
+        .map_err(|e| CalculatorError::Other(format!("encode filter request: {:?}", e)))?;
+    executor
+        .filter(&bytes)
+        .map_err(|e| CalculatorError::Other(format!("Process.filter: {e}")))
 }
 
 fn intention_output(intention: &IntentionCell) -> Result<CellOutput> {
@@ -637,10 +696,19 @@ mod tests {
         }
     }
 
+    fn sample_beneficiary_payload() -> Payload {
+        Payload::from_script(&CidScript {
+            code_hash: [0xBE; 32],
+            hash_type: 1,
+            args: vec![0x01],
+        })
+        .unwrap()
+    }
+
     fn sample_process_and_intention() -> (ProcessStateCell, Vec<IntentionCell>) {
         let type_id = sample_type_id();
         let pth: [u8; 32] = type_id.calc_script_hash().unpack();
-        let lock_args = CidArgs::new(pth, CidScript::default(), Payload::default())
+        let lock_args = CidArgs::new(pth, CidScript::default(), sample_beneficiary_payload())
             .encode()
             .unwrap();
         let process = ProcessStateCell {
@@ -1277,6 +1345,165 @@ mod tests {
         assert!(
             msg.contains("does not support extra funding inputs"),
             "expected funding input rejection for same Process lock, got {msg}"
+        );
+    }
+
+    fn filter_intention_cell(
+        pth: [u8; 32],
+        cid_tid: [u8; 32],
+        capacity: u64,
+        type_script: Option<Script>,
+        data: Vec<u8>,
+        foreign_pth: Option<[u8; 32]>,
+    ) -> IntentionCell {
+        let target = foreign_pth.unwrap_or(pth);
+        let lock_args = CidArgs::new(target, CidScript::default(), sample_beneficiary_payload())
+            .encode()
+            .unwrap();
+        let lock = Script::new_builder()
+            .code_hash(cid_tid.pack())
+            .hash_type(ScriptHashType::Type)
+            .args(lock_args.clone().pack())
+            .build();
+        IntentionCell {
+            out_point: fake_outpoint(),
+            lock_args,
+            capacity,
+            data,
+            type_script: type_script.map(|s| s.as_slice().to_vec()),
+            lock: Some(lock),
+        }
+    }
+
+    #[test]
+    fn test_process_filter_empty_batch() {
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        if !std::path::Path::new(&format!("{bin_dir}/{PROCESS_CONTRACT_NAME}")).exists() {
+            eprintln!("Skipping test: binary not built");
+            return;
+        }
+        let reasons = process_filter([0xA1; 32], [0xC1; 32], &[], bin_dir).expect("empty filter");
+        assert!(reasons.is_empty());
+    }
+
+    #[test]
+    fn test_process_filter_mixed_batch_order_and_ownership() {
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        if !std::path::Path::new(&format!("{bin_dir}/{PROCESS_CONTRACT_NAME}")).exists() {
+            eprintln!("Skipping test: binary not built");
+            return;
+        }
+        let (process, _) = sample_process_and_intention();
+        let pth: [u8; 32] = process.type_script.calc_script_hash().unpack();
+        let cid_tid = [0xC1; 32];
+        let valid = filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY, None, vec![], None);
+        let foreign = filter_intention_cell(
+            pth,
+            cid_tid,
+            MIN_DEPOSIT_CAPACITY,
+            None,
+            vec![],
+            Some([0xB2; 32]),
+        );
+        let below =
+            filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY / 2, None, vec![], None);
+        let non_cid = {
+            let mut c =
+                filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY, None, vec![], None);
+            let lock = c.lock.as_mut().unwrap();
+            *lock = lock
+                .clone()
+                .as_builder()
+                .hash_type(ScriptHashType::Data1)
+                .build();
+            c
+        };
+        let xudt = {
+            let typ = Script::new_builder()
+                .code_hash(cid_protocol::XUDT_CODE_HASH.pack())
+                .hash_type(ScriptHashType::Data1)
+                .args([0u8; 32])
+                .build();
+            filter_intention_cell(pth, cid_tid, 1, Some(typ), vec![0u8; 16], None)
+        };
+        let batch = vec![valid, foreign, below, non_cid, xudt];
+        let reasons = process_filter(pth, cid_tid, &batch, bin_dir).expect("filter");
+        assert_eq!(reasons.len(), 5);
+        assert_eq!(reasons[0], FILTER_ACCEPTED);
+        assert_eq!(reasons[1], FILTER_PROCESS_MISMATCH);
+        assert_eq!(reasons[2], FILTER_DEPOSIT_BELOW_MINIMUM);
+        assert_eq!(reasons[3], FILTER_NOT_INTENTION);
+        assert_eq!(reasons[4], FILTER_ACCEPTED);
+    }
+
+    #[test]
+    fn test_process_filter_accepted_matches_assemble() {
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        if !std::path::Path::new(&format!("{bin_dir}/{PROCESS_CONTRACT_NAME}")).exists() {
+            eprintln!("Skipping test: binary not built");
+            return;
+        }
+        let rpc = FakeRpcClient::default();
+        let (process, intentions) = sample_process_and_intention();
+        let pth: [u8; 32] = process.type_script.calc_script_hash().unpack();
+        // sample Intentions use placeholder lock code_hash [0xC1;32] when lock is None.
+        let cid_tid = [0xC1; 32];
+        let with_lock: Vec<_> = intentions
+            .iter()
+            .map(|i| {
+                let mut c = i.clone();
+                c.lock = Some(
+                    Script::new_builder()
+                        .code_hash(cid_tid.pack())
+                        .hash_type(ScriptHashType::Type)
+                        .args(c.lock_args.clone().pack())
+                        .build(),
+                );
+                c
+            })
+            .collect();
+        let reasons = process_filter(pth, cid_tid, &with_lock, bin_dir).expect("filter");
+        assert!(reasons.iter().all(|r| *r == FILTER_ACCEPTED));
+        process_digest_ok_with_extras(
+            &rpc,
+            with_lock,
+            process,
+            AssembleExtras {
+                funding_cells: vec![],
+                cell_deps: vec![sample_code_dep()],
+            },
+            bin_dir,
+        )
+        .expect("accepted Intentions must assemble");
+    }
+
+    #[test]
+    fn test_route_helper_groups_before_filter() {
+        let cid_tid = [0xC1; 32];
+        let p_a = [0xA1; 32];
+        let p_b = [0xB2; 32];
+        let locks = [
+            CidScript {
+                code_hash: cid_tid,
+                hash_type: 1,
+                args: CidArgs::new(p_a, CidScript::default(), sample_beneficiary_payload())
+                    .encode()
+                    .unwrap(),
+            },
+            CidScript {
+                code_hash: cid_tid,
+                hash_type: 1,
+                args: CidArgs::new(p_b, CidScript::default(), sample_beneficiary_payload())
+                    .encode()
+                    .unwrap(),
+            },
+        ];
+        assert_eq!(intention_process_type_id(&locks[0], &cid_tid).unwrap(), p_a);
+        assert_eq!(intention_process_type_id(&locks[1], &cid_tid).unwrap(), p_b);
+        assert!(intention_belongs_to_process(&locks[0], &cid_tid, &p_a).is_ok());
+        assert_eq!(
+            intention_belongs_to_process(&locks[0], &cid_tid, &p_b),
+            Err(IntentionRouteError::ProcessMismatch)
         );
     }
 }

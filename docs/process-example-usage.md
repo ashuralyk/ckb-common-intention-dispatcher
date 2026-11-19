@@ -75,6 +75,19 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 | 38 | `UnsupportedFundingLock` (extra funding input) |
 | 39 | `DepositBelowMinimum` (CKB Intention capacity &lt; Process `MIN_DEPOSIT_CAPACITY`) |
 
+## Intention filter (`Process.filter`)
+
+SSRI method for the Sequencer to pre-select Intentions before assemble:
+
+1. Sequencer routes with `cid_protocol::intention_process_type_id`.
+2. Calls `Process.filter` (host: `process_filter`) for that Process Type ID.
+3. Filter **requires** ownership: CID Type-ID lock + `process_type_hash` equals
+   this Process (same helper / `ours_prefix` semantics), then applies deposit /
+   asset / digest rules from `cid-process-example-policy`.
+4. Assemble only the accepted cells.
+
+Reason codes and wire format: [ssri-backend-interface.md](ssri-backend-interface.md).
+
 ## CKB deposit minimum (Intention consume)
 
 Intention creates size capacity to `max(requested, occupied)`. Protocol / CID
