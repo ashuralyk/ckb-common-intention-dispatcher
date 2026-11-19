@@ -5,17 +5,20 @@ mod common;
 use std::sync::{Mutex, OnceLock};
 
 use cid_intention_cli::{
-    create_signed_intention, create_signed_intention_bundle,
-    create_signed_intention_with_same_lock_decoy, parse_privkey, process_type_hash_of, CliError,
-    CreateRequest, ScriptJson, PRIVKEY_ENV,
+    assert_fee_covers_rate, create_signed_intention, create_signed_intention_bundle,
+    create_signed_intention_with_same_lock_decoy, create_signed_process_state,
+    create_signed_process_state_bundle, fee_at_rate, parse_privkey, process_type_hash_of,
+    serialized_size_in_block, CliError, CreateProcessRequest, CreateRequest, ScriptJson,
+    MIN_FEE_RATE, PRIVKEY_ENV,
 };
 use ckb_cinnabar_calculator::{
     re_exports::ckb_types::{core::ScriptHashType, packed::Script, prelude::*},
     simulation::TransactionSimulator,
+    TYPE_ID_CODE_HASH,
 };
 use serde_json::json;
 
-use common::{fixture_request, key};
+use common::{fixture_process_request, fixture_request, key};
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -216,6 +219,27 @@ fn insufficient_funds_rejected() {
 }
 
 #[test]
+fn create_intention_accepts_tight_funding_intention_plus_fee_plus_change_dust() {
+    // Regression: early check must not require FEE_HEADROOM=1_000_000 when
+    // fee_shannons=10000 already covers rate-1000 min. Documented budget
+    // intention + fee + 61 CKB change must succeed.
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    assert_eq!(req.fee_shannons, 10_000);
+    const MIN_CHANGE: u64 = 61_0000_0000;
+    req.funding.capacity = req
+        .intention_capacity
+        .checked_add(req.fee_shannons)
+        .unwrap()
+        .checked_add(MIN_CHANGE)
+        .unwrap();
+    let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
+    let (paid, need) = assert_fee_covers_rate(&bundle.skeleton, MIN_FEE_RATE).unwrap();
+    assert!(paid >= need);
+    assert_eq!(paid, req.fee_shannons.max(need));
+}
+
+#[test]
 fn duplicate_outpoints_rejected() {
     let secret = key(0x42);
     let mut req = fixture_request(&secret);
@@ -318,6 +342,206 @@ fn funding_outpoint_pinned_despite_alternate_same_lock_cell() {
     );
 }
 
+#[test]
+fn create_process_fee_covers_rate_1000_serialized_size_in_block() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let bundle = create_signed_process_state_bundle(&req, &secret).unwrap();
+    let (paid, need) = assert_fee_covers_rate(&bundle.skeleton, MIN_FEE_RATE).unwrap();
+    let size = serialized_size_in_block(&bundle.skeleton);
+    assert_eq!(need, fee_at_rate(size, MIN_FEE_RATE));
+    assert!(
+        paid >= 641 || paid >= need,
+        "regression: underpay vs rate-1000 size (paid={paid} need={need} size={size})"
+    );
+    assert!(paid >= need);
+    assert_eq!(bundle.tx_json["fee_shannons"].as_u64().unwrap(), paid);
+}
+
+#[test]
+fn create_intention_fee_covers_rate_1000_serialized_size_in_block() {
+    let secret = key(0x42);
+    let req = fixture_request(&secret);
+    let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
+    let (paid, need) = assert_fee_covers_rate(&bundle.skeleton, MIN_FEE_RATE).unwrap();
+    let size = serialized_size_in_block(&bundle.skeleton);
+    assert_eq!(need, fee_at_rate(size, MIN_FEE_RATE));
+    assert!(paid >= need, "paid={paid} need={need} size={size}");
+    // Requested fee_shannons=10000 should win over min when larger.
+    assert_eq!(paid, req.fee_shannons.max(need));
+}
+
+#[test]
+fn create_intention_bumps_sub_min_fee_shannons_to_rate_1000() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    req.fee_shannons = 1; // far below rate-1000 min for a create tx
+                          // Early check only asks for fee_shannons; need_exact enforces real min fee.
+                          // Pad so post-placeholder effective_fee still fits with change dust.
+    req.funding.capacity = req.intention_capacity + 1_000_000 + 61_0000_0000 + 10_0000_0000;
+    let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
+    let (paid, need) = assert_fee_covers_rate(&bundle.skeleton, MIN_FEE_RATE).unwrap();
+    assert!(need > 1, "min fee must exceed the sub-min request");
+    assert_eq!(
+        paid, need,
+        "sub-min fee_shannons must bump to rate-1000 min"
+    );
+    assert!(paid > req.fee_shannons);
+}
+
+#[test]
+fn create_process_state_shape_type_id_registry_and_no_key_leak() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let tx = create_signed_process_state(&req, &secret).unwrap();
+    let dumped = serde_json::to_string(&tx).unwrap();
+    assert!(!dumped.contains(&hex::encode(secret.secret_bytes())));
+
+    let process_code_type = req.process_code_dep.type_script.as_ref().unwrap();
+    let expected_lock_code = process_type_hash_of(process_code_type).unwrap();
+
+    let inner = tx
+        .get("inner")
+        .or_else(|| tx.get("transaction"))
+        .unwrap_or(&tx);
+    let transaction = if inner.get("inputs").is_some() {
+        inner
+    } else {
+        inner.get("transaction").unwrap_or(inner)
+    };
+    let outputs = transaction["outputs"].as_array().unwrap();
+    assert!(outputs.len() >= 2);
+
+    let lock = &outputs[0]["lock"];
+    assert_eq!(lock["hash_type"].as_str().unwrap(), "type");
+    assert_eq!(
+        lock["code_hash"].as_str().unwrap(),
+        format!("0x{}", hex::encode(expected_lock_code))
+    );
+    assert_eq!(lock["args"].as_str().unwrap(), "0x01");
+
+    let typ = &outputs[0]["type"];
+    assert_eq!(
+        typ["code_hash"].as_str().unwrap(),
+        format!("0x{}", hex::encode(TYPE_ID_CODE_HASH))
+    );
+    assert_eq!(typ["hash_type"].as_str().unwrap(), "type");
+    let typ_args = hex::decode(typ["args"].as_str().unwrap().trim_start_matches("0x")).unwrap();
+    assert_eq!(typ_args.len(), 32);
+
+    let identity = tx["identity_type_id"].as_str().unwrap();
+    assert_eq!(identity.len(), 66);
+    let registry = &tx["registry_post"];
+    assert_eq!(
+        registry["identity_type_id_args"].as_str().unwrap(),
+        typ["args"].as_str().unwrap()
+    );
+    assert_eq!(registry["identity_type_id"].as_str().unwrap(), identity);
+    assert_eq!(
+        registry["code_type_id_args"].as_str().unwrap(),
+        process_code_type.args
+    );
+    assert_eq!(
+        registry["code_type_id"].as_str().unwrap(),
+        format!("0x{}", hex::encode(expected_lock_code))
+    );
+    assert!(tx["state_outpoint"]["tx_hash"].as_str().is_some());
+    assert_eq!(tx["state_outpoint"]["index"].as_u64().unwrap(), 0);
+    assert_eq!(tx["fee_rate"].as_u64().unwrap(), 1000);
+    let cid_type = req.cid_lock_dep.type_script.as_ref().unwrap();
+    let expected_cid = process_type_hash_of(cid_type).unwrap();
+    assert_eq!(
+        tx["cid_code_type_id"].as_str().unwrap(),
+        format!("0x{}", hex::encode(expected_cid))
+    );
+    assert_eq!(tx["cid_code_type_id_args"].as_str().unwrap(), cid_type.args);
+
+    // Intention CLI can target this identity via process_type_script.
+    let pts = &tx["process_type_script"];
+    assert_eq!(
+        pts["code_hash"].as_str().unwrap(),
+        typ["code_hash"].as_str().unwrap()
+    );
+    assert_eq!(pts["args"].as_str().unwrap(), typ["args"].as_str().unwrap());
+    let pth = process_type_hash_of(&serde_json::from_value(pts.clone()).unwrap()).unwrap();
+    assert_eq!(format!("0x{}", hex::encode(pth)), identity);
+}
+
+#[test]
+fn create_process_rejects_empty_lock_args() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    req.process_lock_args = "0x".into();
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    match err {
+        CliError::InvalidRequest(msg) => assert!(msg.contains("non-empty"), "{msg}"),
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_process_rejects_missing_process_code_type_script() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    req.process_code_dep.type_script = None;
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    assert!(matches!(err, CliError::InvalidRequest(_)));
+}
+
+#[test]
+fn create_process_cli_writes_output_without_leaking_key() {
+    let _guard = env_lock().lock().unwrap();
+    let secret = key(0x66);
+    let req = fixture_process_request(&secret);
+    let dir = tempfile::tempdir().unwrap();
+    let req_path = dir.path().join("req.json");
+    let out_path = dir.path().join("tx.json");
+    std::fs::write(&req_path, serde_json::to_vec_pretty(&req).unwrap()).unwrap();
+
+    std::env::set_var(PRIVKEY_ENV, hex::encode(secret.secret_bytes()));
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_cid-intention-cli"))
+        .args([
+            "create-process",
+            "--request",
+            req_path.to_str().unwrap(),
+            "--output",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    std::env::remove_var(PRIVKEY_ENV);
+
+    assert!(
+        status.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let out = std::fs::read_to_string(&out_path).unwrap();
+    let key_hex = hex::encode(secret.secret_bytes());
+    assert!(!out.contains(&key_hex));
+    assert!(out.contains("registry_post"));
+    assert!(out.contains("identity_type_id"));
+    let _ = serde_json::from_str::<CreateProcessRequest>(&serde_json::to_string(&req).unwrap());
+}
+
+#[tokio::test]
+async fn signed_process_passes_sighash_vm_verification() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let bundle = create_signed_process_state_bundle(&req, &secret).unwrap();
+    assert!(!bundle.skeleton.witnesses.is_empty());
+    let ok = TransactionSimulator::default()
+        .skeleton(bundle.skeleton.clone())
+        .link_cell_to_header(bundle.rpc.get_outpoint_to_headers())
+        .async_verify(&bundle.rpc, vec![], 50_000_000)
+        .await
+        .is_ok();
+    assert!(
+        ok,
+        "signed process create tx must pass secp sighash VM verify"
+    );
+}
+
 #[tokio::test]
 async fn signed_intention_passes_sighash_vm_verification() {
     let secret = key(0x42);
@@ -350,4 +574,51 @@ async fn signed_intention_passes_sighash_vm_verification() {
         .await
         .is_ok();
     assert!(!bad_ok, "tampered tx must fail sighash VM verify");
+}
+
+#[test]
+fn process_lock_args_cannot_use_intention_format() {
+    let secret = key(0x42);
+    let mut process = fixture_process_request(&secret);
+    let intention = create_signed_intention(&fixture_request(&secret), &secret).unwrap();
+    process.process_lock_args = intention["outputs"][0]["lock"]["args"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(create_signed_process_state(&process, &secret).is_err());
+}
+
+#[test]
+fn process_funding_accepts_measured_fee_and_minimum_change() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    let normal = create_signed_process_state(&req, &secret).unwrap();
+    let fee = normal["fee_shannons"].as_u64().unwrap();
+    req.funding.capacity = req.process_capacity + 61_0000_0000 + fee;
+    let exact = create_signed_process_state_bundle(&req, &secret)
+        .expect("measured fee and 61 CKB change fit");
+    assert_eq!(exact.tx_json["fee_shannons"], fee);
+    assert_eq!(exact.skeleton.outputs[1].capacity_shannons(), 61_0000_0000);
+}
+
+#[test]
+fn process_requires_capacity_above_occupied_floor_for_guest_fee() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    let template = create_signed_process_state_bundle(&req, &secret).unwrap();
+    req.process_capacity = template.skeleton.outputs[0].occupied_capacity().as_u64();
+    assert!(
+        create_signed_process_state(&req, &secret).is_err(),
+        "process minted at its occupied floor: {} shannons",
+        req.process_capacity
+    );
+}
+
+#[test]
+fn create_process_rejects_duplicate_code_type_ids() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    req.cid_lock_dep.type_script = req.process_code_dep.type_script.clone();
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    assert!(matches!(err, CliError::InvalidRequest(msg) if msg.contains("distinct Type IDs")));
 }

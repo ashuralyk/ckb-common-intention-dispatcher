@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::build::CliError;
 use crate::hexutil::{decode_hash32, decode_hex};
 
-/// Offline create request (no secrets).
+/// Offline Intention create request (no secrets).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRequest {
     /// `testnet` or `fake` (unit tests). Mainnet rejected in v1.
@@ -22,6 +22,33 @@ pub struct CreateRequest {
     pub process_type_script: ScriptJson,
     /// Beneficiary lock encoded into `CidEntry.payload` via `Payload::from_script`.
     pub beneficiary_lock: ScriptJson,
+}
+
+/// Offline Process state cell create request (no secrets).
+///
+/// Produces a state cell whose TYPE_ID type-script hash is the Intention
+/// `process_type_hash` (`identity_type_id`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateProcessRequest {
+    /// `testnet` or `fake` (unit tests). Mainnet rejected in v1.
+    pub network: String,
+    /// Process state capacity in shannons. Default: 300 CKB when omitted.
+    #[serde(default = "default_process_capacity")]
+    pub process_capacity: u64,
+    /// Distinct Process lock args for this instance (must be non-empty).
+    pub process_lock_args: String,
+    pub funding: FundingCell,
+    /// Live CID lock **code** cell (Type ID required; live-verified on `send`).
+    pub cid_lock_dep: NamedDep,
+    /// Live Process **code** cell. Must include Type ID `type_script` so the
+    /// state lock resolves as `hash_type=type` (no data-hash fallback).
+    pub process_code_dep: NamedDep,
+    /// Genesis secp code + data cell deps (with binary `data` for offline signing).
+    pub sighash_deps: Vec<NamedDep>,
+}
+
+fn default_process_capacity() -> u64 {
+    cid_process_example_calculator::DEFAULT_PROCESS_STATE_CAPACITY
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

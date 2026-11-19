@@ -5,18 +5,154 @@ use std::collections::HashMap;
 use cid_process_executor::{AssembledTx, HostQuery, MockHost, ProcessExecutor};
 use cid_protocol::{CidArgs, TYPE_ID_CODE_HASH};
 use ckb_cinnabar_calculator::{
+    address::Address,
     instruction::Instruction,
+    operation::{
+        basic::{AddInputCellByAddress, AddInputCellByOutPoint, AddOutputCell},
+        Log, Operation,
+    },
     re_exports::ckb_types::{
-        core::ScriptHashType,
+        core::{DepType, ScriptHashType},
         packed::{CellDep, CellInput, CellOutput, OutPoint, RawTransaction, Script, Transaction},
-        prelude::{Builder, Entity, Pack, PackVec},
+        prelude::{Builder, Entity, Pack, PackVec, Unpack},
     },
     rpc::RPC,
-    skeleton::{CellDepEx, CellInputEx, TransactionSkeleton, WitnessEx},
+    skeleton::{CellDepEx, CellInputEx, CellOutputEx, ScriptEx, TransactionSkeleton, WitnessEx},
+    types::Hash256,
     CalculatorError, Result,
 };
 
 pub const PROCESS_CONTRACT_NAME: &str = "cid_process_example";
+
+/// Default Process state cell capacity: 300 CKB.
+pub const DEFAULT_PROCESS_STATE_CAPACITY: u64 = 300_0000_0000;
+
+/// Fee rate (shannons/KW) used when balancing Process state create txs.
+/// Matches testnet `min_fee_rate` and the example Process assemble fee rate.
+pub const CREATE_FEE_RATE: u64 = 1000;
+
+/// Build a Process lock that resolves against the named Process code celldep
+/// (`hash_type=type` when the dep carries a Type ID type script).
+pub fn process_lock(args: Vec<u8>) -> ScriptEx {
+    ScriptEx::Reference(PROCESS_CONTRACT_NAME.into(), args)
+}
+
+/// Create a Process state cell (address-scanned funding).
+///
+/// Layout: Process code Type ID lock (`hash_type=type`) + built-in TYPE_ID type
+/// (args = blake2b(first_input ‖ le64(out_index))), empty data.
+///
+/// The instruction validates the Process code dependency and state lock before
+/// adding funding inputs. The Process lock does not run on-chain for output-only mints.
+pub fn create_process_state<T: RPC>(
+    payer: Address,
+    lock_args: Vec<u8>,
+    capacity: u64,
+) -> Instruction<T> {
+    create_process_state_instruction(
+        Box::new(AddInputCellByAddress { address: payer }),
+        lock_args,
+        capacity,
+    )
+}
+
+/// Create a Process state cell funded by an explicit outpoint (CLI / offline).
+///
+/// Uses the same layout and off-chain checks as the address-scanned entry.
+pub fn create_process_state_by_outpoint<T: RPC>(
+    funding: (Hash256, u32),
+    lock_args: Vec<u8>,
+    capacity: u64,
+) -> Instruction<T> {
+    create_process_state_instruction(
+        Box::new(AddInputCellByOutPoint {
+            tx_hash: funding.0,
+            index: funding.1,
+            since: None,
+        }),
+        lock_args,
+        capacity,
+    )
+}
+
+fn create_process_state_instruction<T: RPC>(
+    funding_input: Box<dyn Operation<T>>,
+    lock_args: Vec<u8>,
+    capacity: u64,
+) -> Instruction<T> {
+    let lock_script = process_lock(lock_args);
+    Instruction::new(vec![
+        Box::new(ValidateProcessCreate {
+            lock_script: lock_script.clone(),
+            capacity,
+        }),
+        funding_input,
+        Box::new(AddOutputCell {
+            lock_script,
+            type_script: None,
+            data: Vec::new(),
+            capacity,
+            absolute_capacity: true,
+            type_id: true,
+        }),
+    ])
+}
+
+struct ValidateProcessCreate {
+    lock_script: ScriptEx,
+    capacity: u64,
+}
+
+impl<T: RPC> Operation<T> for ValidateProcessCreate {
+    fn run(
+        self: Box<Self>,
+        _rpc: &T,
+        skeleton: &mut TransactionSkeleton,
+        _log: &mut Log,
+    ) -> Result<()> {
+        let args = self.lock_script.args();
+        if args.is_empty() || CidArgs::decode(&args).is_ok() {
+            return Err(CalculatorError::Other(
+                "Process lock args must be non-empty and distinct from CID Intention encoding"
+                    .into(),
+            ));
+        }
+
+        let (_, dep) = skeleton
+            .find_celldep_by_script(&self.lock_script)
+            .ok_or_else(|| {
+                CalculatorError::CellDepNotFound("Process code cell dep is required".into())
+            })?;
+        let dep_type: u8 = dep.celldep.dep_type().into();
+        let type_script = dep.output.type_script().filter(|script| {
+            let hash_type: u8 = script.hash_type().into();
+            let code_hash: [u8; 32] = script.code_hash().unpack();
+            hash_type == ScriptHashType::Type as u8
+                && code_hash == TYPE_ID_CODE_HASH
+                && script.args().raw_data().len() == 32
+        });
+        let Some(type_script) = type_script.filter(|_| dep_type == DepType::Code as u8) else {
+            return Err(CalculatorError::Other(
+                "Process code dep must be a direct code cell with a built-in TYPE_ID script".into(),
+            ));
+        };
+
+        // The state TYPE_ID has the same occupied length as this code-cell TYPE_ID.
+        let lock = self.lock_script.clone().to_script(skeleton)?;
+        let occupied = CellOutputEx::new_from_scripts(lock, Some(type_script), vec![], None)?
+            .occupied_capacity()
+            .as_u64();
+        // At rate 1000, reserve a baseline of 1000 shannons plus one shannon per
+        // state lock arg byte. Larger future digest transactions can cost more.
+        let fee_reserve = CREATE_FEE_RATE + args.len() as u64;
+        if self.capacity.saturating_sub(occupied) < fee_reserve {
+            return Err(CalculatorError::InsufficientCapacity(format!(
+                "Process state needs at least {fee_reserve} shannons above occupied capacity for digest fees"
+            )));
+        }
+        Ok(())
+    }
+}
 
 type KnownCells = HashMap<Vec<u8>, (CellOutput, Vec<u8>)>;
 
@@ -437,14 +573,19 @@ pub fn assembled_tx_round_trip_bytes(assembled: &AssembledTx) -> Result<Vec<u8>>
 mod tests {
     use super::*;
     use cid_protocol::{CidArgs, Payload, Script as CidScript};
+    use ckb_cinnabar_calculator::operation::basic::AddCellDep;
     use ckb_cinnabar_calculator::re_exports::ckb_types::core::DepType;
     use ckb_cinnabar_calculator::re_exports::ckb_types::packed::{
         Bytes as PackedBytes, WitnessArgs,
     };
     use ckb_cinnabar_calculator::re_exports::ckb_types::prelude::Unpack;
+    use ckb_cinnabar_calculator::re_exports::ckb_types::H256;
     use ckb_cinnabar_calculator::simulation::{
         always_success_script, fake_outpoint, FakeRpcClient,
     };
+    use ckb_cinnabar_calculator::skeleton::CellOutputEx;
+    use ckb_cinnabar_calculator::types::{h256_to_hash, DepType as CalcDepType};
+    use ckb_cinnabar_calculator::TransactionCalculator;
 
     fn sample_type_id() -> Script {
         Script::new_builder()
@@ -511,6 +652,292 @@ mod tests {
     #[test]
     fn test_load_binary_missing() {
         assert!(load_process_binary("/nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_create_process_state_by_outpoint_type_id_and_lock() {
+        use ckb_cinnabar_calculator::TYPE_ID_CODE_HASH as CINNABAR_TYPE_ID;
+
+        let funding_tx = [0x11u8; 32];
+        let process_code_tx = [0x22u8; 32];
+        let process_code_args = [0xABu8; 32];
+        let lock_args = b"instance-1".to_vec();
+
+        let process_type_script = Script::new_builder()
+            .code_hash(CINNABAR_TYPE_ID.pack())
+            .hash_type(ScriptHashType::Type)
+            .args(process_code_args.to_vec().pack())
+            .build();
+        let expected_lock_code: [u8; 32] = process_type_script.calc_script_hash().unpack();
+
+        let mut rpc = FakeRpcClient::default();
+        let funding_lock = always_success_script(vec![0x01]);
+        let funding_cell =
+            CellOutputEx::new_from_scripts(funding_lock, None, vec![], Some(500_0000_0000u64))
+                .unwrap();
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(funding_tx).pack(), 0),
+            funding_cell,
+            None,
+        );
+        let code_cell = CellOutputEx::new_from_scripts(
+            Script::default(),
+            Some(process_type_script),
+            vec![0xCAu8, 0xFE],
+            None,
+        )
+        .unwrap();
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(process_code_tx).pack(), 0),
+            code_cell,
+            None,
+        );
+
+        let mut skeleton = TransactionSkeleton::default();
+        let add_dep = Instruction::new(vec![Box::new(AddCellDep {
+            name: PROCESS_CONTRACT_NAME.into(),
+            tx_hash: h256_to_hash(&H256(process_code_tx)),
+            index: 0,
+            dep_type: CalcDepType::Code,
+            with_data: true,
+        })]);
+        TransactionCalculator::default()
+            .instruction(add_dep)
+            .apply_skeleton(&rpc, &mut skeleton)
+            .expect("add process code dep");
+
+        let create = create_process_state_by_outpoint(
+            (h256_to_hash(&H256(funding_tx)), 0),
+            lock_args.clone(),
+            DEFAULT_PROCESS_STATE_CAPACITY,
+        );
+        TransactionCalculator::default()
+            .instruction(create)
+            .apply_skeleton(&rpc, &mut skeleton)
+            .expect("create process state");
+
+        assert_eq!(skeleton.inputs.len(), 1);
+        assert_eq!(skeleton.outputs.len(), 1);
+        let out = &skeleton.outputs[0];
+        assert_eq!(out.capacity_shannons(), DEFAULT_PROCESS_STATE_CAPACITY);
+        assert!(out.data.is_empty());
+
+        let lock = out.lock_script();
+        let lock_code: [u8; 32] = lock.code_hash().unpack();
+        let lock_ht: u8 = lock.hash_type().into();
+        assert_eq!(lock_ht, 1, "Process lock must use hash_type=type");
+        assert_eq!(lock_code, expected_lock_code);
+        assert_eq!(lock.args().raw_data().as_ref(), lock_args.as_slice());
+
+        let typ = out.type_script().expect("TYPE_ID type required");
+        let typ_code: [u8; 32] = typ.code_hash().unpack();
+        assert_eq!(typ_code, TYPE_ID_CODE_HASH);
+        let typ_ht: u8 = typ.hash_type().into();
+        assert_eq!(typ_ht, 1);
+        assert_eq!(typ.args().raw_data().len(), 32);
+
+        let expected_args = skeleton.calc_type_id(0).expect("type id");
+        let got_args: [u8; 32] = {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(&typ.args().raw_data());
+            a
+        };
+        assert_eq!(got_args, expected_args);
+    }
+
+    #[test]
+    fn calculator_rejects_untyped_process_code() {
+        let funding_tx = [0x11u8; 32];
+        let process_code_tx = [0x22u8; 32];
+        let lock_args = b"instance-1".to_vec();
+
+        let mut rpc = FakeRpcClient::default();
+        let funding_lock = always_success_script(vec![0x01]);
+        let funding_cell =
+            CellOutputEx::new_from_scripts(funding_lock, None, vec![], Some(500_0000_0000u64))
+                .unwrap();
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(funding_tx).pack(), 0),
+            funding_cell,
+            None,
+        );
+        let code_cell =
+            CellOutputEx::new_from_scripts(Script::default(), None, vec![0xCAu8, 0xFE], None)
+                .unwrap();
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(process_code_tx).pack(), 0),
+            code_cell,
+            None,
+        );
+
+        let mut skeleton = TransactionSkeleton::default();
+        let add_dep = Instruction::new(vec![Box::new(AddCellDep {
+            name: PROCESS_CONTRACT_NAME.into(),
+            tx_hash: h256_to_hash(&H256(process_code_tx)),
+            index: 0,
+            dep_type: CalcDepType::Code,
+            with_data: true,
+        })]);
+        TransactionCalculator::default()
+            .instruction(add_dep)
+            .apply_skeleton(&rpc, &mut skeleton)
+            .expect("add process code dep");
+
+        let create = create_process_state_by_outpoint(
+            (h256_to_hash(&H256(funding_tx)), 0),
+            lock_args.clone(),
+            DEFAULT_PROCESS_STATE_CAPACITY,
+        );
+        let result = TransactionCalculator::default()
+            .instruction(create)
+            .apply_skeleton(&rpc, &mut skeleton);
+        if result.is_ok() {
+            let hash_type: u8 = skeleton.outputs[0].lock_script().hash_type().into();
+            panic!("untyped code produced Process output with hash_type={hash_type}");
+        }
+    }
+
+    #[test]
+    fn test_create_process_state_type_id_matches_independent_blake2b() {
+        use ckb_cinnabar_calculator::re_exports::ckb_hash::Blake2bBuilder;
+        use ckb_cinnabar_calculator::TYPE_ID_CODE_HASH as CINNABAR_TYPE_ID;
+
+        let funding_tx = [0x31u8; 32];
+        let process_code_tx = [0x32u8; 32];
+        let process_type_script = Script::new_builder()
+            .code_hash(CINNABAR_TYPE_ID.pack())
+            .hash_type(ScriptHashType::Type)
+            .args([0x99u8; 32].to_vec().pack())
+            .build();
+
+        let mut rpc = FakeRpcClient::default();
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(funding_tx).pack(), 0),
+            CellOutputEx::new_from_scripts(
+                always_success_script(vec![0x02]),
+                None,
+                vec![],
+                Some(500_0000_0000u64),
+            )
+            .unwrap(),
+            None,
+        );
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(process_code_tx).pack(), 0),
+            CellOutputEx::new_from_scripts(
+                Script::default(),
+                Some(process_type_script),
+                vec![0xBE, 0xEF],
+                None,
+            )
+            .unwrap(),
+            None,
+        );
+
+        let mut skeleton = TransactionSkeleton::default();
+        TransactionCalculator::default()
+            .instruction(Instruction::new(vec![Box::new(AddCellDep {
+                name: PROCESS_CONTRACT_NAME.into(),
+                tx_hash: h256_to_hash(&H256(process_code_tx)),
+                index: 0,
+                dep_type: CalcDepType::Code,
+                with_data: true,
+            })]))
+            .apply_skeleton(&rpc, &mut skeleton)
+            .unwrap();
+        TransactionCalculator::default()
+            .instruction(create_process_state_by_outpoint(
+                (h256_to_hash(&H256(funding_tx)), 0),
+                b"tid-check".to_vec(),
+                DEFAULT_PROCESS_STATE_CAPACITY,
+            ))
+            .apply_skeleton(&rpc, &mut skeleton)
+            .unwrap();
+
+        let first_input = &skeleton.inputs[0].input;
+        let out_index = 0u64;
+        let mut hasher = Blake2bBuilder::new(32)
+            .personal(b"ckb-default-hash")
+            .build();
+        hasher.update(first_input.as_slice());
+        hasher.update(&out_index.to_le_bytes());
+        let mut independent = [0u8; 32];
+        hasher.finalize(&mut independent);
+
+        let typ = skeleton.outputs[0].type_script().unwrap();
+        let mut got = [0u8; 32];
+        got.copy_from_slice(&typ.args().raw_data());
+        assert_eq!(
+            got, independent,
+            "TYPE_ID args must equal blake2b(first CellInput molecule || le64(out_index))"
+        );
+        assert_eq!(got, skeleton.calc_type_id(0).unwrap());
+    }
+
+    #[test]
+    fn test_create_process_state_address_scanned() {
+        use ckb_cinnabar_calculator::address::{Address, AddressPayload};
+        use ckb_cinnabar_calculator::rpc::Network;
+        use ckb_cinnabar_calculator::TYPE_ID_CODE_HASH as CINNABAR_TYPE_ID;
+
+        let funding_lock = always_success_script(vec![0x03]);
+        let address = Address::new(Network::Fake, AddressPayload::from(funding_lock.clone()));
+        let process_code_tx = [0x42u8; 32];
+        let process_type_script = Script::new_builder()
+            .code_hash(CINNABAR_TYPE_ID.pack())
+            .hash_type(ScriptHashType::Type)
+            .args([0x77u8; 32].to_vec().pack())
+            .build();
+        let expected_lock_code: [u8; 32] = process_type_script.calc_script_hash().unpack();
+
+        let mut rpc = FakeRpcClient::default();
+        // Address scan finds this live cell by lock.
+        rpc.insert_fake_cell(
+            OutPoint::new(H256([0x55u8; 32]).pack(), 0),
+            CellOutputEx::new_from_scripts(funding_lock, None, vec![], Some(500_0000_0000u64))
+                .unwrap(),
+            None,
+        );
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(process_code_tx).pack(), 0),
+            CellOutputEx::new_from_scripts(
+                Script::default(),
+                Some(process_type_script),
+                vec![0x11, 0x22],
+                None,
+            )
+            .unwrap(),
+            None,
+        );
+
+        let mut skeleton = TransactionSkeleton::default();
+        TransactionCalculator::default()
+            .instruction(Instruction::new(vec![Box::new(AddCellDep {
+                name: PROCESS_CONTRACT_NAME.into(),
+                tx_hash: h256_to_hash(&H256(process_code_tx)),
+                index: 0,
+                dep_type: CalcDepType::Code,
+                with_data: true,
+            })]))
+            .apply_skeleton(&rpc, &mut skeleton)
+            .unwrap();
+        TransactionCalculator::default()
+            .instruction(create_process_state(
+                address,
+                b"addr-instance".to_vec(),
+                DEFAULT_PROCESS_STATE_CAPACITY,
+            ))
+            .apply_skeleton(&rpc, &mut skeleton)
+            .expect("address-scanned create_process_state");
+
+        assert_eq!(skeleton.inputs.len(), 1);
+        assert_eq!(skeleton.outputs.len(), 1);
+        let lock = skeleton.outputs[0].lock_script();
+        let lock_code: [u8; 32] = lock.code_hash().unpack();
+        assert_eq!(u8::from(lock.hash_type()), 1);
+        assert_eq!(lock_code, expected_lock_code);
+        let typ = skeleton.outputs[0].type_script().expect("TYPE_ID");
+        assert_eq!(typ.args().raw_data().len(), 32);
     }
 
     #[test]

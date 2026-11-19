@@ -28,6 +28,10 @@ use ckb_common_intention_dispatcher_calculator::{
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::fee::{
+    apply_fee_by_shrinking_change, assert_fee_covers_rate, install_sighash_witness_placeholders,
+    min_fee_for_skeleton, MIN_FEE_RATE,
+};
 use crate::hexutil::{decode_hash32, decode_hex, encode_hex};
 use crate::request::{CreateRequest, NamedDep, ScriptJson};
 
@@ -357,7 +361,10 @@ fn create_signed_intention_bundle_inner(
         return Err(CliError::LockKeyMismatch);
     }
 
-    // Change needs a realistic minimum; require funding covers intention + fee + 61 CKB dust floor.
+    // Early budget uses only the requested fee_shannons so it is never stricter
+    // than the post-placeholder need_exact check (effective_fee = max(fee, min)).
+    // A fixed FEE_HEADROOM here would reject tight-but-sufficient funding such as
+    // intention + fee_shannons(10000) + 61 CKB change dust.
     const MIN_CHANGE: u64 = 61_0000_0000;
     let need = req
         .intention_capacity
@@ -469,6 +476,9 @@ fn create_signed_intention_bundle_inner(
         ));
     }
 
+    // Materialize change with the requested fee first, then resize against
+    // serialized_size_in_block after sighash placeholders (same bug class as
+    // Process create: pre-change / pre-witness molecule underpays rate 1000).
     skeleton
         .balance(
             &rpc,
@@ -490,6 +500,25 @@ fn create_signed_intention_bundle_inner(
             "funding previous_output changed after balance".into(),
         ));
     }
+    if skeleton.outputs.len() < 2 {
+        return Err(CliError::Calculator(
+            "expected intention + change outputs".into(),
+        ));
+    }
+    let change_index = skeleton.outputs.len() - 1;
+    install_sighash_witness_placeholders(&mut skeleton);
+    let min_fee = min_fee_for_skeleton(&skeleton, MIN_FEE_RATE);
+    let effective_fee = req.fee_shannons.max(min_fee);
+    // Exact headroom with effective_fee (may exceed the early estimate).
+    let need_exact = req
+        .intention_capacity
+        .checked_add(effective_fee)
+        .and_then(|v| v.checked_add(MIN_CHANGE))
+        .ok_or(CliError::InsufficientFunds)?;
+    if req.funding.capacity < need_exact {
+        return Err(CliError::InsufficientFunds);
+    }
+    apply_fee_by_shrinking_change(&mut skeleton, change_index, effective_fee)?;
 
     let sign = AddSecp256k1SighashSignatures {
         user_lock_scripts: vec![ScriptEx::from(funding_lock.clone())],
@@ -501,11 +530,6 @@ fn create_signed_intention_bundle_inner(
         .map_err(|e| CliError::Calculator(e.to_string()))?;
 
     // Structural checks (no network).
-    if skeleton.outputs.len() < 2 {
-        return Err(CliError::Calculator(
-            "expected intention + change outputs".into(),
-        ));
-    }
     let intention_out = &skeleton.outputs[0];
     if intention_out.capacity_shannons() != req.intention_capacity {
         return Err(CliError::Calculator("intention capacity mismatch".into()));
@@ -524,14 +548,11 @@ fn create_signed_intention_bundle_inner(
             "intention lock args missing process_type_hash prefix".into(),
         ));
     }
-    let total_in: u64 = skeleton
-        .inputs
-        .iter()
-        .map(|i| i.output.capacity_shannons())
-        .sum();
-    let total_out: u64 = skeleton.outputs.iter().map(|o| o.capacity_shannons()).sum();
-    if total_in.saturating_sub(total_out) != req.fee_shannons {
-        return Err(CliError::Calculator("fee mismatch after balance".into()));
+    let (paid, _) = assert_fee_covers_rate(&skeleton, MIN_FEE_RATE)?;
+    if paid != effective_fee {
+        return Err(CliError::Calculator(format!(
+            "fee mismatch after balance: paid={paid} effective={effective_fee}"
+        )));
     }
     if skeleton.witnesses.is_empty() {
         return Err(CliError::Calculator("missing sighash witness".into()));
