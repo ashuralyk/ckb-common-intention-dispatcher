@@ -13,6 +13,11 @@ use ckb_std::ckb_types::prelude::*;
 const BATCH_MIN: u32 = 1;
 const BATCH_MAX: u32 = 4;
 
+/// Example miner fee deducted from the Process state cell capacity by assemble.
+/// Capacity balance (and any Process-owned funding inputs in the draft) is the
+/// Process's responsibility — the backend must not rewrite outputs to "fix" fee.
+const ASSEMBLE_FEE: u64 = 1_000_000;
+
 // Default lock code_hash for beneficiary outputs (placeholder for raw lock_args tests)
 const DEFAULT_LOCK_CODE_HASH: [u8; 32] = [
     0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
@@ -116,11 +121,22 @@ pub fn assemble_handler(
         }
     }
 
-    // Outputs: Process recreate (same lock/type/capacity/data) + beneficiaries.
+    // Outputs: Process recreate (same lock/type/data; capacity minus Process-paid
+    // fee) + beneficiaries. Extra draft inputs (Process-owned funding) stay in
+    // `inputs` and their surplus capacity also contributes to tx fee.
     let mut outputs = Vec::with_capacity(1 + intentions.len());
     let mut outputs_data = Vec::with_capacity(1 + intentions.len());
 
-    outputs.push(process.cell.output.clone());
+    let process_cap: u64 = process.cell.output.capacity().unpack();
+    let recreate_cap = process_cap.saturating_sub(ASSEMBLE_FEE);
+    let recreate = process
+        .cell
+        .output
+        .clone()
+        .as_builder()
+        .capacity(recreate_cap)
+        .build();
+    outputs.push(recreate);
     outputs_data.push(process.cell.data.clone());
 
     for intention in &intentions {
@@ -135,7 +151,7 @@ pub fn assemble_handler(
         outputs_data.push(intention.data.clone());
     }
 
-    // Inputs: draft order (Process may have added none in this example).
+    // Inputs: full draft order (includes any Process-owned funding cells).
     let inputs: Vec<CellInput> = loaded
         .iter()
         .map(|item| {
@@ -145,7 +161,7 @@ pub fn assemble_handler(
         })
         .collect();
 
-    // Preserve draft deps; witnesses: one empty per input (backend fills unlocks).
+    // Preserve draft deps as-is; witnesses: one empty per input (backend fills unlocks).
     let cell_deps = raw.cell_deps();
     let header_deps = raw.header_deps();
     let witnesses: Vec<Bytes> = (0..inputs.len()).map(|_| Bytes::default()).collect();

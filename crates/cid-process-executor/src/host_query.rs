@@ -67,6 +67,7 @@ impl MockHost {
         self.inner.lock().unwrap().cells.get(out_point).cloned()
     }
 
+    /// Returns `None` when the height was never inserted (no zero-hash fallback).
     pub fn get_block_hash(&self, number: u64) -> Option<[u8; 32]> {
         self.inner
             .lock()
@@ -74,6 +75,5 @@ impl MockHost {
             .block_hashes
             .get(&number)
             .copied()
-            .or(Some([0u8; 32]))
     }
 }

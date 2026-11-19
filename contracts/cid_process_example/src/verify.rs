@@ -62,6 +62,15 @@ fn verify_create() -> Result<Option<&'static str>> {
 }
 
 /// Transfer: exactly one Process lock input and one Process lock output.
+///
+/// Identity continuity: input and output must carry the **same** TYPE_ID type
+/// script hash. The TYPE_ID must not appear on any non-Process-lock output
+/// (prevents CID DigestOk matching via an attacker cell while the Process
+/// cell migrates to a new Type ID).
+///
+/// Note: Process lock **args** should be distinct per live instance. Empty or
+/// shared args merge cells into one lock group (1→1 becomes N→N and fails
+/// `ProcessPairInvalid`).
 fn verify_lock_pair() -> Result<Option<&'static str>> {
     let input_indices = this_script_indices(Source::Input, ScriptPlace::Lock)?;
     let output_indices = this_script_indices(Source::Output, ScriptPlace::Lock)?;
@@ -69,12 +78,16 @@ fn verify_lock_pair() -> Result<Option<&'static str>> {
     if input_indices.len() != 1 || output_indices.len() != 1 {
         return Err(ProcessError::ProcessPairInvalid.into());
     }
-    require_type_id_type(input_indices[0], Source::Input)?;
-    require_type_id_type(output_indices[0], Source::Output)?;
+    let in_hash = require_type_id_type(input_indices[0], Source::Input)?;
+    let out_hash = require_type_id_type(output_indices[0], Source::Output)?;
+    if in_hash != out_hash {
+        return Err(ProcessError::TypeIdInvalid.into());
+    }
+    forbid_type_id_on_non_process_outputs(&in_hash)?;
     Ok(None)
 }
 
-fn require_type_id_type(index: usize, source: Source) -> Result<()> {
+fn require_type_id_type(index: usize, source: Source) -> Result<[u8; 32]> {
     let typ = load_cell_type(index, source).map_err(|_| ProcessError::ProcessPairInvalid)?;
     let Some(typ) = typ else {
         return Err(ProcessError::TypeIdInvalid.into());
@@ -83,6 +96,29 @@ fn require_type_id_type(index: usize, source: Source) -> Result<()> {
     let hash_type: u8 = typ.hash_type().into();
     if !is_type_id_script(&code_hash, hash_type) {
         return Err(ProcessError::TypeIdInvalid.into());
+    }
+    Ok(typ.calc_script_hash().unpack())
+}
+
+/// Our Process Type ID must only sit on Process-lock cells (the recreate).
+fn forbid_type_id_on_non_process_outputs(our_type_hash: &[u8; 32]) -> Result<()> {
+    let process_script = load_script().map_err(|_| ProcessError::ProcessPairInvalid)?;
+    for i in 0.. {
+        match load_cell_type(i, Source::Output) {
+            Ok(Some(typ)) => {
+                let hash: [u8; 32] = typ.calc_script_hash().unpack();
+                if &hash == our_type_hash {
+                    let lock = load_cell_lock(i, Source::Output)
+                        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                    if !is_example_process_lock(&lock, &process_script) {
+                        return Err(ProcessError::TypeIdInvalid.into());
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
+            Err(_) => return Err(ProcessError::ProcessPairInvalid.into()),
+        }
     }
     Ok(())
 }

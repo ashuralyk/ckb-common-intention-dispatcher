@@ -46,14 +46,17 @@ path.
 Code cells needed to execute the Process lock still belong in CellDeps; these
 are distinct from the live Process state cell. A dependency-only, input-only,
 output-only, or mismatched Process cannot authorize `digest_ok`. TYPE_ID
-provides identity continuity; the Process lock enforces payload, destinations,
-and state transition. CID does not implement those application-specific rules.
-A permissive Process lock delegates permissive execution; choose and audit the
-Process accordingly.
+provides identity continuity; the Process lock requires the **same** TYPE_ID
+type-script hash on its lock-pair input and output and rejects that Type ID on
+non-Process-lock outputs. Use distinct Process lock args per instance (shared /
+empty args merge lock groups). CID does not implement application-specific
+payload rules. A permissive Process lock delegates permissive execution; choose
+and audit the Process accordingly.
 
 Off-chain, `Process.assemble` returns a complete molecule transaction (see
 `docs/ssri-backend-interface.md`); the backend submits it without rewriting
-structure.
+structure. Capacity/fee balance is Process-owned (example deducts fee from the
+state cell).
 
 The matching Process branch takes precedence over refund-shaped outputs, so
 partial user proceeds are allowed. Multiple distinct Intention lock groups for
@@ -175,11 +178,13 @@ In-tree sample Process (not a production SSRI daemon):
   (`Process.batch`, `Process.assemble`) and on-chain Create/Transfer Type ID,
   batch, and beneficiary Script/capacity/data/asset checks
 - Greenfield offline host `crates/cid-process-executor` (ckb-vm, argv method id)
-- Calculator `calculator/process` — `process_digest_ok` builds a skeleton with
-  intention inputs and beneficiary outputs (molecule `Transaction` from assemble)
-- FakeRpc tests: n=1, 2, 4 and empty / n=5 rejection (`tests/src/process_example.rs`)
+- Calculator `calculator/process` — `process_digest_ok` rebuilds the skeleton
+  from the full assembled molecule `Transaction` (inputs, deps, witnesses,
+  outputs)
+- FakeRpc tests: n=1, 2, 4, TYPE_ID continuity theft negatives
+  (`tests/src/process_example.rs`)
 - **BATCH_MIN=1, BATCH_MAX=4**
-- Process recreate is **not** composed on the PartialTx / skeleton yet
+- Example assemble deducts Process-owned fee from the state cell recreate
 
 Usage: [docs/process-example-usage.md](docs/process-example-usage.md)
 

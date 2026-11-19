@@ -45,9 +45,15 @@ cd tests && cargo test process_example -- --nocapture
 ## On-chain verification (Process **lock**)
 
 1. **Create** (0 lock inputs, 1 output): state cell type must be built-in TYPE_ID.  
-2. **Transfer** (1→1 lock pair): TYPE_ID on both sides; batch `[1,4]`; unique
-   beneficiary / refund assignment (same rules as before).  
+2. **Transfer** (1→1 lock pair): TYPE_ID on both sides **with equal type-script
+   hash** (identity continuity); that TYPE_ID must not appear on any
+   non-Process-lock output; batch `[1,4]`; unique beneficiary / refund
+   assignment.  
 3. **Burn** rejected.
+
+**Lock args:** use distinct Process lock args per live state cell. Identical
+args (including empty) merge cells into one lock group, so a two-Process tx
+becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 
 | Code | Error |
 |------|--------|
@@ -56,5 +62,13 @@ cd tests && cargo test process_example -- --nocapture
 | 32 | `BeneficiaryMissing` |
 | 33 | `BeneficiaryAmountMismatch` |
 | 34 | `UnsupportedAsset` |
-| 35 | `TypeIdInvalid` (missing / non-TYPE_ID type) |
+| 35 | `TypeIdInvalid` (missing / non-TYPE_ID / continuity break / smuggled Type ID) |
 | 36 | `HostQueryFailed` |
+
+## Capacity / fee (example assemble)
+
+`Process.assemble` deducts a Process-owned miner fee from the recreated state
+cell capacity (`ASSEMBLE_FEE`). Optional Process-owned funding inputs in the
+draft stay in the returned transaction; their surplus capacity also pays fee.
+The backend must submit the molecule `Transaction` without rewriting structure
+to “fix” balance.

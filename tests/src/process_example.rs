@@ -13,7 +13,7 @@ use ckb_cinnabar_calculator::{
     re_exports::ckb_hash::blake2b_256,
     re_exports::ckb_types::{
         core::ScriptHashType,
-        packed::{OutPoint, Script},
+        packed::{CellOutput, OutPoint, Script},
         prelude::{Builder, Entity, Pack, Unpack},
     },
     rpc::Network,
@@ -980,10 +980,118 @@ async fn assemble_and_verify_xudt_beneficiary() {
         .expect("assembled xUDT beneficiary must verify on-chain");
 }
 
-// Still ignored: Process type script never runs if the Process cell is absent,
-// so a "missing type-id pair" tx is a CID-lock PROCESS_MISMATCH, not ProcessPairInvalid.
+/// Theft: Process recreate migrates to TYPE_ID_B while an attacker output keeps
+/// TYPE_ID_A so CID DigestOk still matches. Process lock must reject (continuity).
 #[tokio::test]
-#[ignore]
-async fn reject_missing_type_id_pair() {
-    todo!("Process type does not execute when the Process cell is missing from the tx");
+async fn reject_type_id_continuity_theft() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_a);
+    let process =
+        seed_process_example_cell(&mut rpc, process_example_lock_script(), type_a.clone());
+    let args = beneficiary_args(process_hash, &dest_script());
+    let intention = seed_intention(&mut rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
+
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - 10_000_000_000,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+
+    // Process recreate is outputs[0] (ConsumeProcess); give it a fresh TYPE_ID_B.
+    let process_out_idx = 0usize;
+    let type_b_args = skeleton
+        .calc_type_id(process_out_idx)
+        .expect("calc_type_id for Process recreate");
+    let type_b = Script::new_builder()
+        .code_hash(TYPE_ID_CODE_HASH.pack())
+        .hash_type(ScriptHashType::Type)
+        .args(type_b_args.as_ref().to_vec().pack())
+        .build();
+    skeleton.outputs[process_out_idx].output = skeleton.outputs[process_out_idx]
+        .output
+        .clone()
+        .as_builder()
+        .type_(Some(type_b).pack())
+        .build();
+
+    // Attacker cell carries TYPE_ID_A so CID DigestOk still sees A in outputs.
+    skeleton.output(CellOutputEx::new(
+        CellOutput::new_builder()
+            .capacity(10_000_000_000u64)
+            .lock(always_success_script(vec![0xA1]))
+            .type_(Some(type_a))
+            .build(),
+        vec![],
+    ));
+
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("TYPE_ID A→B swap with attacker holding A must fail");
+    assert_eq!(exit(err), ERROR_TYPE_ID_INVALID);
+}
+
+/// Process recreate drops TYPE_ID while attacker holds the original Type ID for
+/// CID matching — Process lock must reject (missing type on Process pair).
+#[tokio::test]
+async fn reject_type_id_dropped_on_process_recreate() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_a);
+    let process =
+        seed_process_example_cell(&mut rpc, process_example_lock_script(), type_a.clone());
+    let args = beneficiary_args(process_hash, &dest_script());
+    let intention = seed_intention(&mut rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
+
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - 10_000_000_000,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+
+    skeleton.outputs[0].output = skeleton.outputs[0]
+        .output
+        .clone()
+        .as_builder()
+        .type_(None)
+        .build();
+    skeleton.output(CellOutputEx::new(
+        CellOutput::new_builder()
+            .capacity(10_000_000_000u64)
+            .lock(always_success_script(vec![0xA2]))
+            .type_(Some(type_a))
+            .build(),
+        vec![],
+    ));
+
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("Process recreate without TYPE_ID must fail");
+    assert_eq!(exit(err), ERROR_TYPE_ID_INVALID);
 }

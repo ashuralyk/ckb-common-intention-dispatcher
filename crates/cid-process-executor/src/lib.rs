@@ -508,4 +508,13 @@ mod tests {
         assert_eq!(got.output.as_slice(), output.as_slice());
         assert_eq!(got.data, vec![1, 2, 3]);
     }
+
+    #[test]
+    fn test_host_query_get_block_hash_missing_is_none() {
+        let host = MockHost::new();
+        assert!(host.get_block_hash(0).is_none());
+        host.insert_block_hash(0, [0xAB; 32]);
+        assert_eq!(host.get_block_hash(0), Some([0xAB; 32]));
+        assert!(host.get_block_hash(1).is_none());
+    }
 }

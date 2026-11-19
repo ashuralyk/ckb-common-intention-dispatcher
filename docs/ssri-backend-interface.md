@@ -12,7 +12,12 @@ Authoritative contract between the off-chain SSRI host (backend) and
 | **identity** | Script hash of the TYPE_ID type script (= Intention `process_type_hash`) |
 
 CID only checks that this type hash appears in **both** inputs and outputs
-(`has_matching_process`). All app-layer rules run in the Process **lock**.
+(`has_matching_process`). All app-layer rules run in the Process **lock**,
+including **TYPE_ID continuity** (Process lock input type hash == output type
+hash) and forbidding that Type ID on non-Process-lock outputs.
+
+**Process lock args** must be distinct per live instance. Empty / shared args
+merge cells into one lock group (`ProcessPairInvalid` on multi-Process txs).
 
 ## DigestOk transaction shape
 
@@ -34,7 +39,8 @@ cell_deps / header_deps / witnesses:
 The backend **must not** rewrite the molecule transaction returned by
 `Process.assemble` (except filling unlock witnesses the Process left empty,
 if the Process documents that). Capacity balance and fee are Process
-responsibilities.
+responsibilities: the example deducts fee from the Process state cell and may
+consume Process-owned funding inputs listed in the draft.
 
 ## SSRI methods
 
@@ -52,8 +58,10 @@ responsibilities.
   `header_deps`, `witnesses`.
 
 Guest resolution of draft inputs uses host-query syscalls (below). The example
-Process recreates the Process cell, emits one beneficiary per Intention, copies
-draft deps, and attaches one empty witness per input.
+Process recreates the Process cell (capacity minus `ASSEMBLE_FEE`), emits one
+beneficiary per Intention, keeps every draft input (including Process-owned
+funding cells), copies draft deps/header_deps, and attaches one empty witness
+per input.
 
 ## Host-query syscalls (ckb-ssri-std)
 
