@@ -140,6 +140,7 @@ pub fn assemble_handler(
         .witnesses(empty_witnesses().pack())
         .build();
 
+    // Weight matches CKB `serialized_size_in_block` (= molecule len + 4).
     let fee = fee_from_tx_size(sized.as_slice().len() as u64);
     let process_cap: u64 = process.cell.output.capacity().unpack();
     let occupied = occupied_capacity_shannons(&process.cell.output, process.cell.data.len());
@@ -198,9 +199,12 @@ fn push_beneficiaries(
     }
 }
 
-fn fee_from_tx_size(size_bytes: u64) -> u64 {
-    // CKB fee = ceil(size_bytes * fee_rate / 1000); fee_rate in shannons/kB.
-    size_bytes.saturating_mul(FEE_RATE).div_ceil(1000)
+fn fee_from_tx_size(molecule_len: u64) -> u64 {
+    // CKB min-fee weight is `serialized_size_in_block` = molecule len + 4
+    // (molecule NUMBER_SIZE offset in the block). Match `FeeRate::fee` (floor)
+    // so assemble never underpays the node min fee at `FEE_RATE`.
+    let weight = molecule_len.saturating_add(4);
+    weight.saturating_mul(FEE_RATE) / 1000
 }
 
 fn occupied_capacity_shannons(output: &CellOutput, data_len: usize) -> u64 {

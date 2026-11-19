@@ -68,17 +68,20 @@ responsibilities.
   (including witness encodings).
 
 Guest resolution of draft inputs uses host-query syscalls (below). The example
-Process recreates the Process cell (capacity minus fee computed from tx size ×
-Process-owned fee rate), emits one beneficiary per Intention, keeps every draft
-input **including `since`**, copies draft deps/header_deps, and attaches one
-empty witness per input. If fee would drop the state cell below occupied
-capacity, assemble returns `CapacityInsufficient` (37).
+Process recreates the Process cell (capacity minus fee =
+`FeeRate(FEE_RATE).fee(serialized_size_in_block)`, with
+`serialized_size_in_block = molecule_len + 4`), emits one beneficiary per
+Intention, keeps every draft input **including `since`**, copies draft
+deps/header_deps, and attaches one empty witness per input (complete witness
+vector — backend must not fill any). If fee would drop the state cell below
+occupied capacity, assemble returns `CapacityInsufficient` (37).
 
 ## Host-query syscalls (ckb-ssri-std)
 
 Process SDK wrappers live in `contracts/cid_process_example/src/host.rs` and
-call **ckb-ssri-std** native-injection syscalls. The offline executor mocks the
-same numbers in `crates/cid-process-executor`.
+call **ckb-ssri-std** native-injection syscalls. The offline executor exposes the
+same catalog through the `HostQuery` trait (`MockHost` implements all seven) in
+`crates/cid-process-executor`.
 
 | Syscall | Number | Purpose |
 |---------|--------|---------|

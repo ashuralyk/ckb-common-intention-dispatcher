@@ -73,8 +73,11 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 
 ## Capacity / fee (example assemble)
 
-`Process.assemble` computes fee as `ceil(tx_bytes × FEE_RATE / 1000)` with
-Process-owned `FEE_RATE = 1000` (testnet `min_fee_rate`) and deducts it from the
-recreated state cell. If the result would be below occupied capacity, assemble
-errors. Draft must include CID, Process, and applicable xUDT cell_deps; the
-example copies them through. Submit returned molecule bytes unchanged.
+`Process.assemble` computes fee as `FeeRate(FEE_RATE).fee(serialized_size_in_block)`
+— i.e. `floor((molecule_len + 4) × FEE_RATE / 1000)` with Process-owned
+`FEE_RATE = 1000` (testnet `min_fee_rate`) — and deducts it from the recreated
+state cell. The `+ 4` matches CKB `serialized_size_in_block` (molecule
+`NUMBER_SIZE` in the block), so the fee is never below the node min fee. If the
+result would be below occupied capacity, assemble errors. Draft must include
+CID, Process, and applicable xUDT cell_deps; the example copies them through.
+Submit returned molecule bytes unchanged.

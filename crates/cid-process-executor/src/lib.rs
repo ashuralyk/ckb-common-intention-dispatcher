@@ -7,7 +7,7 @@ pub mod host_query;
 pub mod types;
 pub mod vm;
 
-pub use host_query::{HostCell, MockHost};
+pub use host_query::{HostCell, HostQuery, HostQueryError, MockHost, Pagination, SearchKey};
 pub use types::{
     build_draft_tx, AssembledTx, DraftCell, ExecutorError, PartialTx, CUSTOM_ERROR_START,
 };
@@ -427,11 +427,37 @@ mod tests {
         // outputs: process recreate + 2 beneficiaries
         assert_eq!(assembled.outputs.len(), 3);
         assert_eq!(assembled.outputs_data.len(), 3);
-        assert_eq!(assembled.witnesses.len(), 3);
+        // Complete witnesses: one per input; backend must not fill any.
+        assert_eq!(assembled.witnesses.len(), assembled.inputs.len());
 
         let cap0: u64 = assembled.outputs[1].capacity().unpack();
         assert_eq!(cap0, 100_000_000_000);
         assert_eq!(assembled.outputs_data[1], vec![0xaa, 0xbb]);
+    }
+
+    #[test]
+    fn test_assemble_fee_meets_feerate_serialized_size_in_block() {
+        use ckb_types::core::FeeRate;
+
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let cells = make_assemble_cells(1);
+        let process_cap_in: u64 = cells[0].output.capacity().unpack();
+        let assembled = executor
+            .assemble_from_cells(&cells)
+            .expect("assemble for fee check");
+        let process_cap_out: u64 = assembled.outputs[0].capacity().unpack();
+        let fee = process_cap_in
+            .checked_sub(process_cap_out)
+            .expect("fee deducted from process recreate");
+        let weight = assembled.as_molecule_bytes().len() as u64 + 4; // serialized_size_in_block
+        let min = FeeRate::from_u64(1000).fee(weight).as_u64();
+        assert!(
+            fee >= min,
+            "assemble fee {fee} must be >= FeeRate(1000).fee(serialized_size_in_block={weight})={min}"
+        );
     }
 
     #[test]

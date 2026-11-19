@@ -1,9 +1,8 @@
-use crate::host_query::MockHost;
+use crate::host_query::{HostQuery, HostQueryError, MockHost};
 use crate::{ExecutorError, CUSTOM_ERROR_START};
 use ckb_hash::blake2b_256;
-use ckb_types::prelude::Entity;
 use ckb_vm::cost_model::estimate_cycles;
-use ckb_vm::registers::{A0, A1, A2, A3, A7};
+use ckb_vm::registers::{A0, A1, A2, A3, A4, A5, A6, A7};
 use ckb_vm::{
     Bytes, CoreMachine, DefaultCoreMachine, DefaultMachineBuilder, Error as VmError, Memory,
     Register, SparseMemory, SupportMachine, Syscalls, ISA_A, ISA_B, ISA_IMC, ISA_MOP,
@@ -33,9 +32,12 @@ const SYS_CKB_READ: u64 = 2606;
 const SYS_INHERITED_FDS: u64 = 2607;
 const SYS_CLOSE: u64 = 2608;
 
-/// ckb-ssri-std host-query catalog (native injection).
+/// ckb-ssri-std host-query catalog (native injection) — full set of 7.
 const SYS_FIND_CELL_BY_OUT_POINT: u64 = 2287;
 const SYS_FIND_CELL_DATA_BY_OUT_POINT: u64 = 2297;
+const SYS_GET_LIVE_CELL: u64 = 2317;
+const SYS_GET_HEADER: u64 = 2327;
+const SYS_GET_HEADER_BY_NUMBER: u64 = 2337;
 const SYS_GET_BLOCK_HASH: u64 = 2347;
 const SYS_GET_CELLS: u64 = 2367;
 
@@ -286,30 +288,75 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
             }
             SYS_FIND_CELL_BY_OUT_POINT => {
                 let out_point = read_out_point_arg(machine)?;
-                let cell = self.host.get_cell(&out_point);
-                let data = cell.as_ref().map(|c| c.output.as_slice());
-                serve_load(machine, data)?;
+                let data = self.host.find_cell_by_out_point(&out_point);
+                serve_load(machine, data.as_deref())?;
                 Ok(true)
             }
             SYS_FIND_CELL_DATA_BY_OUT_POINT => {
                 let out_point = read_out_point_arg(machine)?;
-                let cell = self.host.get_cell(&out_point);
-                let data = cell.as_ref().map(|c| c.data.as_slice());
-                serve_load(machine, data)?;
+                let data = self.host.find_cell_data_by_out_point(&out_point);
+                serve_load(machine, data.as_deref())?;
+                Ok(true)
+            }
+            SYS_GET_LIVE_CELL => {
+                let out_point = read_out_point_arg(machine)?;
+                let with_data = machine.registers()[A3].to_u64() != 0;
+                match self.host.get_live_cell(&out_point, with_data) {
+                    Ok(bytes) => {
+                        serve_load(machine, Some(&bytes))?;
+                    }
+                    Err(HostQueryError::InvalidArgs | HostQueryError::Encoding) => {
+                        machine.set_register(A0, Mac::REG::from_u64(ERRNO_INDEX_OUT_OF_BOUND));
+                    }
+                }
+                Ok(true)
+            }
+            SYS_GET_HEADER => {
+                let ptr = machine.registers()[A2].to_u64();
+                let len = machine.registers()[A3].to_u64();
+                if len != 32 {
+                    machine.set_register(A0, Mac::REG::from_u64(ERRNO_INDEX_OUT_OF_BOUND));
+                    return Ok(true);
+                }
+                let hash = machine.memory_mut().load_bytes(ptr, len)?.to_vec();
+                let data = self.host.get_header(&hash);
+                serve_load(machine, data.as_deref())?;
+                Ok(true)
+            }
+            SYS_GET_HEADER_BY_NUMBER => {
+                let number = machine.registers()[A3].to_u64();
+                let data = self.host.get_header_by_number(number);
+                serve_load(machine, data.as_deref())?;
                 Ok(true)
             }
             SYS_GET_BLOCK_HASH => {
                 let number = machine.registers()[A3].to_u64();
-                let hash = self.host.get_block_hash(number);
+                let hash = HostQuery::get_block_hash(&self.host, number);
                 let data = hash.as_ref().map(|h| h.as_slice());
                 serve_load(machine, data)?;
                 Ok(true)
             }
             SYS_GET_CELLS => {
-                // Minimal mock: empty pagination (serde_molecule empty table).
-                // Counterparties are not required for the example assemble path.
-                let empty = serde_molecule_empty_pagination();
-                serve_load(machine, Some(&empty))?;
+                let sk_ptr = machine.registers()[A2].to_u64();
+                let sk_len = machine.registers()[A3].to_u64();
+                let order = machine.registers()[A4].to_u64();
+                let limit = machine.registers()[A5].to_u64();
+                let cursor_ptr = machine.registers()[A6].to_u64();
+                let search_key = load_guest_bytes(machine, sk_ptr, sk_len)?.to_vec();
+                let cursor_len_bytes = machine.memory_mut().load_bytes(cursor_ptr, 4)?;
+                let cursor_len =
+                    u32::from_le_bytes(cursor_len_bytes.as_ref().try_into().unwrap()) as u64;
+                let last_cursor = if cursor_len == 0 {
+                    Vec::new()
+                } else {
+                    load_guest_bytes(machine, cursor_ptr + 4, cursor_len)?.to_vec()
+                };
+                match self.host.get_cells(&search_key, order, limit, &last_cursor) {
+                    Ok(bytes) => serve_load(machine, Some(&bytes))?,
+                    Err(HostQueryError::InvalidArgs | HostQueryError::Encoding) => {
+                        machine.set_register(A0, Mac::REG::from_u64(ERRNO_INDEX_OUT_OF_BOUND));
+                    }
+                }
                 Ok(true)
             }
             // Stub implementations for syscalls we don't need for SSRI but might be called
@@ -348,17 +395,6 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
             _ => Ok(false),
         }
     }
-}
-
-fn serde_molecule_empty_pagination() -> Vec<u8> {
-    // Pagination { objects: [], last_cursor: [] } via serde_molecule table.
-    // Encode with a tiny hand-built empty dynvec table: use serde_molecule if
-    // available; otherwise a minimal valid empty response the guest tolerates.
-    // Guest maps decode failure to HostQueryFailed — empty objects is enough.
-    // Use serde_molecule through a simple struct if the host crate adds the dep;
-    // for now return a zero-length objects encoding that decode may reject →
-    // assemble does not call get_cells in the happy path.
-    Vec::new()
 }
 
 /// Convert method path to hex-encoded method ID for argv[0]
