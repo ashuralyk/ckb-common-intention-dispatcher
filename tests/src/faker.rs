@@ -31,7 +31,11 @@ pub use ckb_common_intention_dispatcher_calculator::CONTRACT_NAME;
 
 pub const CONTRACT_BIN: &str = "../build/release";
 pub const XUDT_BIN: &str = "./binaries";
-pub const CKB_CAPACITY: u64 = 200_000_000_000;
+/// Default test Intention / cell capacity.
+///
+/// Uses the example Process deposit minimum (400 CKB) so DigestOk deposit
+/// paths and Intention creates (floor 300 CKB) share one fixture constant.
+pub const CKB_CAPACITY: u64 = cid_process_example_calculator::MIN_DEPOSIT_CAPACITY;
 pub const XUDT_AMOUNT: u128 = 1_000;
 pub const PACK_BLOCK: u64 = 1_000;
 pub const USER_CELL_CAPACITY: u64 = 100_000_000_000;

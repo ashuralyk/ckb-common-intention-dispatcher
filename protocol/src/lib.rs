@@ -42,6 +42,40 @@ pub const TIMEOUT_BLOCKS: u64 = 10800;
 /// avoids a v0.1 encoding/version break.
 pub const MAX_REFUND_FEE: u64 = 1_000_000;
 
+/// Default minimum Intention cell capacity (shannons): **300 CKB**.
+///
+/// Intention cells are created with an absolute capacity (`AddOutputCell` /
+/// `CellOutputEx::new_from_scripts` with `absolute_capacity` / explicit
+/// capacity). That value must cover occupied capacity for typical CID lock
+/// args (secp blake160 user + beneficiary script payload ≈ 248 CKB;
+/// multisig-scale args ≈ 293 CKB). Dual-written: CLI templates/defaults,
+/// off-chain create checks, and Process deposit-policy validation. Intention
+/// Create does **not** run on-chain CID Verify, so this floor is enforced
+/// off-chain and by Process deposit rules — not by the CID lock.
+pub const DEFAULT_MIN_INTENTION_CAPACITY: u64 = 300_0000_0000;
+
+/// True when a Process CKB-deposit minimum is **strictly greater** than
+/// [`DEFAULT_MIN_INTENTION_CAPACITY`].
+///
+/// Process authors: for every CKB deposit action fulfilled by consuming an
+/// Intention's capacity, declare `min_deposit` that satisfies this so a
+/// minimum deposit is always a createable Intention and can fund the deposit
+/// alone (no extra capacity input).
+pub const fn deposit_min_satisfies_intention_floor(min_deposit: u64) -> bool {
+    min_deposit > DEFAULT_MIN_INTENTION_CAPACITY
+}
+
+/// Process-author contract for CKB deposits funded by consuming an Intention.
+///
+/// Implementors must set [`CkbDepositPolicy::MIN_DEPOSIT_CAPACITY`] such that
+/// `deposit_min_satisfies_intention_floor(Self::MIN_DEPOSIT_CAPACITY)` holds
+/// (use a `const { assert!(...) }` / `const _: () = assert!(...)` beside the
+/// impl). The example Process lock/assemble enforce that floor at runtime.
+pub trait CkbDepositPolicy {
+    /// Minimum CKB capacity (shannons) accepted for a deposit Intention.
+    const MIN_DEPOSIT_CAPACITY: u64;
+}
+
 /// True when a DigestIncompatible refund output's CKB capacity is within the
 /// per-Intention fee ceiling (token amount/type checked separately):
 /// - `got <= want` (no capacity inflation on the refund cell)
@@ -253,6 +287,20 @@ mod tests {
         };
         let payload = Payload::from_script(&script).unwrap();
         assert_eq!(payload.to_script().unwrap(), script);
+    }
+
+    #[test]
+    fn deposit_min_must_exceed_intention_floor() {
+        assert!(!deposit_min_satisfies_intention_floor(
+            DEFAULT_MIN_INTENTION_CAPACITY
+        ));
+        assert!(!deposit_min_satisfies_intention_floor(
+            DEFAULT_MIN_INTENTION_CAPACITY.saturating_sub(1)
+        ));
+        assert!(deposit_min_satisfies_intention_floor(
+            DEFAULT_MIN_INTENTION_CAPACITY + 1
+        ));
+        const _: () = assert!(DEFAULT_MIN_INTENTION_CAPACITY == 300_0000_0000);
     }
 
     #[test]

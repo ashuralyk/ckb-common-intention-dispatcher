@@ -125,6 +125,17 @@ the owner updates it post-redeploy.
 on-chain and off-chain. Pack height is the block that committed the Intention;
 judge height is the newest header dep.
 
+**Intention capacity floor / Process deposits:** Intention cells use absolute
+capacity (`AddOutputCell` / `new_from_scripts`). `DEFAULT_MIN_INTENTION_CAPACITY`
+(= **300 CKB**) is the dual-written default floor covering typical occupied
+capacity for CID lock args (CLI templates and `create_intention` enforce it).
+Process authors with CKB deposit actions fulfilled by consuming an Intention
+must declare a deposit minimum **strictly greater** than that floor
+(`CkbDepositPolicy` / `deposit_min_satisfies_intention_floor`) so a minimum
+deposit Intention is always createable and can fund the deposit alone. The
+example Process uses `MIN_DEPOSIT_CAPACITY` = **400 CKB** and rejects smaller
+CKB DigestOk Intentions on-chain and in assemble (`DepositBelowMinimum` = 39).
+
 ## Build and test
 
 This is a Cinnabar project (not Capsule / `deployment.toml`).

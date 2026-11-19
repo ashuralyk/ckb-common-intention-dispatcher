@@ -27,6 +27,35 @@ pub const PROCESS_CONTRACT_NAME: &str = "cid_process_example";
 /// Default Process state cell capacity: 300 CKB.
 pub const DEFAULT_PROCESS_STATE_CAPACITY: u64 = 300_0000_0000;
 
+/// Re-export Intention capacity floor (dual-written in `cid-protocol`).
+pub use cid_protocol::{
+    deposit_min_satisfies_intention_floor, CkbDepositPolicy, DEFAULT_MIN_INTENTION_CAPACITY,
+};
+
+/// Example Process minimum CKB deposit (shannons): **400 CKB**.
+///
+/// Dual-written with `contracts/cid_process_example/src/deposit.rs`. Must stay
+/// strictly above [`DEFAULT_MIN_INTENTION_CAPACITY`] so a minimum deposit can be
+/// fulfilled by consuming an Intention whose capacity covers occupied floor.
+pub const MIN_DEPOSIT_CAPACITY: u64 = 400_0000_0000;
+
+/// Example Process [`CkbDepositPolicy`] (host-side mirror of the on-chain const).
+pub struct ExampleDepositPolicy;
+
+impl CkbDepositPolicy for ExampleDepositPolicy {
+    const MIN_DEPOSIT_CAPACITY: u64 = MIN_DEPOSIT_CAPACITY;
+}
+
+const _: () = assert!(deposit_min_satisfies_intention_floor(
+    ExampleDepositPolicy::MIN_DEPOSIT_CAPACITY
+));
+
+/// True when a CKB-only Intention capacity meets the example deposit minimum.
+#[inline]
+pub fn ckb_deposit_capacity_ok(capacity: u64, has_type_script: bool) -> bool {
+    has_type_script || capacity >= MIN_DEPOSIT_CAPACITY
+}
+
 /// Fee rate (shannons/KW) used when balancing Process state create txs.
 /// Matches testnet `min_fee_rate` and the example Process assemble fee rate.
 pub const CREATE_FEE_RATE: u64 = 1000;
@@ -260,6 +289,16 @@ fn build_draft_and_known(
         return Err(CalculatorError::Other(
             "the example Process does not support extra funding inputs".into(),
         ));
+    }
+    for intention in intentions {
+        let has_type = intention.type_script.is_some();
+        if !ckb_deposit_capacity_ok(intention.capacity, has_type) {
+            return Err(CalculatorError::Other(format!(
+                "CKB deposit Intention capacity {} is below Process MIN_DEPOSIT_CAPACITY {} \
+                 (must be > DEFAULT_MIN_INTENTION_CAPACITY {})",
+                intention.capacity, MIN_DEPOSIT_CAPACITY, DEFAULT_MIN_INTENTION_CAPACITY
+            )));
+        }
     }
     let mut known = KnownCells::new();
     let mut inputs = Vec::with_capacity(1 + intentions.len());
@@ -938,6 +977,83 @@ mod tests {
         assert_eq!(lock_code, expected_lock_code);
         let typ = skeleton.outputs[0].type_script().expect("TYPE_ID");
         assert_eq!(typ.args().raw_data().len(), 32);
+    }
+
+    #[test]
+    fn test_deposit_policy_rejects_min_at_or_below_intention_floor() {
+        assert!(!deposit_min_satisfies_intention_floor(
+            DEFAULT_MIN_INTENTION_CAPACITY
+        ));
+        assert!(!deposit_min_satisfies_intention_floor(0));
+        assert!(deposit_min_satisfies_intention_floor(MIN_DEPOSIT_CAPACITY));
+        assert!(ckb_deposit_capacity_ok(MIN_DEPOSIT_CAPACITY, false));
+        assert!(!ckb_deposit_capacity_ok(MIN_DEPOSIT_CAPACITY - 1, false));
+        assert!(!ckb_deposit_capacity_ok(
+            DEFAULT_MIN_INTENTION_CAPACITY,
+            false
+        ));
+        // xUDT Intentions are not CKB deposits; capacity floor is not applied here.
+        assert!(ckb_deposit_capacity_ok(1, true));
+    }
+
+    #[test]
+    fn test_assemble_rejects_ckb_deposit_below_process_minimum() {
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!("Skipping test: binary not built at {bin_path}");
+            return;
+        }
+        let rpc = FakeRpcClient::default();
+        let (process, mut intentions) = sample_process_and_intention();
+        // At the Intention occupied floor but below Process MIN_DEPOSIT.
+        intentions[0].capacity = DEFAULT_MIN_INTENTION_CAPACITY;
+        let err = process_digest_ok_with_extras(
+            &rpc,
+            intentions,
+            process,
+            AssembleExtras {
+                funding_cells: vec![],
+                cell_deps: vec![sample_code_dep()],
+            },
+            bin_dir,
+        )
+        .err()
+        .expect("deposit at DEFAULT_MIN_INTENTION_CAPACITY must fail Process min");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("MIN_DEPOSIT_CAPACITY") || msg.contains("DepositBelowMinimum"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_assemble_deposit_by_consuming_intention_at_min() {
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!("Skipping test: binary not built at {bin_path}");
+            return;
+        }
+        let rpc = FakeRpcClient::default();
+        let (process, mut intentions) = sample_process_and_intention();
+        intentions[0].capacity = MIN_DEPOSIT_CAPACITY;
+        let (skeleton, _, _) = process_digest_ok_with_extras(
+            &rpc,
+            intentions,
+            process,
+            AssembleExtras {
+                funding_cells: vec![],
+                cell_deps: vec![sample_code_dep()],
+            },
+            bin_dir,
+        )
+        .expect("min deposit Intention must assemble");
+        // Beneficiary output is funded by consuming the Intention capacity.
+        assert_eq!(
+            skeleton.outputs[1].capacity_shannons(),
+            MIN_DEPOSIT_CAPACITY
+        );
     }
 
     #[test]

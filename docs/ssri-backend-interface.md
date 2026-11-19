@@ -75,8 +75,10 @@ vector — backend must not fill any). If fee would drop the state cell below
 occupied capacity, assemble returns `CapacityInsufficient` (37).
 
 The example pays the fee from the Process state and rejects extra funding inputs
-with `UnsupportedFundingLock` (38) when invoked directly. The calculator
-rejects a non-empty `funding_cells` list before building the draft.
+with `UnsupportedFundingLock` (38) when invoked directly. CKB Intention
+capacity below Process `MIN_DEPOSIT_CAPACITY` returns `DepositBelowMinimum`
+(39). The calculator rejects a non-empty `funding_cells` list before building
+the draft, and rejects CKB deposits below that minimum.
 
 ## Host-query syscalls (ckb-ssri-std)
 

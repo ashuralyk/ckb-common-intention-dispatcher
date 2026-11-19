@@ -347,10 +347,18 @@ fn create_signed_intention_bundle_inner(
             "sighash_deps must include secp code and data cells".into(),
         ));
     }
-    if req.intention_capacity == 0 || req.fee_shannons == 0 {
-        return Err(CliError::InvalidRequest(
-            "intention_capacity and fee_shannons must be > 0".into(),
-        ));
+    if req.fee_shannons == 0 {
+        return Err(CliError::InvalidRequest("fee_shannons must be > 0".into()));
+    }
+    if req.intention_capacity
+        < ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY
+    {
+        return Err(CliError::InvalidRequest(format!(
+            "intention_capacity {} is below DEFAULT_MIN_INTENTION_CAPACITY {} \
+             (covers typical Intention occupied capacity; use at least 300 CKB)",
+            req.intention_capacity,
+            ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY
+        )));
     }
 
     let funding_lock = packed_script(&req.funding.lock)?;

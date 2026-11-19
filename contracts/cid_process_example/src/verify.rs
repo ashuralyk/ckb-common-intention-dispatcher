@@ -243,7 +243,17 @@ fn parse_payment(
         return Ok(None);
     };
     let lock = packed_script(&beneficiary_cid)?;
-    Ok(Some(parse_transfer(index, lock)?))
+    let obligation = parse_transfer(index, lock)?;
+    // DigestOk CKB deposits must meet the Process deposit floor so the
+    // Intention capacity alone can fund the beneficiary output. Refunds
+    // (DigestIncompatible / TimeoutBurn) do not use this path.
+    if !crate::deposit::ckb_deposit_capacity_ok(
+        obligation.capacity,
+        obligation.type_script.is_some(),
+    ) {
+        return Err(ProcessError::DepositBelowMinimum);
+    }
+    Ok(Some(obligation))
 }
 
 fn parse_transfer(

@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
 
+mod deposit;
 mod host;
 mod ssri;
 mod verify;
+
+pub use deposit::MIN_DEPOSIT_CAPACITY;
 
 use ckb_cinnabar_verifier::{cinnabar_main, define_errors, CUSTOM_ERROR_START, TREE_ROOT};
 
@@ -16,6 +19,7 @@ const ERROR_TYPE_ID_INVALID: i8 = 35;
 const ERROR_HOST_QUERY_FAILED: i8 = 36;
 const ERROR_CAPACITY_INSUFFICIENT: i8 = 37;
 const ERROR_UNSUPPORTED_FUNDING_LOCK: i8 = 38;
+const ERROR_DEPOSIT_BELOW_MINIMUM: i8 = 39;
 
 define_errors!(ProcessError, {
     ReadFailed = CUSTOM_ERROR_START,  // 20
@@ -30,6 +34,8 @@ define_errors!(ProcessError, {
     CapacityInsufficient = ERROR_CAPACITY_INSUFFICIENT, // 37
     // The example Process only spends its state and Intention inputs.
     UnsupportedFundingLock = ERROR_UNSUPPORTED_FUNDING_LOCK, // 38
+    // CKB deposit Intention capacity below Process MIN_DEPOSIT_CAPACITY.
+    DepositBelowMinimum = ERROR_DEPOSIT_BELOW_MINIMUM, // 39
 });
 
 #[derive(Default)]

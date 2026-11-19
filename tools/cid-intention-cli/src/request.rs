@@ -9,6 +9,9 @@ pub struct CreateRequest {
     /// `testnet` or `fake` (unit tests). Mainnet rejected in v1.
     pub network: String,
     pub fee_shannons: u64,
+    /// Absolute Intention capacity (shannons). Default: [`default_intention_capacity`]
+    /// (= `DEFAULT_MIN_INTENTION_CAPACITY`, 300 CKB) when omitted.
+    #[serde(default = "default_intention_capacity")]
     pub intention_capacity: u64,
     pub funding: FundingCell,
     /// Live CID lock **code** cell. Must include Type ID `type_script` so the
@@ -49,6 +52,10 @@ pub struct CreateProcessRequest {
 
 fn default_process_capacity() -> u64 {
     cid_process_example_calculator::DEFAULT_PROCESS_STATE_CAPACITY
+}
+
+fn default_intention_capacity() -> u64 {
+    ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -5,7 +5,7 @@ use std::path::Path;
 use cid_process_example_calculator::{
     assembled_tx_round_trip_bytes, process_digest_ok, process_digest_ok_with_extras,
     process_digest_ok_with_process, AssembleExtras, DraftCellDep, IntentionCell, ProcessStateCell,
-    PROCESS_CONTRACT_NAME,
+    DEFAULT_MIN_INTENTION_CAPACITY, MIN_DEPOSIT_CAPACITY, PROCESS_CONTRACT_NAME,
 };
 use ckb_cinnabar_calculator::{
     address::{Address, AddressPayload},
@@ -42,6 +42,7 @@ const MAX_CYCLES: u64 = 50_000_000;
 const ERROR_BENEFICIARY_MISSING: i8 = 32;
 const ERROR_BENEFICIARY_AMOUNT_MISMATCH: i8 = 33;
 const ERROR_TYPE_ID_INVALID: i8 = 35;
+const ERROR_DEPOSIT_BELOW_MINIMUM: i8 = 39;
 
 fn require_binaries() {
     let cid_path = format!("{CONTRACT_BIN}/{CID_CONTRACT_NAME}");
@@ -521,6 +522,73 @@ async fn transfer_matching_beneficiary_succeeds() {
     verify(&rpc, skeleton, vec![])
         .await
         .expect("matching beneficiary Script/capacity/data must pass");
+}
+
+/// Happy path: CKB deposit is fulfilled by consuming the Intention cell's
+/// capacity into the beneficiary (no extra funding input).
+#[tokio::test]
+async fn deposit_fulfilled_by_consuming_intention() {
+    require_binaries();
+    const _: () = assert!(MIN_DEPOSIT_CAPACITY > DEFAULT_MIN_INTENTION_CAPACITY);
+    let mut rpc = FakeRpcClient::default();
+    let skeleton = apply_transfer(&mut rpc, dest_lock(), MIN_DEPOSIT_CAPACITY, vec![]);
+    assert_eq!(
+        skeleton.inputs[0].output.capacity_shannons(),
+        MIN_DEPOSIT_CAPACITY,
+        "Intention input carries the deposit"
+    );
+    assert_eq!(
+        skeleton.outputs[1].capacity_shannons(),
+        MIN_DEPOSIT_CAPACITY,
+        "beneficiary is funded from Intention capacity"
+    );
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("deposit via Intention consume must pass on-chain");
+}
+
+/// Rejection: Intention capacity at the protocol Intention floor but below the
+/// Process deposit minimum cannot DigestOk.
+#[tokio::test]
+async fn reject_deposit_at_or_below_intention_capacity_floor() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
+    let args = beneficiary_args(process_hash, &dest_script());
+    // Exactly DEFAULT_MIN_INTENTION_CAPACITY: createable Intention, but below
+    // Process MIN_DEPOSIT_CAPACITY.
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        args,
+        DEFAULT_MIN_INTENTION_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: DEFAULT_MIN_INTENTION_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("deposit at Intention floor must fail Process min");
+    assert_eq!(exit(err), ERROR_DEPOSIT_BELOW_MINIMUM);
 }
 
 #[tokio::test]

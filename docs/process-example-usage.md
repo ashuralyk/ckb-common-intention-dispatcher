@@ -73,6 +73,29 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 | 36 | `HostQueryFailed` |
 | 37 | `CapacityInsufficient` (fee would drop state below occupied capacity) |
 | 38 | `UnsupportedFundingLock` (extra funding input) |
+| 39 | `DepositBelowMinimum` (CKB Intention capacity &lt; Process `MIN_DEPOSIT_CAPACITY`) |
+
+## CKB deposit minimum (Intention consume)
+
+Intention cells are created with an **absolute** capacity that must cover
+occupied capacity for typical CID lock args. The shared protocol constant
+`DEFAULT_MIN_INTENTION_CAPACITY` (= **300 CKB**) is the default floor used by
+CLI templates and off-chain create checks.
+
+This example Process treats DigestOk **CKB** Intentions as deposits fulfilled by
+consuming the Intention into the beneficiary. Process authors must declare a
+deposit minimum **strictly greater** than that floor
+(`deposit_min_satisfies_intention_floor` / `CkbDepositPolicy`) so a minimum
+deposit is always a createable Intention and can fund the deposit alone:
+
+| Constant | Value | Where |
+|----------|-------|--------|
+| `DEFAULT_MIN_INTENTION_CAPACITY` | 300 CKB | `cid-protocol` |
+| `MIN_DEPOSIT_CAPACITY` | 400 CKB | example Process (on-chain + calculator) |
+
+Enforced in Process lock Verify (DigestOk), `Process.assemble`, and the
+calculator draft path. xUDT Intentions are not subject to this CKB deposit
+floor (token amount rules are separate).
 
 ## Capacity / fee (example assemble)
 

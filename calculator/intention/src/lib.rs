@@ -152,6 +152,11 @@ impl<T: RPC> Operation<T> for AddInputAssetDeps {
 
 /// Create an Intention cell. Lock Create does **not** run CID Verify.
 ///
+/// `capacity` is absolute (`AddOutputCell.absolute_capacity = true`) and must
+/// be at least [`DEFAULT_MIN_INTENTION_CAPACITY`] so the cell covers typical
+/// occupied capacity. `AddOutputCell` still rejects values below the concrete
+/// occupied floor for the resolved lock args.
+///
 /// `xudt`: when set, attach the official xUDT type + 16-byte amount and the
 /// xUDT celldep. CKB-only path uses empty data and `type_script = None`.
 pub fn create_intention<T: RPC>(
@@ -160,9 +165,11 @@ pub fn create_intention<T: RPC>(
     capacity: u64,
     xudt: Option<(ScriptEx, u128)>,
 ) -> Instruction<T> {
-    let mut ops: Vec<Box<dyn Operation<T>>> = vec![Box::new(AddInputCellByAddress {
+    let mut ops: Vec<Box<dyn Operation<T>>> =
+        vec![Box::new(ValidateIntentionCapacity { capacity })];
+    ops.push(Box::new(AddInputCellByAddress {
         address: payer.clone(),
-    })];
+    }));
     let (type_script, data) = match xudt {
         Some((type_script, amount)) => {
             ops.push(Box::new(AddXudtCelldep {}));
@@ -184,6 +191,29 @@ pub fn create_intention<T: RPC>(
         type_id: false,
     }));
     Instruction::new(ops)
+}
+
+/// Off-chain guard: Intention absolute capacity ≥ protocol default floor.
+struct ValidateIntentionCapacity {
+    capacity: u64,
+}
+
+impl<T: RPC> Operation<T> for ValidateIntentionCapacity {
+    fn run(
+        self: Box<Self>,
+        _rpc: &T,
+        _skeleton: &mut TransactionSkeleton,
+        _: &mut Log,
+    ) -> Result<()> {
+        if self.capacity < DEFAULT_MIN_INTENTION_CAPACITY {
+            return Err(CalculatorError::Other(format!(
+                "intention capacity {} is below DEFAULT_MIN_INTENTION_CAPACITY {} \
+                 (covers typical occupied capacity for CID lock args)",
+                self.capacity, DEFAULT_MIN_INTENTION_CAPACITY
+            )));
+        }
+        Ok(())
+    }
 }
 
 // Consume the Process cell and recreate its state, rather than referencing it.
@@ -315,10 +345,11 @@ fn refund_burn<T: RPC>(
 }
 
 pub use cid_protocol::{
-    fee_covers_shortfalls, refund_capacity_allowed, CidArgs, CidEntry, Payload,
-    Script as CidScript, CID_VERSION, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING,
-    ERROR_MIXED_CID_LOCK, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH,
-    ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED,
-    ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET, HOP_DIGEST_INCOMPATIBLE,
-    HOP_DIGEST_OK, HOP_TIMEOUT_BURN, MAX_REFUND_FEE, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
+    deposit_min_satisfies_intention_floor, fee_covers_shortfalls, refund_capacity_allowed, CidArgs,
+    CidEntry, CkbDepositPolicy, Payload, Script as CidScript, CID_VERSION,
+    DEFAULT_MIN_INTENTION_CAPACITY, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING, ERROR_MIXED_CID_LOCK,
+    ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH, ERROR_REFUND_ASSET_MISMATCH,
+    ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED, ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE,
+    ERROR_ZERO_ASSET, HOP_DIGEST_INCOMPATIBLE, HOP_DIGEST_OK, HOP_TIMEOUT_BURN, MAX_REFUND_FEE,
+    TIMEOUT_BLOCKS, XUDT_CODE_HASH,
 };

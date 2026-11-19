@@ -96,7 +96,10 @@ fn create_signed_tx_shape_fee_witness_and_args() {
         16,
     )
     .unwrap();
-    assert_eq!(cap, 200_000_000_000);
+    assert_eq!(
+        cap,
+        ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY
+    );
 
     let args = transaction["outputs"][0]["lock"]["args"].as_str().unwrap();
     let args_bytes = hex::decode(args.trim_start_matches("0x")).unwrap();
@@ -369,6 +372,24 @@ fn create_intention_fee_covers_rate_1000_serialized_size_in_block() {
     assert!(paid >= need, "paid={paid} need={need} size={size}");
     // Requested fee_shannons=10000 should win over min when larger.
     assert_eq!(paid, req.fee_shannons.max(need));
+}
+
+#[test]
+fn create_rejects_intention_capacity_below_default_min() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    req.intention_capacity =
+        ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY - 1;
+    let err = create_signed_intention(&req, &secret).unwrap_err();
+    match err {
+        CliError::InvalidRequest(msg) => {
+            assert!(
+                msg.contains("DEFAULT_MIN_INTENTION_CAPACITY"),
+                "unexpected message: {msg}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
 }
 
 #[test]
