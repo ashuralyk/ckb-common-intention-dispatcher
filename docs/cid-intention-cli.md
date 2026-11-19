@@ -89,6 +89,12 @@ After a migrate that keeps the same Type ID, keep `type_script.args` (and thus
 cell. Intention args encoding is unchanged. This CLI only creates Intentions —
 it does not assemble refunds.
 
+`send` (after chain/genesis guards) fetches each `cell_deps` live cell and
+requires every Type-ID Intention output lock (`hash_type=type`) to match a
+live dep cell whose type script is TYPE_ID and whose script hash equals the
+lock `code_hash`. That catches a correct live outpoint paired with mistyped
+Type ID args in the offline request (create alone cannot see the chain).
+
 ## Usage
 
 ```bash
@@ -107,7 +113,7 @@ cargo run -p cid-intention-cli -- send \
 ## Unavailable in v1 / documented gaps
 
 - No automatic live-cell / indexer coin selection
-- `create` does not validate cells against a node
+- `create` does not validate cells against a node (live Type ID check is on `send`)
 - ELF / deployment `data_hash` reproducibility across machines is out of scope
 - Deployment JSON is not rewritten by this tool
 - Agents/CI must **not** call public testnet/mainnet RPCs; use mocks or a private local node when exercising `send`

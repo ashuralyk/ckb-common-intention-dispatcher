@@ -3,11 +3,12 @@
 //! Never used by `create`. Development/CI must point `--rpc-url` at a local mock,
 //! not a public endpoint.
 
-use ckb_cinnabar_calculator::re_exports::ckb_jsonrpc_types;
+use ckb_cinnabar_calculator::{re_exports::ckb_jsonrpc_types, TYPE_ID_CODE_HASH};
 use serde_json::{json, Value};
 
-use crate::build::CliError;
-use crate::hexutil::{decode_hash32, encode_hex};
+use crate::build::{process_type_hash_of, CliError};
+use crate::hexutil::{decode_hash32, decode_hex, encode_hex};
+use crate::request::ScriptJson;
 
 /// Options for `send` (no private key).
 #[derive(Debug, Clone)]
@@ -162,6 +163,120 @@ fn assert_allowed_testnet_chain(chain_info: &Value) -> Result<(), CliError> {
     )))
 }
 
+fn script_json_from_rpc(v: &Value) -> Result<ScriptJson, CliError> {
+    let code_hash = v
+        .get("code_hash")
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| CliError::Rpc("live cell type missing code_hash".into()))?
+        .to_string();
+    let hash_type = v
+        .get("hash_type")
+        .and_then(|h| h.as_str())
+        .ok_or_else(|| CliError::Rpc("live cell type missing hash_type".into()))?
+        .to_string();
+    let args = v
+        .get("args")
+        .and_then(|a| a.as_str())
+        .ok_or_else(|| CliError::Rpc("live cell type missing args".into()))?
+        .to_string();
+    Ok(ScriptJson {
+        code_hash,
+        hash_type,
+        args,
+    })
+}
+
+/// Collect `code_hash` values of output locks that use `hash_type=type`
+/// (CLI Intention create locks CID by Type ID).
+fn type_hash_lock_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, CliError> {
+    let outputs = tx
+        .get("outputs")
+        .and_then(|o| o.as_array())
+        .ok_or_else(|| CliError::InvalidRequest("transaction missing outputs".into()))?;
+    let mut out = Vec::new();
+    for cell in outputs {
+        let lock = cell
+            .get("lock")
+            .ok_or_else(|| CliError::InvalidRequest("transaction output missing lock".into()))?;
+        let ht = lock.get("hash_type").and_then(|h| h.as_str()).unwrap_or("");
+        if !ht.eq_ignore_ascii_case("type") {
+            continue;
+        }
+        let code = lock
+            .get("code_hash")
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| CliError::InvalidRequest("type lock missing code_hash".into()))?;
+        out.push(decode_hash32(code)?);
+    }
+    Ok(out)
+}
+
+/// Fail-closed: every Type-ID Intention lock in `tx` must match a **live**
+/// celldep whose type script is TYPE_ID and whose script hash equals the lock
+/// `code_hash`. Offline `create` only consistency-checks the request against
+/// itself; a mistyped Type ID args with the correct outpoint would otherwise
+/// broadcast a stranded Intention (create does not execute the output lock).
+fn assert_live_cid_type_id_matches_intention(url: &str, tx: &Value) -> Result<(), CliError> {
+    let want_hashes = type_hash_lock_code_hashes(tx)?;
+    if want_hashes.is_empty() {
+        return Ok(());
+    }
+    let cell_deps = tx
+        .get("cell_deps")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| {
+            CliError::NetworkGuard(
+                "Type ID Intention lock present but transaction has no cell_deps".into(),
+            )
+        })?;
+    if cell_deps.is_empty() {
+        return Err(CliError::NetworkGuard(
+            "Type ID Intention lock present but cell_deps is empty".into(),
+        ));
+    }
+
+    let mut live_type_ids = Vec::new();
+    for dep in cell_deps {
+        let out_point = dep
+            .get("out_point")
+            .ok_or_else(|| CliError::InvalidRequest("cell_dep missing out_point".into()))?;
+        let live = rpc_call(url, "get_live_cell", json!([out_point, false]))?;
+        let status = live.get("status").and_then(|s| s.as_str()).unwrap_or("");
+        if status != "live" {
+            continue;
+        }
+        let typ = live
+            .get("cell")
+            .and_then(|c| c.get("output"))
+            .and_then(|o| o.get("type"));
+        let Some(typ) = typ.filter(|t| !t.is_null()) else {
+            continue;
+        };
+        let sj = script_json_from_rpc(typ)?;
+        if sj.parse_hash_type()? != 1 {
+            continue;
+        }
+        let code = decode_hash32(&sj.code_hash)?;
+        if code != TYPE_ID_CODE_HASH {
+            continue;
+        }
+        if decode_hex(&sj.args)?.len() != 32 {
+            continue;
+        }
+        live_type_ids.push(process_type_hash_of(&sj)?);
+    }
+
+    for want in &want_hashes {
+        if !live_type_ids.iter().any(|got| got == want) {
+            return Err(CliError::NetworkGuard(
+                "Intention lock Type ID does not match any live celldep TYPE_ID script hash; refusing send"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Submit a signed tx JSON to a CKB JSON-RPC endpoint after testnet/genesis checks.
 pub fn send_signed_transaction(opts: &SendOptions, signed: &Value) -> Result<String, CliError> {
     assert_testnet_guards(opts)?;
@@ -182,6 +297,8 @@ pub fn send_signed_transaction(opts: &SendOptions, signed: &Value) -> Result<Str
             expected: encode_hex(&want),
         });
     }
+
+    assert_live_cid_type_id_matches_intention(&opts.rpc_url, &tx)?;
 
     let result = rpc_call(
         &opts.rpc_url,

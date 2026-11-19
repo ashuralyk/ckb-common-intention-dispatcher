@@ -101,11 +101,16 @@ output to the User Lock must be the refund; with a fee sponsor, keep
 data hash. Rebuild and migrate under the **same Type ID**; new Intentions must
 lock with `hash_type=type` and `code_hash=type_id` (see Intention CLI) so they
 track the live code cell across upgrades. Existing cells locked to an older
-**data hash** (`data1`) stay on that binary until spent. **TimeoutBurn stays
-exact** after redeploy (only DigestIncompatible gains the fee-bound haircut).
-See `deployment/README.md` for the expected RISC-V `data_hash` and how to
-verify it; `deployment/testnet/` JSON may still list a stale deployed hash —
-do not treat that as current until the owner updates it post-redeploy.
+**data hash** (`data1`) stay bound to that binary until spent — but spending
+them still requires a **live CellDep** that contains those exact old bytes
+(CKB code locating). Before a Type-ID migration that consumes the only live
+copy of the old binary: settle (digest/refund/timeout) those Intentions first,
+**or** keep the exact old binary available in a separate live code cell that
+spends can CellDep. **TimeoutBurn stays exact** after redeploy (only
+DigestIncompatible gains the fee-bound haircut). See `deployment/README.md`
+for the expected RISC-V `data_hash` and how to verify it; `deployment/testnet/`
+JSON may still list a stale deployed hash — do not treat that as current until
+the owner updates it post-redeploy.
 
 `TIMEOUT_BLOCKS = 10800` and `MAX_REFUND_FEE = 1_000_000` are dual-written
 on-chain and off-chain. Pack height is the block that committed the Intention;

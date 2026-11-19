@@ -7,11 +7,43 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use cid_intention_cli::{create_signed_intention, send_signed_transaction, CliError, SendOptions};
+use cid_intention_cli::{
+    create_signed_intention, send_signed_transaction, CliError, ScriptJson, SendOptions,
+};
 use ckb_cinnabar_calculator::re_exports::ckb_jsonrpc_types;
 use serde_json::{json, Value};
 
 use common::{fixture_request, key};
+
+fn live_typed_cell(type_script: &ScriptJson) -> Value {
+    json!({
+        "status": "live",
+        "cell": {
+            "output": {
+                "capacity": "0x1",
+                "lock": {"code_hash": h256(0x00), "hash_type": "data", "args": "0x"},
+                "type": {
+                    "code_hash": type_script.code_hash,
+                    "hash_type": type_script.hash_type,
+                    "args": type_script.args
+                }
+            }
+        }
+    })
+}
+
+fn live_untyped_cell() -> Value {
+    json!({
+        "status": "live",
+        "cell": {
+            "output": {
+                "capacity": "0x1",
+                "lock": {"code_hash": h256(0x00), "hash_type": "data", "args": "0x"},
+                "type": null
+            }
+        }
+    })
+}
 
 type MockHandler = Box<dyn FnMut(&str, &Value) -> Value + Send>;
 
@@ -146,12 +178,23 @@ fn create_output_sends_after_stripping_view_metadata() {
     let tx_hash = h256(0xCD);
     let genesis_c = genesis.clone();
     let tx_hash_c = tx_hash.clone();
+    let cid_tx = req.cid_lock_dep.tx_hash.clone();
+    let cid_type = req.cid_lock_dep.type_script.clone().unwrap();
     let saw_send = Arc::new(Mutex::new(false));
     let saw_send_c = Arc::clone(&saw_send);
     let url = spawn_mock(Arc::new(Mutex::new(Box::new(
         move |method, params| match method {
             "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
             "get_block_hash" => json!(genesis_c.clone()),
+            "get_live_cell" => {
+                let op = &params.as_array().unwrap()[0];
+                let txh = op["tx_hash"].as_str().unwrap_or("");
+                if txh.eq_ignore_ascii_case(&cid_tx) {
+                    live_typed_cell(&cid_type)
+                } else {
+                    live_untyped_cell()
+                }
+            }
             "send_transaction" => {
                 let tx = &params.as_array().unwrap()[0];
                 assert!(tx.get("hash").is_none(), "hash must be stripped");
@@ -176,6 +219,67 @@ fn create_output_sends_after_stripping_view_metadata() {
     let hash = send_signed_transaction(&opts, &created).unwrap();
     assert_eq!(hash, tx_hash);
     assert!(*saw_send.lock().unwrap());
+}
+
+#[test]
+fn send_rejects_live_outpoint_with_mismatched_type_id_args() {
+    let secret = key(0x42);
+    let req = fixture_request(&secret);
+    let created = create_signed_intention(&req, &secret).unwrap();
+
+    let mut live_type = req.cid_lock_dep.type_script.clone().unwrap();
+    // Same outpoint / TYPE_ID shape, different 32-byte args → different type_id.
+    live_type.args = format!("0x{}", hex::encode([0xCDu8; 32]));
+    assert_ne!(
+        live_type.args,
+        req.cid_lock_dep.type_script.as_ref().unwrap().args
+    );
+
+    let genesis = h256(0xAB);
+    let genesis_c = genesis.clone();
+    let cid_tx = req.cid_lock_dep.tx_hash.clone();
+    let saw_send = Arc::new(Mutex::new(false));
+    let saw_send_c = Arc::clone(&saw_send);
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, params| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+            "get_block_hash" => json!(genesis_c.clone()),
+            "get_live_cell" => {
+                let op = &params.as_array().unwrap()[0];
+                let txh = op["tx_hash"].as_str().unwrap_or("");
+                if txh.eq_ignore_ascii_case(&cid_tx) {
+                    live_typed_cell(&live_type)
+                } else {
+                    live_untyped_cell()
+                }
+            }
+            "send_transaction" => {
+                *saw_send_c.lock().unwrap() = true;
+                json!(h256(0xCD))
+            }
+            _ => json!({"error": {"code": -1, "message": "unknown"}}),
+        },
+    ))));
+
+    let opts = SendOptions {
+        rpc_url: url,
+        network: "testnet".into(),
+        genesis_hash: genesis,
+    };
+    let err = send_signed_transaction(&opts, &created).unwrap_err();
+    match err {
+        CliError::NetworkGuard(msg) => {
+            assert!(
+                msg.contains("Type ID") && msg.contains("refusing send"),
+                "unexpected message: {msg}"
+            );
+        }
+        other => panic!("expected NetworkGuard, got {other:?}"),
+    }
+    assert!(
+        !*saw_send.lock().unwrap(),
+        "send_transaction must not run when live Type ID mismatches"
+    );
 }
 
 #[test]
