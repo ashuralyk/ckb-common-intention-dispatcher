@@ -19,6 +19,11 @@ hash) and forbidding that Type ID on non-Process-lock outputs.
 **Process lock args** must be distinct per live instance. Empty / shared args
 merge cells into one lock group (`ProcessPairInvalid` on multi-Process txs).
 
+**Creation:** CKB builds lock groups from inputs, so an output-only Process lock
+on first mint never runs `verify_create`. Creation tools (CLI / deploy) must
+validate Process **lock** + **TYPE_ID** shape off-chain; on-chain Process lock
+checks run on **spend** (Transfer).
+
 ## DigestOk transaction shape
 
 ```
@@ -39,8 +44,7 @@ cell_deps / header_deps / witnesses:
 The backend **must not** rewrite the molecule transaction returned by
 `Process.assemble` (except filling unlock witnesses the Process left empty,
 if the Process documents that). Capacity balance and fee are Process
-responsibilities: the example deducts fee from the Process state cell and may
-consume Process-owned funding inputs listed in the draft.
+responsibilities.
 
 ## SSRI methods
 
@@ -51,17 +55,24 @@ consume Process-owned funding inputs listed in the draft.
 
 ### `Process.assemble`
 
-- **stdin:** packed molecule `Transaction` **draft** whose `raw.inputs` list the
-  Intention + Process state out points (outputs/deps may be empty).
+- **stdin:** packed molecule `Transaction` **draft**. Each Process defines its
+  own draft preconditions. For `cid_process_example`, the draft must include:
+  - `raw.inputs`: Intention + Process state out points (and any Process-owned
+    funding cells)
+  - `raw.cell_deps`: at least CID lock code, Process code, and any official
+    xUDT code deps needed to execute the returned tx
+  - `header_deps` / `witnesses` as the Process documents (may be empty)
 - **stdout:** packed molecule `Transaction` that is **complete and
   directly submittable**: `inputs`, `outputs`, `outputs_data`, `cell_deps`,
-  `header_deps`, `witnesses`.
+  `header_deps`, `witnesses`. Submit these bytes without rewriting structure
+  (including witness encodings).
 
 Guest resolution of draft inputs uses host-query syscalls (below). The example
-Process recreates the Process cell (capacity minus `ASSEMBLE_FEE`), emits one
-beneficiary per Intention, keeps every draft input (including Process-owned
-funding cells), copies draft deps/header_deps, and attaches one empty witness
-per input.
+Process recreates the Process cell (capacity minus fee computed from tx size ×
+Process-owned fee rate), emits one beneficiary per Intention, keeps every draft
+input **including `since`**, copies draft deps/header_deps, and attaches one
+empty witness per input. If fee would drop the state cell below occupied
+capacity, assemble returns `CapacityInsufficient` (37).
 
 ## Host-query syscalls (ckb-ssri-std)
 
@@ -113,11 +124,18 @@ let host = MockHost::new();
 // host.insert_block_hash(0, tip_hash);
 let draft = build_draft_tx(&cells);
 let assembled: AssembledTx = executor.assemble(&draft, host)?;
-// assembled.as_molecule_bytes() → submit
+// assembled.as_molecule_bytes() → submit unchanged
 ```
+
+Calculator helpers require a **live** [`ProcessStateCell`] (no fabricated
+defaults). Resolve via `resolve_process_state_by_type` when you have the TYPE_ID
+type script, or pass the cell explicitly to `process_digest_ok_with_process`.
 
 ## Intention CLI
 
 `process_type_script` in the create request is the Process state cell’s
 **TYPE_ID type script**, not the Process code cell. Its `calc_script_hash` is
-written into Intention lock args as `process_type_hash`.
+written into Intention lock args as `process_type_hash`. The CLI rejects
+non-TYPE_ID `process_type_script` values (code hash, `hash_type=type`, 32-byte
+args). Process lock Create still does not run on-chain at mint — validate the
+Process lock script off-chain when deploying the state cell.

@@ -44,12 +44,17 @@ cd tests && cargo test process_example -- --nocapture
 
 ## On-chain verification (Process **lock**)
 
-1. **Create** (0 lock inputs, 1 output): state cell type must be built-in TYPE_ID.  
-2. **Transfer** (1→1 lock pair): TYPE_ID on both sides **with equal type-script
+CKB builds lock groups from **inputs**, so an output-only Process lock on first
+mint never runs. Off-chain creation tools must validate Process lock + TYPE_ID;
+on-chain Process lock checks run on **spend**:
+
+1. **Transfer** (1→1 lock pair): TYPE_ID on both sides **with equal type-script
    hash** (identity continuity); that TYPE_ID must not appear on any
    non-Process-lock output; batch `[1,4]`; unique beneficiary / refund
    assignment.  
-3. **Burn** rejected.
+2. **Burn** rejected.  
+3. **Create** path in `verify.rs` exists for completeness but is not executed
+   for output-only mints.
 
 **Lock args:** use distinct Process lock args per live state cell. Identical
 args (including empty) merge cells into one lock group, so a two-Process tx
@@ -64,11 +69,12 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 | 34 | `UnsupportedAsset` |
 | 35 | `TypeIdInvalid` (missing / non-TYPE_ID / continuity break / smuggled Type ID) |
 | 36 | `HostQueryFailed` |
+| 37 | `CapacityInsufficient` (fee would drop state below occupied capacity) |
 
 ## Capacity / fee (example assemble)
 
-`Process.assemble` deducts a Process-owned miner fee from the recreated state
-cell capacity (`ASSEMBLE_FEE`). Optional Process-owned funding inputs in the
-draft stay in the returned transaction; their surplus capacity also pays fee.
-The backend must submit the molecule `Transaction` without rewriting structure
-to “fix” balance.
+`Process.assemble` computes fee as `ceil(tx_bytes × FEE_RATE / 1000)` with
+Process-owned `FEE_RATE = 1000` (testnet `min_fee_rate`) and deducts it from the
+recreated state cell. If the result would be below occupied capacity, assemble
+errors. Draft must include CID, Process, and applicable xUDT cell_deps; the
+example copies them through. Submit returned molecule bytes unchanged.

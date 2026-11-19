@@ -160,6 +160,32 @@ fn script_hash32(script: &Script) -> [u8; 32] {
 /// Without a type script on the dep cell, `ScriptEx::Reference` would silently
 /// fall back to `hash_type=data1` + data hash — which strands Intentions across
 /// Type-ID upgrades. No data-hash opt-in in v1.
+/// Process state **type** must be built-in TYPE_ID. Process lock Create does not
+/// run on-chain (output-only), so creation tools must validate TYPE_ID shape here.
+fn require_process_type_id_script(script: &ScriptJson) -> Result<Script, CliError> {
+    let ht = script.parse_hash_type()?;
+    if ht != 1 {
+        return Err(CliError::InvalidRequest(format!(
+            "process_type_script.hash_type must be `type` (got `{}`); Process Type ID uses hash_type=type",
+            script.hash_type
+        )));
+    }
+    let type_script = packed_script(script)?;
+    let code: [u8; 32] = type_script.code_hash().unpack();
+    if code != TYPE_ID_CODE_HASH {
+        return Err(CliError::InvalidRequest(
+            "process_type_script.code_hash must be the TYPE_ID code hash".into(),
+        ));
+    }
+    let args_len = type_script.args().raw_data().len();
+    if args_len != 32 {
+        return Err(CliError::InvalidRequest(format!(
+            "process_type_script.args must be exactly 32 bytes (got {args_len})"
+        )));
+    }
+    Ok(type_script)
+}
+
 fn require_cid_lock_type_script(dep: &NamedDep) -> Result<Script, CliError> {
     let Some(type_json) = &dep.type_script else {
         return Err(CliError::InvalidRequest(
@@ -342,7 +368,7 @@ fn create_signed_intention_bundle_inner(
         return Err(CliError::InsufficientFunds);
     }
 
-    let process_type = packed_script(&req.process_type_script)?;
+    let process_type = require_process_type_id_script(&req.process_type_script)?;
     let process_type_hash = script_hash32(&process_type);
     let beneficiary = req.beneficiary_lock.to_cid_script()?;
     let payload = Payload::from_script(&beneficiary)

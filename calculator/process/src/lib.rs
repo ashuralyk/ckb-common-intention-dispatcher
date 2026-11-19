@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use cid_process_executor::{AssembledTx, MockHost, ProcessExecutor};
-use cid_protocol::TYPE_ID_CODE_HASH;
+use cid_protocol::{CidArgs, TYPE_ID_CODE_HASH};
 use ckb_cinnabar_calculator::{
     instruction::Instruction,
     re_exports::ckb_types::{
@@ -12,7 +12,7 @@ use ckb_cinnabar_calculator::{
         prelude::{Builder, Entity, Pack, PackVec},
     },
     rpc::RPC,
-    skeleton::{CellInputEx, TransactionSkeleton},
+    skeleton::{CellDepEx, CellInputEx, TransactionSkeleton, WitnessEx},
     CalculatorError, Result,
 };
 
@@ -29,6 +29,10 @@ pub struct IntentionCell {
     pub data: Vec<u8>,
     /// Packed molecule `Script` of the intention type, if any (official xUDT).
     pub type_script: Option<Vec<u8>>,
+    /// Full CID lock script. Required for FakeRpc/VM verify of the assembled
+    /// skeleton; SSRI-only assemble paths may leave this `None` (placeholder
+    /// code_hash is used for host cell shape only).
+    pub lock: Option<Script>,
 }
 
 /// Process state cell for full-tx assemble.
@@ -41,12 +45,25 @@ pub struct ProcessStateCell {
     pub data: Vec<u8>,
 }
 
+/// Live cell payload for a draft cell_dep (out-point is in `cell_dep`).
+///
+/// Molecule Transactions only carry the `CellDep` out-point; FakeRpc / VM
+/// verify of a packed-rebuilt skeleton still needs the dep cell bytes, which
+/// the chain resolves from live state. Callers pass them here so the submit
+/// skeleton can hydrate deps without rewriting packed bytes.
+#[derive(Clone, Debug)]
+pub struct DraftCellDep {
+    pub cell_dep: CellDep,
+    pub output: CellOutput,
+    pub data: Vec<u8>,
+}
+
 /// Optional Process-owned funding cell / cell_dep included in the draft so
 /// assemble can demonstrate capacity/fee balance and dep preservation.
 #[derive(Clone, Debug, Default)]
 pub struct AssembleExtras {
     pub funding_cells: Vec<ProcessStateCell>,
-    pub cell_deps: Vec<CellDep>,
+    pub cell_deps: Vec<DraftCellDep>,
 }
 
 /// Load the Process binary from build/release/<name>
@@ -57,42 +74,14 @@ pub fn load_process_binary(bin_dir: &str) -> Result<Vec<u8>> {
     })
 }
 
-fn default_process_state(intentions: &[IntentionCell]) -> ProcessStateCell {
-    let type_script = Script::new_builder()
-        .code_hash(TYPE_ID_CODE_HASH.pack())
-        .hash_type(ScriptHashType::Type)
-        .args(
-            {
-                let mut a = [0u8; 32];
-                a[..18].copy_from_slice(b"process-type-id-v0");
-                a.to_vec()
-            }
-            .pack(),
-        )
-        .build();
-    let lock = Script::new_builder()
-        .code_hash([0xAA; 32].pack())
-        .hash_type(ScriptHashType::Data1)
-        .build();
-    let out_point = intentions
-        .first()
-        .map(|i| i.out_point.clone().as_builder().index(99u32).build())
-        .unwrap_or_default();
-    ProcessStateCell {
-        out_point,
-        lock,
-        type_script,
-        capacity: 200_000_000_000,
-        data: vec![],
-    }
-}
-
 fn intention_output(intention: &IntentionCell) -> Result<CellOutput> {
-    let lock = Script::new_builder()
-        .code_hash([0xC1; 32].pack())
-        .hash_type(ScriptHashType::Type)
-        .args(intention.lock_args.clone().pack())
-        .build();
+    let lock = intention.lock.clone().unwrap_or_else(|| {
+        Script::new_builder()
+            .code_hash([0xC1; 32].pack())
+            .hash_type(ScriptHashType::Type)
+            .args(intention.lock_args.clone().pack())
+            .build()
+    });
     let mut builder = CellOutput::new_builder()
         .capacity(intention.capacity)
         .lock(lock);
@@ -161,8 +150,6 @@ fn build_draft_and_host(
 
     for funding in &extras.funding_cells {
         let output = process_output(funding);
-        // Funding cells are Process-owned capacity (no TYPE_ID required for the
-        // example assemble path — lock-only so they are not mistaken for state).
         let output = output.as_builder().type_(None).build();
         host.insert_cell_bytes(
             funding.out_point.as_slice(),
@@ -181,11 +168,18 @@ fn build_draft_and_host(
         );
     }
 
+    let mut cell_deps = Vec::with_capacity(extras.cell_deps.len());
+    for dep in &extras.cell_deps {
+        let key = dep.cell_dep.out_point().as_slice().to_vec();
+        known.insert(key, (dep.output.clone(), dep.data.clone()));
+        cell_deps.push(dep.cell_dep.clone());
+    }
+
     let draft = Transaction::new_builder()
         .raw(
             RawTransaction::new_builder()
                 .inputs(inputs.pack())
-                .cell_deps(extras.cell_deps.clone().pack())
+                .cell_deps(cell_deps.pack())
                 .build(),
         )
         .build()
@@ -194,33 +188,122 @@ fn build_draft_and_host(
     Ok((draft, host, known))
 }
 
-/// Process digest: batch-check + SSRI assemble → skeleton from the complete tx.
-pub fn process_digest_ok<T: RPC>(
+/// Resolve a live Process state cell whose **type** script equals `type_script`
+/// (exact indexer match). Errors explicitly when no live cell is found.
+pub fn resolve_process_state_by_type<T: RPC>(
     rpc: &T,
+    type_script: &Script,
+) -> Result<ProcessStateCell> {
+    use ckb_cinnabar_calculator::indexer::{CellQueryOptions, GetCellsIter, SearchMode};
+
+    let code: [u8; 32] = {
+        use ckb_cinnabar_calculator::re_exports::ckb_types::prelude::Unpack;
+        type_script.code_hash().unpack()
+    };
+    if code != TYPE_ID_CODE_HASH {
+        return Err(CalculatorError::Other(
+            "process type script must be built-in TYPE_ID".into(),
+        ));
+    }
+
+    let mut query = CellQueryOptions::new_type(type_script.clone());
+    query.script_search_mode = Some(SearchMode::Exact);
+    let mut iter = GetCellsIter::new(rpc, query.into());
+    let live = iter
+        .next()?
+        .ok_or_else(|| CalculatorError::Other("no live Process state cell for Type ID".into()))?;
+
+    let typ =
+        live.output.type_().to_opt().ok_or_else(|| {
+            CalculatorError::Other("Process state cell missing type script".into())
+        })?;
+
+    Ok(ProcessStateCell {
+        out_point: live.out_point,
+        lock: live.output.lock(),
+        type_script: typ,
+        capacity: {
+            use ckb_cinnabar_calculator::re_exports::ckb_types::prelude::Unpack;
+            live.output.capacity().unpack()
+        },
+        data: live.output_data,
+    })
+}
+
+fn require_process_matches_intentions(
+    process: &ProcessStateCell,
+    intentions: &[IntentionCell],
+) -> Result<()> {
+    use ckb_cinnabar_calculator::re_exports::ckb_types::prelude::Unpack;
+    let pth: [u8; 32] = process.type_script.calc_script_hash().unpack();
+    for intention in intentions {
+        let cid = CidArgs::decode(&intention.lock_args)
+            .map_err(|e| CalculatorError::Other(format!("intention lock args: {:?}", e)))?;
+        if cid.process_type_hash != pth {
+            return Err(CalculatorError::Other(
+                "Intention process_type_hash does not match Process state TYPE_ID".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Process digest without a live state cell — always errors after batch bounds.
+///
+/// Callers must use [`process_digest_ok_with_process`] with a live
+/// [`ProcessStateCell`], or [`resolve_process_state_by_type`] via RPC.
+pub fn process_digest_ok<T: RPC>(
+    _rpc: &T,
     intentions: Vec<IntentionCell>,
     bin_dir: &str,
 ) -> Result<(TransactionSkeleton, Vec<Instruction<T>>)> {
-    process_digest_ok_with_process(rpc, intentions, None, bin_dir)
+    let binary = load_process_binary(bin_dir)?;
+    let executor = ProcessExecutor::new(binary);
+    let (min, max) = executor
+        .get_batch_bounds()
+        .map_err(|e| CalculatorError::Other(format!("failed to get batch bounds: {}", e)))?;
+    let count = intentions.len() as u32;
+    if count < min || count > max {
+        return Err(CalculatorError::Other(format!(
+            "intention count {} out of bounds [{}, {}]",
+            count, min, max
+        )));
+    }
+    Err(CalculatorError::Other(
+        "Process state cell required: use process_digest_ok_with_process with a live cell, \
+         or resolve_process_state_by_type via RPC"
+            .into(),
+    ))
 }
 
-/// Same as [`process_digest_ok`] with an explicit Process state cell.
+/// Assemble with an explicit live Process state cell (required).
 pub fn process_digest_ok_with_process<T: RPC>(
     rpc: &T,
     intentions: Vec<IntentionCell>,
-    process: Option<ProcessStateCell>,
+    process: ProcessStateCell,
     bin_dir: &str,
 ) -> Result<(TransactionSkeleton, Vec<Instruction<T>>)> {
-    process_digest_ok_with_extras(rpc, intentions, process, AssembleExtras::default(), bin_dir)
+    let (skeleton, _assembled, instructions) = process_digest_ok_with_extras(
+        rpc,
+        intentions,
+        process,
+        AssembleExtras::default(),
+        bin_dir,
+    )?;
+    Ok((skeleton, instructions))
 }
 
 /// Assemble with optional Process-owned funding inputs and draft cell_deps.
+///
+/// Returns the skeleton (witnesses preserved as raw bytes), the packed
+/// [`AssembledTx`] for byte-identical submit, and instructions (empty).
 pub fn process_digest_ok_with_extras<T: RPC>(
     _rpc: &T,
     intentions: Vec<IntentionCell>,
-    process: Option<ProcessStateCell>,
+    process: ProcessStateCell,
     extras: AssembleExtras,
     bin_dir: &str,
-) -> Result<(TransactionSkeleton, Vec<Instruction<T>>)> {
+) -> Result<(TransactionSkeleton, AssembledTx, Vec<Instruction<T>>)> {
     let binary = load_process_binary(bin_dir)?;
     let executor = ProcessExecutor::new(binary);
 
@@ -236,22 +319,23 @@ pub fn process_digest_ok_with_extras<T: RPC>(
         )));
     }
 
-    let process = process.unwrap_or_else(|| default_process_state(&intentions));
+    require_process_matches_intentions(&process, &intentions)?;
     let (draft, host, known) = build_draft_and_host(&intentions, &process, &extras)?;
     let assembled = executor
         .assemble(&draft, host)
         .map_err(|e| CalculatorError::Other(format!("executor assemble failed: {}", e)))?;
 
-    skeleton_from_assembled(&assembled, &known)
+    let skeleton = skeleton_from_assembled(&assembled, &known)?;
+    Ok((skeleton, assembled, vec![]))
 }
 
-/// Rebuild a skeleton from the assembled molecule Transaction **as-is**
-/// (inputs, cell_deps, header_deps, witnesses, outputs, outputs_data).
-/// Live cell data for inputs is filled from `known` when present.
-fn skeleton_from_assembled<T: RPC>(
+/// Rebuild a skeleton from the assembled molecule Transaction **as-is**.
+/// Witnesses are kept as raw packed bytes (`WitnessEx::new_plain`) so
+/// `Some(empty)` WitnessArgs fields are not collapsed to `None` by Cinnabar.
+fn skeleton_from_assembled(
     assembled: &AssembledTx,
     known: &KnownCells,
-) -> Result<(TransactionSkeleton, Vec<Instruction<T>>)> {
+) -> Result<TransactionSkeleton> {
     let tx = Transaction::from_slice(assembled.as_molecule_bytes())
         .map_err(|e| CalculatorError::Other(format!("Transaction molecule bridge: {:?}", e)))?;
     let raw = tx.raw();
@@ -262,14 +346,44 @@ fn skeleton_from_assembled<T: RPC>(
     }
 
     let mut skeleton = TransactionSkeleton::from_packed_transaction(&tx);
+    // Preserve guest witness bytes exactly (submit path must not rewrite).
+    skeleton.witnesses.clear();
+    for witness in tx.witnesses().into_iter() {
+        let raw_bytes = witness.raw_data().to_vec();
+        if raw_bytes.is_empty() {
+            skeleton.witness(WitnessEx::default());
+        } else {
+            skeleton.witness(WitnessEx::new_plain(raw_bytes));
+        }
+    }
     for input in &mut skeleton.inputs {
         let key = input.input.previous_output().as_slice().to_vec();
         if let Some((output, data)) = known.get(&key) {
             *input = CellInputEx::new(input.input.clone(), output.clone(), Some(data.clone()));
         }
     }
+    // Hydrate cell_dep payloads from known live cells (same out-points as the
+    // packed tx). Does not change molecule bytes — only FakeRpc/VM metadata.
+    for dep in &mut skeleton.celldeps {
+        let key = dep.celldep.out_point().as_slice().to_vec();
+        if let Some((output, data)) = known.get(&key) {
+            *dep = CellDepEx::new(
+                dep.name.clone(),
+                dep.celldep.clone(),
+                output.clone(),
+                Some(data.clone()),
+            );
+        }
+    }
 
-    Ok((skeleton, vec![]))
+    Ok(skeleton)
+}
+
+/// Byte-for-byte round-trip: packed `Transaction` → skeleton → packed, with
+/// explicit empty `WitnessArgs` fields preserved via plain witnesses.
+pub fn assembled_tx_round_trip_bytes(assembled: &AssembledTx) -> Result<Vec<u8>> {
+    let skeleton = skeleton_from_assembled(assembled, &KnownCells::new())?;
+    Ok(skeleton.into_packed_transaction().as_slice().to_vec())
 }
 
 #[cfg(test)]
@@ -277,11 +391,65 @@ mod tests {
     use super::*;
     use cid_protocol::{CidArgs, Payload, Script as CidScript};
     use ckb_cinnabar_calculator::re_exports::ckb_types::core::DepType;
+    use ckb_cinnabar_calculator::re_exports::ckb_types::packed::{
+        Bytes as PackedBytes, WitnessArgs,
+    };
     use ckb_cinnabar_calculator::re_exports::ckb_types::prelude::Unpack;
+
+    fn sample_type_id() -> Script {
+        Script::new_builder()
+            .code_hash(TYPE_ID_CODE_HASH.pack())
+            .hash_type(ScriptHashType::Type)
+            .args(
+                {
+                    let mut a = [0u8; 32];
+                    a[..18].copy_from_slice(b"process-type-id-v0");
+                    a.to_vec()
+                }
+                .pack(),
+            )
+            .build()
+    }
 
     #[test]
     fn test_load_binary_missing() {
         assert!(load_process_binary("/nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_process_digest_ok_requires_live_state() {
+        use ckb_cinnabar_calculator::simulation::FakeRpcClient;
+
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!("Skipping test: binary not built at {bin_path}");
+            return;
+        }
+        let rpc = FakeRpcClient::default();
+        let type_id = sample_type_id();
+        let pth: [u8; 32] = type_id.calc_script_hash().unpack();
+        let lock_args = CidArgs::new(pth, CidScript::default(), Payload::default())
+            .encode()
+            .unwrap();
+        let intentions = vec![IntentionCell {
+            out_point: Default::default(),
+            lock_args,
+            capacity: 100_000_000_000,
+            data: vec![],
+            type_script: None,
+            lock: None,
+        }];
+        match process_digest_ok(&rpc, intentions, bin_dir) {
+            Err(CalculatorError::Other(msg)) => {
+                assert!(
+                    msg.contains("Process state cell required"),
+                    "unexpected error: {msg}"
+                );
+            }
+            Ok(_) => panic!("expected Process state required error, got Ok"),
+            Err(e) => panic!("expected Process state required error, got {e}"),
+        }
     }
 
     #[test]
@@ -296,18 +464,7 @@ mod tests {
         }
 
         let rpc = FakeRpcClient::default();
-        let type_id = Script::new_builder()
-            .code_hash(TYPE_ID_CODE_HASH.pack())
-            .hash_type(ScriptHashType::Type)
-            .args(
-                {
-                    let mut a = [0u8; 32];
-                    a[..18].copy_from_slice(b"process-type-id-v0");
-                    a.to_vec()
-                }
-                .pack(),
-            )
-            .build();
+        let type_id = sample_type_id();
         let pth: [u8; 32] = type_id.calc_script_hash().unpack();
         let lock_args = CidArgs::new(pth, CidScript::default(), Payload::default())
             .encode()
@@ -330,17 +487,45 @@ mod tests {
             capacity: 100_000_000_000,
             data: vec![0xaa, 0xbb],
             type_script: None,
+            lock: None,
         }];
-        let (skeleton, _) =
-            process_digest_ok_with_process(&rpc, intentions, Some(process), bin_dir)
-                .expect("digest n=1");
+        let (skeleton, assembled, _) = process_digest_ok_with_extras(
+            &rpc,
+            intentions,
+            process,
+            AssembleExtras::default(),
+            bin_dir,
+        )
+        .expect("digest n=1");
         assert_eq!(skeleton.inputs.len(), 2);
         assert_eq!(skeleton.outputs.len(), 2);
-        // Process-paid assemble fee: recreate capacity < input process capacity.
         assert!(skeleton.outputs[0].capacity_shannons() < 200_000_000_000);
+        // Submit path: packed bytes survive skeleton round-trip with plain witnesses.
+        let round = assembled_tx_round_trip_bytes(&assembled).expect("round-trip");
+        assert_eq!(round, assembled.as_molecule_bytes());
+    }
+
+    #[test]
+    fn test_witness_args_some_empty_round_trip() {
+        // Explicit WitnessArgs { lock: Some(empty), input_type: Some(empty), … }
+        // must not collapse to None through the submit skeleton path.
+        let empty = PackedBytes::default();
+        let wa = WitnessArgs::new_builder()
+            .lock(Some(empty.clone()))
+            .input_type(Some(empty.clone()))
+            .output_type(Some(empty))
+            .build();
+        let wa_bytes = wa.as_bytes().pack();
+        let tx = Transaction::new_builder()
+            .raw(RawTransaction::new_builder().build())
+            .witnesses(vec![wa_bytes].pack())
+            .build();
+        let assembled = AssembledTx::from_bytes(tx.as_slice()).expect("parse");
+        let round = assembled_tx_round_trip_bytes(&assembled).expect("round-trip");
         assert_eq!(
-            skeleton.outputs[0].capacity_shannons(),
-            200_000_000_000 - 1_000_000
+            round,
+            assembled.as_molecule_bytes(),
+            "Some(empty) WitnessArgs must be byte-identical after skeleton round-trip"
         );
     }
 
@@ -356,18 +541,7 @@ mod tests {
         }
 
         let rpc = FakeRpcClient::default();
-        let type_id = Script::new_builder()
-            .code_hash(TYPE_ID_CODE_HASH.pack())
-            .hash_type(ScriptHashType::Type)
-            .args(
-                {
-                    let mut a = [0u8; 32];
-                    a[..18].copy_from_slice(b"process-type-id-v0");
-                    a.to_vec()
-                }
-                .pack(),
-            )
-            .build();
+        let type_id = sample_type_id();
         let pth: [u8; 32] = type_id.calc_script_hash().unpack();
         let lock_args = CidArgs::new(pth, CidScript::default(), Payload::default())
             .encode()
@@ -398,6 +572,15 @@ mod tests {
             .out_point(dep_out)
             .dep_type(DepType::Code)
             .build();
+        let dep_output = CellOutput::new_builder()
+            .capacity(10_000_000_000u64)
+            .lock(
+                Script::new_builder()
+                    .code_hash([0xDD; 32].pack())
+                    .hash_type(ScriptHashType::Data1)
+                    .build(),
+            )
+            .build();
 
         let intentions = vec![IntentionCell {
             out_point: fake_outpoint(),
@@ -405,28 +588,26 @@ mod tests {
             capacity: 100_000_000_000,
             data: vec![],
             type_script: None,
+            lock: None,
         }];
         let extras = AssembleExtras {
             funding_cells: vec![funding.clone()],
-            cell_deps: vec![cell_dep.clone()],
+            cell_deps: vec![DraftCellDep {
+                cell_dep: cell_dep.clone(),
+                output: dep_output,
+                data: vec![0xCA, 0xFE],
+            }],
         };
-        let (skeleton, _) =
-            process_digest_ok_with_extras(&rpc, intentions, Some(process), extras, bin_dir)
+        let (skeleton, _, _) =
+            process_digest_ok_with_extras(&rpc, intentions, process, extras, bin_dir)
                 .expect("digest with extras");
-        assert_eq!(
-            skeleton.inputs.len(),
-            3,
-            "process + intention + funding input"
-        );
-        assert_eq!(skeleton.celldeps.len(), 1, "draft cell_dep preserved");
+        assert_eq!(skeleton.inputs.len(), 3);
+        assert_eq!(skeleton.celldeps.len(), 1);
         assert_eq!(skeleton.celldeps[0].celldep.as_slice(), cell_dep.as_slice());
-        assert!(
-            skeleton
-                .inputs
-                .iter()
-                .any(|i| i.input.previous_output() == funding.out_point),
-            "funding out point must appear in skeleton inputs"
-        );
+        assert!(skeleton
+            .inputs
+            .iter()
+            .any(|i| i.input.previous_output() == funding.out_point));
         assert_eq!(skeleton.witnesses.len(), 3);
     }
 }

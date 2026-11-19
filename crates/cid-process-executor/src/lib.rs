@@ -517,4 +517,100 @@ mod tests {
         assert_eq!(host.get_block_hash(0), Some([0xAB; 32]));
         assert!(host.get_block_hash(1).is_none());
     }
+
+    #[test]
+    fn test_assemble_preserves_input_since() {
+        use ckb_types::packed::{CellInput, RawTransaction, Transaction};
+
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let mut cells = make_assemble_cells(1);
+        let since = 0x0100_0000_0000_00FFu64;
+        let host = MockHost::new();
+        host.insert_block_hash(0, [0xAB; 32]);
+        for cell in &cells {
+            host.insert_cell(
+                cell.out_point.clone(),
+                cell.output.clone(),
+                cell.data.clone(),
+            );
+        }
+        let inputs: Vec<CellInput> = cells
+            .drain(..)
+            .enumerate()
+            .map(|(i, c)| {
+                let mut b = CellInput::new_builder().previous_output(c.out_point);
+                if i == 0 {
+                    b = b.since(since.pack());
+                }
+                b.build()
+            })
+            .collect();
+        let draft = Transaction::new_builder()
+            .raw(RawTransaction::new_builder().inputs(inputs.pack()).build())
+            .build()
+            .as_slice()
+            .to_vec();
+        let assembled = executor.assemble(&draft, host).expect("assemble");
+        let got: u64 = assembled.inputs[0].since().unpack();
+        assert_eq!(got, since, "assemble must preserve CellInput.since");
+    }
+
+    #[test]
+    fn test_assemble_rejects_fee_below_occupied_capacity() {
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let type_id = type_id_script(b"process-type-id-v0");
+        let pth: [u8; 32] = type_id.calc_script_hash().unpack();
+        let lock_args = cid_protocol::CidArgs::new(
+            pth,
+            cid_protocol::Script::default(),
+            cid_protocol::Payload::default(),
+        )
+        .encode()
+        .unwrap();
+        // Mirror Process guest occupied formula: pin capacity exactly at floor
+        // so any nonzero fee leaves recreate below occupied.
+        let process_lock = process_lock_script();
+        let occupied_bytes = 8
+            + 32
+            + 1
+            + process_lock.args().raw_data().len()
+            + 32
+            + 1
+            + type_id.args().raw_data().len();
+        let occupiedish = occupied_bytes as u64 * 100_000_000;
+        let cells = vec![
+            process_draft_cell(
+                OutPoint::new_builder()
+                    .tx_hash(Byte32::from_slice(&[0x01; 32]).unwrap())
+                    .index(0u32.pack())
+                    .build(),
+                process_lock,
+                type_id,
+                occupiedish,
+                vec![],
+            ),
+            intention_draft_cell(
+                OutPoint::new_builder()
+                    .tx_hash(Byte32::from_slice(&[0x02; 32]).unwrap())
+                    .index(0u32.pack())
+                    .build(),
+                lock_args,
+                100_000_000_000,
+                None,
+                vec![],
+            ),
+        ];
+        let result = executor.assemble_from_cells(&cells);
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(37))),
+            "fee below occupied should be CapacityInsufficient(37): {:?}",
+            result
+        );
+    }
 }

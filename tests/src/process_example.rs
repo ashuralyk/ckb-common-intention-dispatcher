@@ -3,7 +3,8 @@
 use std::path::Path;
 
 use cid_process_example_calculator::{
-    process_digest_ok, process_digest_ok_with_process, IntentionCell, ProcessStateCell,
+    assembled_tx_round_trip_bytes, process_digest_ok, process_digest_ok_with_extras,
+    process_digest_ok_with_process, AssembleExtras, DraftCellDep, IntentionCell, ProcessStateCell,
     PROCESS_CONTRACT_NAME,
 };
 use ckb_cinnabar_calculator::{
@@ -32,7 +33,7 @@ use ckb_common_intention_dispatcher_calculator::{
 use crate::faker::{
     dest_lock, dest_script, outpoint_ids, script_to_cid, seed_fakenet_xudt_cell, seed_header,
     seed_intention, user_lock, user_lock_cid, xudt_type_script, CKB_CAPACITY, CONTRACT_BIN,
-    CONTRACT_NAME, PACK_BLOCK, USER_CELL_CAPACITY, XUDT_AMOUNT,
+    CONTRACT_NAME, PACK_BLOCK, USER_CELL_CAPACITY, XUDT_AMOUNT, XUDT_BIN,
 };
 
 const CID_CONTRACT_NAME: &str = "ckb_common_intention_dispatcher";
@@ -116,6 +117,7 @@ fn mock_intention(i: u32, process_type_hash: [u8; 32]) -> IntentionCell {
         capacity: 100_000_000_000,
         data: vec![],
         type_script: None,
+        lock: None,
     }
 }
 
@@ -157,6 +159,12 @@ fn prepared_process_skeleton_with_cid_type_id(
             contract: PROCESS_CONTRACT_NAME.into(),
             type_id_args: None,
             contract_binary_path: CONTRACT_BIN.into(),
+        }),
+        // Official xUDT code dep — required for any draft that spends/creates xUDT.
+        Box::new(AddFakeContractCelldepByName {
+            contract: "xudt".into(),
+            type_id_args: None,
+            contract_binary_path: XUDT_BIN.into(),
         }),
     ]);
     TransactionCalculator::default()
@@ -203,7 +211,7 @@ fn assert_digest_counts(n: usize) {
     let intentions: Vec<IntentionCell> = (0..n as u32).map(|i| mock_intention(i, pth)).collect();
     let rpc = FakeRpcClient::default();
     let (skeleton, _instructions) =
-        process_digest_ok_with_process(&rpc, intentions, Some(process), CONTRACT_BIN)
+        process_digest_ok_with_process(&rpc, intentions, process, CONTRACT_BIN)
             .unwrap_or_else(|e| panic!("should assemble skeleton for {n} intention(s): {e}"));
     // Process cell + n intentions
     assert_eq!(
@@ -363,7 +371,7 @@ async fn reject_count_exceeds_max_real_ssri() {
     let pth = process_example_type_hash(&process.type_script);
     let intentions: Vec<IntentionCell> = (0..5).map(|i| mock_intention(i, pth)).collect();
     let rpc = FakeRpcClient::default();
-    let err = process_digest_ok_with_process(&rpc, intentions, Some(process), CONTRACT_BIN)
+    let err = process_digest_ok_with_process(&rpc, intentions, process, CONTRACT_BIN)
         .err()
         .expect("should reject 5 intentions (> BATCH_MAX=4)");
     match err {
@@ -891,8 +899,9 @@ async fn assemble_and_verify_data2_beneficiary() {
             capacity: CKB_CAPACITY,
             data: vec![],
             type_script: None,
+            lock: None,
         }],
-        Some(process),
+        process,
         CONTRACT_BIN,
     )
     .expect("assemble Data2 payload");
@@ -912,7 +921,7 @@ async fn assemble_and_verify_xudt_beneficiary() {
     require_binaries();
     let mut rpc = FakeRpcClient::default();
     seed_fakenet_xudt_cell(&mut rpc);
-    let mut skeleton = prepared_process_skeleton(&rpc);
+    let skeleton = prepared_process_skeleton(&rpc);
     let xudt = xudt_type_script();
     let xudt_packed = xudt.clone().to_script(&skeleton).expect("xudt script");
     let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
@@ -935,7 +944,22 @@ async fn assemble_and_verify_xudt_beneficiary() {
         capacity: CKB_CAPACITY,
         data: vec![],
     };
-    let (assembled, _) = process_digest_ok_with_process(
+
+    // Draft must carry CID + Process + xUDT code deps for a submittable tx.
+    let deps: Vec<_> = skeleton
+        .celldeps
+        .iter()
+        .map(|d| DraftCellDep {
+            cell_dep: d.celldep.clone(),
+            output: d.output.output.clone(),
+            data: d.output.data.clone(),
+        })
+        .collect();
+
+    let intention_lock = cid_lock(args.clone())
+        .to_script(&skeleton)
+        .expect("CID lock script");
+    let (assembled_skel, assembled_tx, _) = process_digest_ok_with_extras(
         &rpc,
         vec![IntentionCell {
             out_point: intention.clone(),
@@ -943,13 +967,18 @@ async fn assemble_and_verify_xudt_beneficiary() {
             capacity: CKB_CAPACITY,
             data: XUDT_AMOUNT.to_le_bytes().to_vec(),
             type_script: Some(xudt_packed.as_slice().to_vec()),
+            lock: Some(intention_lock),
         }],
-        Some(process_state),
+        process_state,
+        AssembleExtras {
+            funding_cells: vec![],
+            cell_deps: deps,
+        },
         CONTRACT_BIN,
     )
     .expect("assemble xUDT intention");
     // outputs[0] = Process recreate; outputs[1] = beneficiary
-    let assembled_out = &assembled.outputs[1];
+    let assembled_out = &assembled_skel.outputs[1];
     assert_eq!(
         assembled_out
             .type_script()
@@ -958,7 +987,27 @@ async fn assemble_and_verify_xudt_beneficiary() {
         xudt_packed.as_slice()
     );
     assert_eq!(assembled_out.data, XUDT_AMOUNT.to_le_bytes().to_vec());
+    assert!(
+        !assembled_tx.cell_deps.is_empty(),
+        "assembled tx must keep draft cell_deps for submit"
+    );
 
+    // Byte-identical submit path (packed molecule → skeleton → packed).
+    // Full VM verify uses FakeRpc's TransactionScriptsVerifier (same stack as
+    // ckb-testtool; ckb-testtool 1.x needs ckb-types 1.1, workspace is 0.119).
+    let packed = assembled_tx.as_molecule_bytes().to_vec();
+    assert_eq!(
+        assembled_tx_round_trip_bytes(&assembled_tx).expect("round-trip"),
+        packed.as_slice()
+    );
+
+    // Direct FakeRpc verify of the assembled skeleton (no beneficiary rewrite).
+    verify(&rpc, assembled_skel.clone(), vec![])
+        .await
+        .expect("assembled full tx must verify on-chain as-is");
+
+    // Also confirm digest_ok path with assembled beneficiary still works.
+    let mut verify_skel = prepared_process_skeleton(&rpc);
     let ix = digest_ok::<FakeRpcClient>(
         outpoint_ids(&intention),
         outpoint_ids(&process),
@@ -973,9 +1022,9 @@ async fn assemble_and_verify_xudt_beneficiary() {
     );
     TransactionCalculator::default()
         .instruction(ix)
-        .apply_skeleton(&rpc, &mut skeleton)
+        .apply_skeleton(&rpc, &mut verify_skel)
         .unwrap();
-    verify(&rpc, skeleton, vec![])
+    verify(&rpc, verify_skel, vec![])
         .await
         .expect("assembled xUDT beneficiary must verify on-chain");
 }

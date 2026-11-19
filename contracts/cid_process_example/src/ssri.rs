@@ -5,18 +5,15 @@ use crate::ProcessError;
 use alloc::vec::Vec;
 use cid_protocol::CidArgs;
 use ckb_cinnabar_verifier::ssri::{SsriArgs, SsriSource};
-use ckb_std::ckb_types::packed::{
-    Byte32, Bytes, CellInput, CellOutput, OutPoint, RawTransaction, Script, Transaction,
-};
+use ckb_std::ckb_types::packed::{Byte32, Bytes, CellOutput, RawTransaction, Script, Transaction};
 use ckb_std::ckb_types::prelude::*;
 
 const BATCH_MIN: u32 = 1;
 const BATCH_MAX: u32 = 4;
 
-/// Example miner fee deducted from the Process state cell capacity by assemble.
-/// Capacity balance (and any Process-owned funding inputs in the draft) is the
-/// Process's responsibility — the backend must not rewrite outputs to "fix" fee.
-const ASSEMBLE_FEE: u64 = 1_000_000;
+/// Process-owned fee rate (shannons per kB), matching testnet `min_fee_rate`.
+const FEE_RATE: u64 = 1000;
+const SHANNONS_PER_BYTE: u64 = 100_000_000;
 
 // Default lock code_hash for beneficiary outputs (placeholder for raw lock_args tests)
 const DEFAULT_LOCK_CODE_HASH: [u8; 32] = [
@@ -37,7 +34,6 @@ pub fn batch_handler(
 }
 
 struct LoadedInput {
-    out_point: OutPoint,
     cell: HostCell,
 }
 
@@ -50,11 +46,10 @@ struct IntentionView {
 
 /// SSRI handler for Process.assemble
 ///
-/// Stdin: packed molecule `Transaction` draft (Intentions + Process state cell as
-/// inputs; outputs/deps may be empty). The guest resolves each input via the
-/// SSRI host (`find_cell_by_out_point` / `find_cell_data_by_out_point`), may
-/// query tip info, then returns a **complete** molecule `Transaction` the
-/// backend submits unchanged.
+/// Stdin: packed molecule `Transaction` draft (Intention + Process state inputs;
+/// caller supplies cell_deps the Process documents — CID, Process, and any xUDT
+/// code). Guest resolves inputs via host queries and returns a complete
+/// molecule `Transaction` the backend submits unchanged.
 pub fn assemble_handler(
     _src: &SsriSource,
     _args: SsriArgs,
@@ -65,9 +60,8 @@ pub fn assemble_handler(
 
     let mut loaded = Vec::new();
     for input in raw.inputs().into_iter() {
-        let out_point = input.previous_output();
-        let cell = host::get_cell_by_out_point(&out_point)?;
-        loaded.push(LoadedInput { out_point, cell });
+        let cell = host::get_cell_by_out_point(&input.previous_output())?;
+        loaded.push(LoadedInput { cell });
     }
 
     // Tip probe so backends exercise header/tip host queries during assemble.
@@ -121,14 +115,41 @@ pub fn assemble_handler(
         }
     }
 
-    // Outputs: Process recreate (same lock/type/data; capacity minus Process-paid
-    // fee) + beneficiaries. Extra draft inputs (Process-owned funding) stay in
-    // `inputs` and their surplus capacity also contributes to tx fee.
+    // Preserve draft inputs as-is (including `since` on funding / timed cells).
+    let input_count = raw.inputs().len();
+    let empty_witnesses = || -> Vec<Bytes> { (0..input_count).map(|_| Bytes::default()).collect() };
+
+    // First pass: same Process capacity to size the tx for fee estimation.
     let mut outputs = Vec::with_capacity(1 + intentions.len());
     let mut outputs_data = Vec::with_capacity(1 + intentions.len());
+    outputs.push(process.cell.output.clone());
+    outputs_data.push(process.cell.data.clone());
+    push_beneficiaries(&mut outputs, &mut outputs_data, &intentions);
 
+    let sized = Transaction::new_builder()
+        .raw(
+            RawTransaction::new_builder()
+                .version(raw.version())
+                .cell_deps(raw.cell_deps())
+                .header_deps(raw.header_deps())
+                .inputs(raw.inputs())
+                .outputs(outputs.pack())
+                .outputs_data(outputs_data.into_iter().map(Bytes::from).pack())
+                .build(),
+        )
+        .witnesses(empty_witnesses().pack())
+        .build();
+
+    let fee = fee_from_tx_size(sized.as_slice().len() as u64);
     let process_cap: u64 = process.cell.output.capacity().unpack();
-    let recreate_cap = process_cap.saturating_sub(ASSEMBLE_FEE);
+    let occupied = occupied_capacity_shannons(&process.cell.output, process.cell.data.len());
+    let recreate_cap = process_cap
+        .checked_sub(fee)
+        .ok_or(ProcessError::CapacityInsufficient)?;
+    if recreate_cap < occupied {
+        return Err(ProcessError::CapacityInsufficient);
+    }
+
     let recreate = process
         .cell
         .output
@@ -136,10 +157,35 @@ pub fn assemble_handler(
         .as_builder()
         .capacity(recreate_cap)
         .build();
+
+    let mut outputs = Vec::with_capacity(1 + intentions.len());
+    let mut outputs_data = Vec::with_capacity(1 + intentions.len());
     outputs.push(recreate);
     outputs_data.push(process.cell.data.clone());
+    push_beneficiaries(&mut outputs, &mut outputs_data, &intentions);
 
-    for intention in &intentions {
+    let tx = Transaction::new_builder()
+        .raw(
+            RawTransaction::new_builder()
+                .version(raw.version())
+                .cell_deps(raw.cell_deps())
+                .header_deps(raw.header_deps())
+                .inputs(raw.inputs())
+                .outputs(outputs.pack())
+                .outputs_data(outputs_data.into_iter().map(Bytes::from).pack())
+                .build(),
+        )
+        .witnesses(empty_witnesses().pack())
+        .build();
+    Ok(tx.as_slice().to_vec())
+}
+
+fn push_beneficiaries(
+    outputs: &mut Vec<CellOutput>,
+    outputs_data: &mut Vec<Vec<u8>>,
+    intentions: &[IntentionView],
+) {
+    for intention in intentions {
         let lock = beneficiary_lock(intention.lock_args.clone());
         let mut output = CellOutput::new_builder()
             .capacity(intention.capacity)
@@ -150,36 +196,20 @@ pub fn assemble_handler(
         outputs.push(output.build());
         outputs_data.push(intention.data.clone());
     }
+}
 
-    // Inputs: full draft order (includes any Process-owned funding cells).
-    let inputs: Vec<CellInput> = loaded
-        .iter()
-        .map(|item| {
-            CellInput::new_builder()
-                .previous_output(item.out_point.clone())
-                .build()
-        })
-        .collect();
+fn fee_from_tx_size(size_bytes: u64) -> u64 {
+    // CKB fee = ceil(size_bytes * fee_rate / 1000); fee_rate in shannons/kB.
+    size_bytes.saturating_mul(FEE_RATE).div_ceil(1000)
+}
 
-    // Preserve draft deps as-is; witnesses: one empty per input (backend fills unlocks).
-    let cell_deps = raw.cell_deps();
-    let header_deps = raw.header_deps();
-    let witnesses: Vec<Bytes> = (0..inputs.len()).map(|_| Bytes::default()).collect();
-
-    let tx = Transaction::new_builder()
-        .raw(
-            RawTransaction::new_builder()
-                .version(raw.version())
-                .cell_deps(cell_deps)
-                .header_deps(header_deps)
-                .inputs(inputs.pack())
-                .outputs(outputs.pack())
-                .outputs_data(outputs_data.into_iter().map(Bytes::from).pack())
-                .build(),
-        )
-        .witnesses(witnesses.pack())
-        .build();
-    Ok(tx.as_slice().to_vec())
+fn occupied_capacity_shannons(output: &CellOutput, data_len: usize) -> u64 {
+    let lock = output.lock();
+    let mut bytes = 8 + 32 + 1 + lock.args().raw_data().len() + data_len;
+    if let Some(type_script) = output.type_().to_opt() {
+        bytes += 32 + 1 + type_script.args().raw_data().len();
+    }
+    bytes as u64 * SHANNONS_PER_BYTE
 }
 
 fn read_stdin() -> Result<Vec<u8>, ProcessError> {
