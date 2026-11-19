@@ -181,10 +181,11 @@ fn require_cid_lock_type_script(dep: &NamedDep) -> Result<Script, CliError> {
             "cid_lock_dep.type_script.code_hash must be the TYPE_ID code hash".into(),
         ));
     }
-    if type_script.args().raw_data().is_empty() {
-        return Err(CliError::InvalidRequest(
-            "cid_lock_dep.type_script.args must be the Type ID args (32 bytes)".into(),
-        ));
+    let args_len = type_script.args().raw_data().len();
+    if args_len != 32 {
+        return Err(CliError::InvalidRequest(format!(
+            "cid_lock_dep.type_script.args must be exactly 32 bytes (got {args_len})"
+        )));
     }
     Ok(type_script)
 }

@@ -162,6 +162,44 @@ fn cid_lock_type_script_must_be_type_id() {
 }
 
 #[test]
+fn cid_lock_type_script_args_short_rejected() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    let mut bad = req.cid_lock_dep.type_script.clone().unwrap();
+    bad.args = format!("0x{}", hex::encode([0xABu8; 16]));
+    req.cid_lock_dep.type_script = Some(bad);
+    let err = create_signed_intention(&req, &secret).unwrap_err();
+    match err {
+        CliError::InvalidRequest(msg) => {
+            assert!(
+                msg.contains("exactly 32 bytes") && msg.contains("got 16"),
+                "unexpected message: {msg}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[test]
+fn cid_lock_type_script_args_long_rejected() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    let mut bad = req.cid_lock_dep.type_script.clone().unwrap();
+    bad.args = format!("0x{}", hex::encode([0xABu8; 33]));
+    req.cid_lock_dep.type_script = Some(bad);
+    let err = create_signed_intention(&req, &secret).unwrap_err();
+    match err {
+        CliError::InvalidRequest(msg) => {
+            assert!(
+                msg.contains("exactly 32 bytes") && msg.contains("got 33"),
+                "unexpected message: {msg}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[test]
 fn wrong_key_rejected() {
     let req = fixture_request(&key(0x42));
     let err = create_signed_intention(&req, &key(0x43)).unwrap_err();
