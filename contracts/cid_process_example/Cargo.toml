@@ -8,6 +8,7 @@ ckb-std = "1.1.0"
 ckb-cinnabar-verifier = { workspace = true }
 cid-protocol = { path = "../../protocol" }
 cid-process-example-policy = { path = "../../crates/cid-process-example-policy" }
+cid-intention-filter = { path = "../../crates/cid-intention-filter" }
 ckb-ssri-std = { workspace = true }
 
 [features]

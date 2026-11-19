@@ -3,11 +3,12 @@
 //! Wraps `cid_process_example_policy::classify_intention` with packed cell
 //! parsing so RISC-V SSRI and on-chain verify share one rule set.
 
-use cid_process_example_policy::classify_intention;
-use cid_protocol::{
-    Script as CidScript, FILTER_ACCEPTED, FILTER_MALFORMED_CELL, FILTER_MALFORMED_DIGEST,
+use cid_intention_filter::{
+    FILTER_ACCEPTED, FILTER_DEPOSIT_BELOW_MINIMUM, FILTER_MALFORMED_CELL, FILTER_MALFORMED_DIGEST,
     FILTER_NOT_INTENTION, FILTER_PROCESS_MISMATCH, FILTER_UNSUPPORTED_ASSET,
 };
+use cid_process_example_policy::classify_intention;
+use cid_protocol::Script as CidScript;
 use ckb_std::ckb_types::packed::{CellOutput, Script};
 use ckb_std::ckb_types::prelude::*;
 
@@ -61,9 +62,7 @@ pub fn filter_reason_to_process_error(reason: i8) -> Option<ProcessError> {
         }
         x if x == FILTER_UNSUPPORTED_ASSET => Some(ProcessError::UnsupportedAsset),
         x if x == FILTER_MALFORMED_DIGEST => Some(ProcessError::BeneficiaryMissing),
-        x if x == cid_protocol::FILTER_DEPOSIT_BELOW_MINIMUM => {
-            Some(ProcessError::DepositBelowMinimum)
-        }
+        x if x == FILTER_DEPOSIT_BELOW_MINIMUM => Some(ProcessError::DepositBelowMinimum),
         _ => Some(ProcessError::IncompatibleBatch),
     }
 }

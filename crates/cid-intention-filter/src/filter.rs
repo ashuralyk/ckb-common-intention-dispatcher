@@ -3,8 +3,8 @@
 //! Wire format is Process-protocol (shared by every Process implementation).
 //! Application rules that produce these codes are Process-owned.
 
-use crate::CodecError;
 use alloc::vec::Vec;
+use cid_protocol::CodecError;
 
 /// Accepted by `Process.filter`.
 pub const FILTER_ACCEPTED: i8 = 0;

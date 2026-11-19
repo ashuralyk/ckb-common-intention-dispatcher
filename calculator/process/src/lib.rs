@@ -33,7 +33,7 @@ pub const DEFAULT_PROCESS_STATE_CAPACITY: u64 = 300_0000_0000;
 /// `crates/cid-process-example-policy`.
 pub use cid_process_example_policy::{ckb_deposit_capacity_ok, MIN_DEPOSIT_CAPACITY};
 
-pub use cid_protocol::{
+pub use cid_intention_filter::{
     intention_belongs_to_process, intention_process_type_id, FilterCell, FilterRequest,
     IntentionRouteError, FILTER_ACCEPTED, FILTER_DEPOSIT_BELOW_MINIMUM, FILTER_MALFORMED_CELL,
     FILTER_MALFORMED_DIGEST, FILTER_NOT_INTENTION, FILTER_PROCESS_MISMATCH,
@@ -281,7 +281,7 @@ pub fn process_filter_cells(
         cid_code_type_id_hash,
         cells: cells.to_vec(),
     };
-    let bytes = cid_protocol::encode_filter_request(&req)
+    let bytes = cid_intention_filter::encode_filter_request(&req)
         .map_err(|e| CalculatorError::Other(format!("encode filter request: {:?}", e)))?;
     executor
         .filter(&bytes)

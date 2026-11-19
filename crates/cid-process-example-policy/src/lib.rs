@@ -4,18 +4,19 @@
 //! and on-chain Verify. Protocol / CID impose no Intention or deposit floor.
 //!
 //! Ownership (CID Type-ID lock + Process Type ID) uses
-//! [`cid_protocol::intention_belongs_to_process`] — same helper the Sequencer
-//! uses for routing.
+//! [`cid_intention_filter::intention_belongs_to_process`] — same helper the
+//! Sequencer uses for routing.
 
 #![no_std]
 
 extern crate alloc;
 
-use cid_protocol::{
-    intention_belongs_to_process, is_standard_xudt, CidArgs, IntentionRouteError, Script,
-    FILTER_ACCEPTED, FILTER_DEPOSIT_BELOW_MINIMUM, FILTER_MALFORMED_DIGEST, FILTER_NOT_INTENTION,
-    FILTER_PROCESS_MISMATCH, FILTER_UNSUPPORTED_ASSET, XUDT_AMOUNT_LEN,
+use cid_intention_filter::{
+    intention_belongs_to_process, IntentionRouteError, FILTER_ACCEPTED,
+    FILTER_DEPOSIT_BELOW_MINIMUM, FILTER_MALFORMED_DIGEST, FILTER_NOT_INTENTION,
+    FILTER_PROCESS_MISMATCH, FILTER_UNSUPPORTED_ASSET,
 };
+use cid_protocol::{is_standard_xudt, CidArgs, Script, XUDT_AMOUNT_LEN};
 
 /// Minimum CKB capacity (shannons) for a deposit Intention owned by this
 /// Process: **600 CKB**.

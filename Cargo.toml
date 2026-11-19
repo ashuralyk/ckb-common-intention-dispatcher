@@ -10,6 +10,7 @@ default-members = [
   "calculator/process",
   "crates/cid-process-executor",
   "crates/cid-process-example-policy",
+  "crates/cid-intention-filter",
 ]
 
 members = [
@@ -21,6 +22,7 @@ members = [
   "contracts/cid_process_example",
   "crates/cid-process-executor",
   "crates/cid-process-example-policy",
+  "crates/cid-intention-filter",
   "runner",
   "tools/cid-intention-cli",
 ]

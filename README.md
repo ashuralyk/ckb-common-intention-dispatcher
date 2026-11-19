@@ -136,12 +136,12 @@ rejects a smaller effective capacity before signing. See the
 [upgrade steps](docs/process-example-usage.md#upgrading-an-existing-process-deployment)
 before replacing the example Process binary at the same code Type ID.
 
-**Intention filter (Sequencer):** Protocol helper
-`intention_process_type_id` validates a CID Type-ID Intention lock and extracts
-the target Process Type ID for Sequencer routing. Each Process exposes SSRI
-`Process.filter` to classify a batch (ownership + Process rules) with stable
-reason codes. Ownership is checked at **both** layers (Sequencer route + Process
-filter) using the same helper. See
+**Intention filter (Sequencer):** Host crate `cid-intention-filter` (kept out of
+`cid-protocol` so the CID lock binary stays byte-stable) provides
+`intention_process_type_id` for routing and `Process.filter` wire framing.
+Each Process exposes SSRI `Process.filter` to classify a batch (ownership +
+Process rules) with stable reason codes. Ownership is checked at **both**
+layers (Sequencer route + Process filter) using the same helper. See
 [docs/ssri-backend-interface.md](docs/ssri-backend-interface.md).
 
 ## Build and test

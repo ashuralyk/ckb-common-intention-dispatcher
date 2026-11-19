@@ -38,7 +38,7 @@ impl ProcessExecutor {
 
     /// Classify Intention candidates via SSRI `Process.filter`.
     ///
-    /// `request` is [`cid_protocol::encode_filter_request`] bytes. Returns
+    /// `request` is [`cid_intention_filter::encode_filter_request`] bytes. Returns
     /// per-cell reason codes in request order (`0` = accepted). Empty request
     /// (or empty cell list) yields an empty reason list. Does not use host
     /// queries — cell payloads are embedded in the request.
@@ -47,7 +47,7 @@ impl ProcessExecutor {
             return Err(ExecutorError::VmError("empty binary".into()));
         }
         let response = vm::call_ssri_method(&self.binary, "Process.filter", request)?;
-        cid_protocol::decode_filter_response(&response)
+        cid_intention_filter::decode_filter_response(&response)
             .map_err(|e| ExecutorError::InvalidResponse(format!("filter response: {:?}", e)))
     }
 

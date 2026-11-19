@@ -49,10 +49,12 @@ are Process responsibilities; submit the returned bytes unchanged.
 
 1. **Scan** live Intention cells (indexer / node).
 2. **Route** with the Process-independent protocol helper
-   [`intention_process_type_id`](../protocol/src/route.rs): require CID lock
-   `hash_type = type` and `code_hash =` the Sequencer's CID code Type ID script
-   hash; extract `process_type_hash`. Group Intentions by that Process Type ID.
-   Non-Intentions / malformed cells get a typed [`IntentionRouteError`].
+   [`intention_process_type_id`](../crates/cid-intention-filter/src/route.rs)
+   (crate `cid-intention-filter`, not linked into the CID lock): require CID
+   lock `hash_type = type` and `code_hash =` the Sequencer's CID code Type ID
+   script hash; extract `process_type_hash`. Group Intentions by that Process
+   Type ID. Non-Intentions / malformed cells get a typed
+   [`IntentionRouteError`].
 3. **Filter** per Process: call SSRI `Process.filter` with that Process's
    identity + the CID Type ID hash + the routed cell batch. The filter
    **must** verify ownership itself (same protocol helper: CID Type-ID lock +
@@ -72,7 +74,7 @@ Host wrapper: `cid_process_example_calculator::process_filter`.
 
 ### `Process.filter`
 
-- **stdin:** [`FilterRequest`](../protocol/src/filter.rs) via
+- **stdin:** [`FilterRequest`](../crates/cid-intention-filter/src/filter.rs) via
   `encode_filter_request`:
   - `process_type_hash[32]` — this Process instance (state TYPE_ID script hash)
   - `cid_code_type_id_hash[32]` — CID lock code Type ID script hash

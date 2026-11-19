@@ -79,7 +79,7 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 
 SSRI method for the Sequencer to pre-select Intentions before assemble:
 
-1. Sequencer routes with `cid_protocol::intention_process_type_id`.
+1. Sequencer routes with `cid_intention_filter::intention_process_type_id`.
 2. Calls `Process.filter` (host: `process_filter`) for that Process Type ID.
 3. Filter **requires** ownership: CID Type-ID lock + `process_type_hash` equals
    this Process (same helper / `ours_prefix` semantics), then applies deposit /
