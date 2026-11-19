@@ -58,11 +58,10 @@ pub struct DraftCellDep {
     pub data: Vec<u8>,
 }
 
-/// Optional Process-owned funding cells plus required draft `cell_deps`.
+/// Additional draft inputs and required code dependencies.
 ///
 /// `cell_deps` must be non-empty on the submit path (CID lock code, Process
-/// code, and any xUDT code). Funding cells, if any, must use AlwaysSuccess
-/// (`Data1`) — the example Process is keyless and emits empty witnesses.
+/// code, and any xUDT code). The example Process requires empty funding inputs.
 #[derive(Clone, Debug, Default)]
 pub struct AssembleExtras {
     pub funding_cells: Vec<ProcessStateCell>,
@@ -121,8 +120,13 @@ fn build_draft_and_known(
     process: &ProcessStateCell,
     extras: &AssembleExtras,
 ) -> Result<(Vec<u8>, KnownCells)> {
+    if !extras.funding_cells.is_empty() {
+        return Err(CalculatorError::Other(
+            "the example Process does not support extra funding inputs".into(),
+        ));
+    }
     let mut known = KnownCells::new();
-    let mut inputs = Vec::with_capacity(1 + intentions.len() + extras.funding_cells.len());
+    let mut inputs = Vec::with_capacity(1 + intentions.len());
 
     let process_out = process_output(process);
     known.insert(
@@ -144,20 +148,6 @@ fn build_draft_and_known(
         inputs.push(
             CellInput::new_builder()
                 .previous_output(intention.out_point.clone())
-                .build(),
-        );
-    }
-
-    for funding in &extras.funding_cells {
-        let output = process_output(funding);
-        let output = output.as_builder().type_(None).build();
-        known.insert(
-            funding.out_point.as_slice().to_vec(),
-            (output, funding.data.clone()),
-        );
-        inputs.push(
-            CellInput::new_builder()
-                .previous_output(funding.out_point.clone())
                 .build(),
         );
     }
@@ -349,8 +339,8 @@ pub fn process_digest_ok_with_process<T: RPC>(
     Ok((skeleton, instructions))
 }
 
-/// Documented submit entry: live Process state, required `cell_deps`, optional
-/// AlwaysSuccess funding inputs.
+/// Documented submit entry with live Process state and required `cell_deps`.
+/// Set `funding_cells` to an empty vector for the example Process.
 ///
 /// Seeds an offline [`MockHost`] from the draft cells. For a live RPC/indexer
 /// host, use [`process_digest_ok_with_host`] instead.
@@ -642,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn test_skeleton_preserves_extra_input_and_cell_dep() {
+    fn test_assemble_rejects_always_success_funding() {
         let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
         let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
         if !std::path::Path::new(&bin_path).exists() {
@@ -652,30 +642,32 @@ mod tests {
 
         let rpc = FakeRpcClient::default();
         let (process, intentions) = sample_process_and_intention();
-        let funding = ProcessStateCell {
-            out_point: fake_outpoint(),
-            lock: always_success_script(vec![]),
-            type_script: Script::default(),
-            capacity: 50_000_000_000,
-            data: vec![],
-        };
-        let dep = sample_code_dep();
-        let cell_dep = dep.cell_dep.clone();
-        let extras = AssembleExtras {
-            funding_cells: vec![funding.clone()],
-            cell_deps: vec![dep],
-        };
-        let (skeleton, _, _) =
-            process_digest_ok_with_extras(&rpc, intentions, process, extras, bin_dir)
-                .expect("digest with AlwaysSuccess funding");
-        assert_eq!(skeleton.inputs.len(), 3);
-        assert_eq!(skeleton.celldeps.len(), 1);
-        assert_eq!(skeleton.celldeps[0].celldep.as_slice(), cell_dep.as_slice());
-        assert!(skeleton
-            .inputs
-            .iter()
-            .any(|i| i.input.previous_output() == funding.out_point));
-        assert_eq!(skeleton.witnesses.len(), 3);
+        for args in [vec![], intentions[0].lock_args.clone()] {
+            let funding = ProcessStateCell {
+                out_point: fake_outpoint(),
+                lock: always_success_script(args),
+                type_script: Script::default(),
+                capacity: 50_000_000_000,
+                data: vec![],
+            };
+            let err = process_digest_ok_with_extras(
+                &rpc,
+                intentions.clone(),
+                process.clone(),
+                AssembleExtras {
+                    funding_cells: vec![funding],
+                    cell_deps: vec![sample_code_dep()],
+                },
+                bin_dir,
+            )
+            .err()
+            .expect("AlwaysSuccess funding must fail without a change policy");
+            assert!(
+                err.to_string()
+                    .contains("does not support extra funding inputs"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -714,8 +706,8 @@ mod tests {
         .expect("non-AlwaysSuccess funding must fail");
         let msg = format!("{err}");
         assert!(
-            msg.contains("38") || msg.contains("Incompatible") || msg.contains("assemble"),
-            "expected UnsupportedFundingLock via assemble, got {msg}"
+            msg.contains("does not support extra funding inputs"),
+            "expected funding input rejection, got {msg}"
         );
 
         // Same Process lock as state would break on-chain 1→1.
@@ -740,8 +732,8 @@ mod tests {
         .expect("same-Process-lock funding must fail");
         let msg = format!("{err}");
         assert!(
-            msg.contains("38") || msg.contains("Incompatible") || msg.contains("assemble"),
-            "expected UnsupportedFundingLock for same Process lock, got {msg}"
+            msg.contains("does not support extra funding inputs"),
+            "expected funding input rejection for same Process lock, got {msg}"
         );
     }
 }

@@ -90,8 +90,7 @@ pub trait HostQuery {
     ///   ckb-indexer cursors are host-defined opaque bytes.  
     /// - `limit`: page size (`page_window`)
     ///
-    /// Result cell order matches ckb-indexer:
-    /// `(block_number, tx_index, output_index)`.
+    /// MockHost sorts by the full CKB indexer key for the queried script.
     fn get_cells(
         &self,
         search_key: &[u8],
@@ -476,8 +475,8 @@ impl HostQuery for MockHost {
             .iter()
             .filter(|(_, cell)| cell_matches(&key, cell))
             .collect();
-        // ckb-indexer orders by (block_number, tx_index, output_index).
-        matched.sort_by_key(|a| indexer_order_key(a.0, a.1));
+        matched
+            .sort_by_cached_key(|(op, cell)| (indexer_order_key(op, cell, key.script_type), *op));
         if matches!(order, Order::Desc) {
             matched.reverse();
         }
@@ -637,17 +636,23 @@ fn script_raw_len(script: &ckb_types::packed::Script) -> u64 {
     (32 + 1 + script.args().raw_data().len()) as u64
 }
 
-/// ckb-indexer live-cell key suffix: `block_number ‖ tx_index ‖ output_index`
-/// (each big-endian in the DB key; comparison order is numeric ascending).
-fn indexer_order_key(op_bytes: &[u8], cell: &HostCell) -> (u64, u32, u32) {
-    let output_index = OutPoint::from_slice(op_bytes)
-        .map(|op| op.index().unpack())
-        .unwrap_or(0);
-    (
-        cell.block_number.unwrap_or(0),
-        cell.tx_index.unwrap_or(0),
-        output_index,
-    )
+/// Match the built-in indexer's byte ordering for exact and prefix searches.
+/// In a prefix search the full script args can differ before the position fields.
+fn indexer_order_key(op_bytes: &[u8], cell: &HostCell, script_type: ScriptType) -> Option<Vec<u8>> {
+    let script = match script_type {
+        ScriptType::Lock => cell.output.lock(),
+        ScriptType::Type => cell.output.type_().to_opt()?,
+    };
+    let output_index: u32 = OutPoint::from_slice(op_bytes).ok()?.index().unpack();
+    let args = script.args().raw_data();
+    let mut key = Vec::with_capacity(33 + args.len() + 16);
+    key.extend_from_slice(script.code_hash().as_slice());
+    key.extend_from_slice(script.hash_type().as_slice());
+    key.extend_from_slice(&args);
+    key.extend_from_slice(&cell.block_number.unwrap_or(0).to_be_bytes());
+    key.extend_from_slice(&cell.tx_index.unwrap_or(0).to_be_bytes());
+    key.extend_from_slice(&output_index.to_be_bytes());
+    Some(key)
 }
 
 /// Decode MockHost's opaque page cursor (LE offset, empty or 1..=8 bytes).
@@ -944,6 +949,59 @@ mod tests {
         .unwrap();
         assert_eq!(page.objects.len(), 1);
         assert_eq!(page.objects[0].out_point, IndexerOutPoint::from(&with_type));
+    }
+
+    #[test]
+    fn get_cells_prefix_orders_by_full_indexer_key() {
+        let host = MockHost::new();
+        let earlier = sample_out_point(1);
+        let later = sample_out_point(2);
+        for (op, block, args) in [
+            (earlier.clone(), 1, [0xaa, 0xff]),
+            (later.clone(), 2, [0xaa, 0x00]),
+        ] {
+            host.insert_cell_ex(
+                op,
+                HostCell {
+                    output: sample_output(0x11, &args),
+                    data: vec![],
+                    block_hash: None,
+                    block_number: Some(block),
+                    tx_index: Some(0),
+                },
+            );
+        }
+        let search = SearchKey {
+            script: Script {
+                code_hash: [0x11; 32],
+                hash_type: 0,
+                args: vec![0xaa],
+            },
+            script_type: ScriptType::Lock,
+            script_search_mode: Some(SearchMode::Prefix),
+            filter: None,
+            with_data: None,
+            group_by_transaction: None,
+        };
+        let bytes = serde_molecule::to_vec(&search, false).unwrap();
+        let page: Pagination = serde_molecule::from_slice(
+            &HostQuery::get_cells(&host, &bytes, 0, 1, &[]).unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(page.objects[0].out_point, IndexerOutPoint::from(&later));
+        let next: Pagination = serde_molecule::from_slice(
+            &HostQuery::get_cells(&host, &bytes, 0, 1, &page.last_cursor).unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(next.objects[0].out_point, IndexerOutPoint::from(&earlier));
+        let desc: Pagination = serde_molecule::from_slice(
+            &HostQuery::get_cells(&host, &bytes, 1, 1, &[]).unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(desc.objects[0].out_point, IndexerOutPoint::from(&earlier));
     }
 
     #[test]

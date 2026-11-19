@@ -701,6 +701,28 @@ mod tests {
     }
 
     #[test]
+    fn assemble_rejects_typed_funding_before_process_state() {
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let mut cells = make_assemble_cells(1);
+        let funding = process_draft_cell(
+            OutPoint::new_builder().tx_hash([0xFE; 32].pack()).build(),
+            Script::default(),
+            type_id_script(b"unrelated-funding"),
+            50_000_000_000,
+            vec![],
+        );
+        cells.insert(0, funding);
+        let result = executor.assemble_from_cells(&cells);
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(38))),
+            "expected UnsupportedFundingLock, got {result:?}"
+        );
+    }
+
+    #[test]
     fn test_assemble_preserves_input_since() {
         use ckb_types::packed::{CellInput, RawTransaction, Transaction};
 

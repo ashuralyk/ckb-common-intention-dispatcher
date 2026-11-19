@@ -38,11 +38,11 @@ cd tests && cargo test process_example -- --nocapture
 
 - **Process.batch** — `(min, max)` = `(1, 4)` as 8 LE bytes  
 - **Process.assemble** — stdin = molecule `Transaction` draft (Intention + Process
-  inputs + optional AlwaysSuccess funding; required code `cell_deps`); stdout =
+  inputs and required code `cell_deps`); stdout =
   complete molecule `Transaction` (inputs, outputs, outputs_data, cell_deps,
   header_deps, witnesses). Cells are loaded via ckb-ssri-std host queries
-  (`find_cell_by_out_point`, …). Keyless Process: funding must be AlwaysSuccess
-  (`Data1`); secp / same-Process-lock funding → `UnsupportedFundingLock` (38).
+  (`find_cell_by_out_point`, …). Extra funding inputs return
+  `UnsupportedFundingLock` (38). The Process state pays the fee.
 
 ## On-chain verification (Process **lock**)
 
@@ -72,7 +72,7 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 | 35 | `TypeIdInvalid` (missing / non-TYPE_ID / continuity break / smuggled Type ID) |
 | 36 | `HostQueryFailed` |
 | 37 | `CapacityInsufficient` (fee would drop state below occupied capacity) |
-| 38 | `UnsupportedFundingLock` (funding not AlwaysSuccess / same Process lock) |
+| 38 | `UnsupportedFundingLock` (extra funding input) |
 
 ## Capacity / fee (example assemble)
 

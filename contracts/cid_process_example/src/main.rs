@@ -28,7 +28,7 @@ define_errors!(ProcessError, {
     TypeIdInvalid = ERROR_TYPE_ID_INVALID,              // 35
     HostQueryFailed = ERROR_HOST_QUERY_FAILED,          // 36
     CapacityInsufficient = ERROR_CAPACITY_INSUFFICIENT, // 37
-    // Funding lock not spendable with empty witness (keyless Process).
+    // The example Process only spends its state and Intention inputs.
     UnsupportedFundingLock = ERROR_UNSUPPORTED_FUNDING_LOCK, // 38
 });
 
