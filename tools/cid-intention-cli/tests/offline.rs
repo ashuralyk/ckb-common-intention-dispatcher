@@ -98,7 +98,8 @@ fn create_signed_tx_shape_fee_witness_and_args() {
     .unwrap();
     assert_eq!(
         cap,
-        ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY
+        cid_process_example_calculator::MIN_DEPOSIT_CAPACITY,
+        "CLI default Intention capacity is the example Process deposit min"
     );
 
     let args = transaction["outputs"][0]["lock"]["args"].as_str().unwrap();
@@ -375,21 +376,19 @@ fn create_intention_fee_covers_rate_1000_serialized_size_in_block() {
 }
 
 #[test]
-fn create_rejects_intention_capacity_below_default_min() {
+fn create_bumps_intention_capacity_below_default_min_to_floor() {
     let secret = key(0x42);
     let mut req = fixture_request(&secret);
-    req.intention_capacity =
-        ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY - 1;
-    let err = create_signed_intention(&req, &secret).unwrap_err();
-    match err {
-        CliError::InvalidRequest(msg) => {
-            assert!(
-                msg.contains("DEFAULT_MIN_INTENTION_CAPACITY"),
-                "unexpected message: {msg}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got {other:?}"),
-    }
+    let floor = ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY;
+    req.intention_capacity = floor - 1;
+    // Funding must cover the bumped floor + fee + change dust.
+    req.funding.capacity = floor + req.fee_shannons + 61_0000_0000 + 10_0000_0000;
+    let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
+    let cap = bundle.skeleton.outputs[0].capacity_shannons();
+    assert!(
+        cap >= floor,
+        "sub-floor request must size to at least DEFAULT_MIN_INTENTION_CAPACITY: got {cap}"
+    );
 }
 
 #[test]

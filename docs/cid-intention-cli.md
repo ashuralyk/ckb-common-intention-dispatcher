@@ -20,7 +20,7 @@ Lean host binary in this contract repo that:
 | Concern | Choice |
 |---------|--------|
 | Asset | CKB only (no xUDT) |
-| Intention capacity | Absolute; default / minimum `DEFAULT_MIN_INTENTION_CAPACITY` (**300 CKB**) — covers typical occupied capacity for CID lock args (secp + beneficiary payload). Values below that floor are rejected. |
+| Intention capacity | Sized to `max(requested, DEFAULT_MIN_INTENTION_CAPACITY=500 CKB, occupied)`. Default request value is the example Process deposit min (**600 CKB**) so a default create can DigestOk as a CKB deposit. |
 | Inputs | Explicit funding outpoint + deps in offline request JSON (pinned by outpoint; not address scan) |
 | Process identity | Process state cell’s built-in **TYPE_ID type script** `{TYPE_ID, type, args}` → `calc_script_hash` (= Intention `process_type_hash`); Process contract is the state-cell **lock** |
 | CID lock identity | Intention lock always references the CID code cell by **Type ID**: `lock.code_hash = hash(cid_lock_dep.type_script)`, `lock.hash_type = type`. Data-hash (`data1`) referencing is rejected. |
@@ -37,7 +37,7 @@ Lean host binary in this contract repo that:
 {
   "network": "testnet",
   "fee_shannons": 10000,
-  "intention_capacity": 30000000000,
+  "intention_capacity": 60000000000,
   "funding": {
     "tx_hash": "0x…",
     "index": 0,

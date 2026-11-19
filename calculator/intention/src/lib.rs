@@ -3,10 +3,13 @@
 //! Calculate assembles; it does not re-implement Verify predicates.
 
 use cid_protocol::XUDT_AMOUNT_LEN;
+
+pub use cid_protocol::DEFAULT_MIN_INTENTION_CAPACITY;
 use ckb_cinnabar_calculator::{
     address::Address,
     indexer::{CellQueryOptions, GetCellsIter, SearchMode},
     instruction::Instruction,
+    occupied_capacity_shannons,
     operation::{
         basic::{
             AddHeaderDepByBlockNumber, AddHeaderDepByInputIndex, AddInputCellByAddress,
@@ -15,7 +18,10 @@ use ckb_cinnabar_calculator::{
         udt::AddXudtCelldep,
         Log, Operation,
     },
-    re_exports::ckb_types::prelude::Unpack,
+    re_exports::ckb_types::{
+        packed::CellOutput,
+        prelude::{Builder, Entity, Pack, Unpack},
+    },
     rpc::RPC,
     skeleton::{CellInputEx, CellOutputEx, ScriptEx, TransactionSkeleton},
     types::Hash256,
@@ -152,10 +158,10 @@ impl<T: RPC> Operation<T> for AddInputAssetDeps {
 
 /// Create an Intention cell. Lock Create does **not** run CID Verify.
 ///
-/// `capacity` is absolute (`AddOutputCell.absolute_capacity = true`) and must
-/// be at least [`DEFAULT_MIN_INTENTION_CAPACITY`] so the cell covers typical
-/// occupied capacity. `AddOutputCell` still rejects values below the concrete
-/// occupied floor for the resolved lock args.
+/// Effective capacity is `max(requested, DEFAULT_MIN_INTENTION_CAPACITY,
+/// occupied)` so the cell always covers the policy floor and the concrete
+/// occupied capacity for the resolved lock args / type / data (the
+/// "build_with_capacity" sizing rule).
 ///
 /// `xudt`: when set, attach the official xUDT type + 16-byte amount and the
 /// xUDT celldep. CKB-only path uses empty data and `type_script = None`.
@@ -165,11 +171,9 @@ pub fn create_intention<T: RPC>(
     capacity: u64,
     xudt: Option<(ScriptEx, u128)>,
 ) -> Instruction<T> {
-    let mut ops: Vec<Box<dyn Operation<T>>> =
-        vec![Box::new(ValidateIntentionCapacity { capacity })];
-    ops.push(Box::new(AddInputCellByAddress {
+    let mut ops: Vec<Box<dyn Operation<T>>> = vec![Box::new(AddInputCellByAddress {
         address: payer.clone(),
-    }));
+    })];
     let (type_script, data) = match xudt {
         Some((type_script, amount)) => {
             ops.push(Box::new(AddXudtCelldep {}));
@@ -182,36 +186,46 @@ pub fn create_intention<T: RPC>(
         }
         None => (None, Vec::new()),
     };
-    ops.push(Box::new(AddOutputCell {
+    ops.push(Box::new(AddIntentionOutput {
         lock_script: cid_lock(args),
         type_script,
         data,
         capacity,
-        absolute_capacity: true,
-        type_id: false,
     }));
     Instruction::new(ops)
 }
 
-/// Off-chain guard: Intention absolute capacity ≥ protocol default floor.
-struct ValidateIntentionCapacity {
+/// Size Intention capacity to `max(requested, policy floor, occupied)`.
+struct AddIntentionOutput {
+    lock_script: ScriptEx,
+    type_script: Option<ScriptEx>,
+    data: Vec<u8>,
     capacity: u64,
 }
 
-impl<T: RPC> Operation<T> for ValidateIntentionCapacity {
+impl<T: RPC> Operation<T> for AddIntentionOutput {
     fn run(
         self: Box<Self>,
         _rpc: &T,
-        _skeleton: &mut TransactionSkeleton,
+        skeleton: &mut TransactionSkeleton,
         _: &mut Log,
     ) -> Result<()> {
-        if self.capacity < DEFAULT_MIN_INTENTION_CAPACITY {
-            return Err(CalculatorError::Other(format!(
-                "intention capacity {} is below DEFAULT_MIN_INTENTION_CAPACITY {} \
-                 (covers typical occupied capacity for CID lock args)",
-                self.capacity, DEFAULT_MIN_INTENTION_CAPACITY
-            )));
-        }
+        let lock = self.lock_script.to_script(skeleton)?;
+        let typ = self
+            .type_script
+            .map(|t| t.to_script(skeleton))
+            .transpose()?;
+        let draft = CellOutput::new_builder()
+            .lock(lock)
+            .type_(typ.pack())
+            .build();
+        let occupied = occupied_capacity_shannons(&draft, self.data.len());
+        let cap = self
+            .capacity
+            .max(DEFAULT_MIN_INTENTION_CAPACITY)
+            .max(occupied);
+        let output = draft.as_builder().capacity(cap).build();
+        skeleton.output(CellOutputEx::new(output, self.data));
         Ok(())
     }
 }
@@ -345,11 +359,11 @@ fn refund_burn<T: RPC>(
 }
 
 pub use cid_protocol::{
-    deposit_min_satisfies_intention_floor, fee_covers_shortfalls, refund_capacity_allowed, CidArgs,
-    CidEntry, CkbDepositPolicy, Payload, Script as CidScript, CID_VERSION,
-    DEFAULT_MIN_INTENTION_CAPACITY, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING, ERROR_MIXED_CID_LOCK,
+    assert_ckb_deposit_policy, deposit_min_satisfies_intention_floor, fee_covers_shortfalls,
+    refund_capacity_allowed, CidArgs, CidEntry, CkbDepositPolicy, Payload, Script as CidScript,
+    CID_VERSION, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING, ERROR_MIXED_CID_LOCK,
     ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH, ERROR_REFUND_ASSET_MISMATCH,
     ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED, ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE,
-    ERROR_ZERO_ASSET, HOP_DIGEST_INCOMPATIBLE, HOP_DIGEST_OK, HOP_TIMEOUT_BURN, MAX_REFUND_FEE,
-    TIMEOUT_BLOCKS, XUDT_CODE_HASH,
+    ERROR_ZERO_ASSET, EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY, HOP_DIGEST_INCOMPATIBLE, HOP_DIGEST_OK,
+    HOP_TIMEOUT_BURN, MAX_REFUND_FEE, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
 };

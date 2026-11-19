@@ -2,6 +2,7 @@
 
 use ckb_cinnabar_calculator::{
     instruction::Instruction,
+    occupied_capacity_shannons,
     operation::basic::{
         AddCellDep, AddInputCellByOutPoint, AddOutputCell, AddSecp256k1SighashSignatures,
     },
@@ -10,7 +11,7 @@ use ckb_cinnabar_calculator::{
         ckb_jsonrpc_types,
         ckb_types::{
             core::{Capacity, ScriptHashType},
-            packed::{OutPoint, Script},
+            packed::{CellOutput, OutPoint, Script},
             prelude::*,
             H256,
         },
@@ -23,7 +24,7 @@ use ckb_cinnabar_calculator::{
     TransactionCalculator, TYPE_ID_CODE_HASH,
 };
 use ckb_common_intention_dispatcher_calculator::{
-    cid_lock, encode_cid_args, Payload, CONTRACT_NAME,
+    cid_lock, encode_cid_args, Payload, CONTRACT_NAME, DEFAULT_MIN_INTENTION_CAPACITY,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -350,16 +351,6 @@ fn create_signed_intention_bundle_inner(
     if req.fee_shannons == 0 {
         return Err(CliError::InvalidRequest("fee_shannons must be > 0".into()));
     }
-    if req.intention_capacity
-        < ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY
-    {
-        return Err(CliError::InvalidRequest(format!(
-            "intention_capacity {} is below DEFAULT_MIN_INTENTION_CAPACITY {} \
-             (covers typical Intention occupied capacity; use at least 300 CKB)",
-            req.intention_capacity,
-            ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY
-        )));
-    }
 
     let funding_lock = packed_script(&req.funding.lock)?;
     let funding_code: [u8; 32] = funding_lock.code_hash().unpack();
@@ -369,13 +360,14 @@ fn create_signed_intention_bundle_inner(
         return Err(CliError::LockKeyMismatch);
     }
 
-    // Early budget uses only the requested fee_shannons so it is never stricter
-    // than the post-placeholder need_exact check (effective_fee = max(fee, min)).
-    // A fixed FEE_HEADROOM here would reject tight-but-sufficient funding such as
-    // intention + fee_shannons(10000) + 61 CKB change dust.
+    // Early budget uses max(requested, Intention floor); occupied bump happens
+    // after deps resolve. fee_shannons-only so this stays no stricter than
+    // need_exact (effective_fee = max(fee, min)).
     const MIN_CHANGE: u64 = 61_0000_0000;
-    let need = req
+    let floor_capacity = req
         .intention_capacity
+        .max(ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY);
+    let need = floor_capacity
         .checked_add(req.fee_shannons)
         .and_then(|v| v.checked_add(MIN_CHANGE))
         .ok_or(CliError::InsufficientFunds)?;
@@ -450,6 +442,18 @@ fn create_signed_intention_bundle_inner(
         add_named_dep(&rpc, &mut skeleton, dep)?;
     }
 
+    // Size Intention to max(requested, policy floor, occupied) once the CID
+    // Type ID lock can be resolved against seeded deps.
+    let intention_lock = cid_lock(args.clone())
+        .to_script(&skeleton)
+        .map_err(|e| CliError::Calculator(e.to_string()))?;
+    let draft = CellOutput::new_builder().lock(intention_lock).build();
+    let occupied = occupied_capacity_shannons(&draft, 0);
+    let intention_capacity = req
+        .intention_capacity
+        .max(DEFAULT_MIN_INTENTION_CAPACITY)
+        .max(occupied);
+
     // Pin funding by explicit outpoint (CKB-only create path; no address scan).
     let create = Instruction::new(vec![
         Box::new(AddInputCellByOutPoint {
@@ -461,7 +465,7 @@ fn create_signed_intention_bundle_inner(
             lock_script: cid_lock(args),
             type_script: None,
             data: Vec::new(),
-            capacity: req.intention_capacity,
+            capacity: intention_capacity,
             absolute_capacity: true,
             type_id: false,
         }),
@@ -518,8 +522,7 @@ fn create_signed_intention_bundle_inner(
     let min_fee = min_fee_for_skeleton(&skeleton, MIN_FEE_RATE);
     let effective_fee = req.fee_shannons.max(min_fee);
     // Exact headroom with effective_fee (may exceed the early estimate).
-    let need_exact = req
-        .intention_capacity
+    let need_exact = intention_capacity
         .checked_add(effective_fee)
         .and_then(|v| v.checked_add(MIN_CHANGE))
         .ok_or(CliError::InsufficientFunds)?;
@@ -539,7 +542,7 @@ fn create_signed_intention_bundle_inner(
 
     // Structural checks (no network).
     let intention_out = &skeleton.outputs[0];
-    if intention_out.capacity_shannons() != req.intention_capacity {
+    if intention_out.capacity_shannons() != intention_capacity {
         return Err(CliError::Calculator("intention capacity mismatch".into()));
     }
     let lock = intention_out.lock_script();

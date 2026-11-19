@@ -27,28 +27,26 @@ pub const PROCESS_CONTRACT_NAME: &str = "cid_process_example";
 /// Default Process state cell capacity: 300 CKB.
 pub const DEFAULT_PROCESS_STATE_CAPACITY: u64 = 300_0000_0000;
 
-/// Re-export Intention capacity floor (dual-written in `cid-protocol`).
+/// Intention floor + example Process deposit min (single source: `cid-protocol`).
 pub use cid_protocol::{
-    deposit_min_satisfies_intention_floor, CkbDepositPolicy, DEFAULT_MIN_INTENTION_CAPACITY,
+    assert_ckb_deposit_policy, deposit_min_satisfies_intention_floor, CkbDepositPolicy,
+    DEFAULT_MIN_INTENTION_CAPACITY, EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY,
 };
 
-/// Example Process minimum CKB deposit (shannons): **400 CKB**.
+/// Example Process minimum CKB deposit (shannons).
 ///
-/// Dual-written with `contracts/cid_process_example/src/deposit.rs`. Must stay
-/// strictly above [`DEFAULT_MIN_INTENTION_CAPACITY`] so a minimum deposit can be
-/// fulfilled by consuming an Intention whose capacity covers occupied floor.
-pub const MIN_DEPOSIT_CAPACITY: u64 = 400_0000_0000;
+/// Alias of [`EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY`] — same constant the
+/// on-chain Process binary uses (no dual-written literal).
+pub const MIN_DEPOSIT_CAPACITY: u64 = EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY;
 
-/// Example Process [`CkbDepositPolicy`] (host-side mirror of the on-chain const).
+/// Example Process [`CkbDepositPolicy`] (host-side mirror of the on-chain policy).
 pub struct ExampleDepositPolicy;
 
 impl CkbDepositPolicy for ExampleDepositPolicy {
     const MIN_DEPOSIT_CAPACITY: u64 = MIN_DEPOSIT_CAPACITY;
 }
 
-const _: () = assert!(deposit_min_satisfies_intention_floor(
-    ExampleDepositPolicy::MIN_DEPOSIT_CAPACITY
-));
+const _: () = assert_ckb_deposit_policy::<ExampleDepositPolicy>();
 
 /// True when a CKB-only Intention capacity meets the example deposit minimum.
 #[inline]

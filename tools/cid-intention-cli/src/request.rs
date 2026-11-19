@@ -9,8 +9,10 @@ pub struct CreateRequest {
     /// `testnet` or `fake` (unit tests). Mainnet rejected in v1.
     pub network: String,
     pub fee_shannons: u64,
-    /// Absolute Intention capacity (shannons). Default: [`default_intention_capacity`]
-    /// (= `DEFAULT_MIN_INTENTION_CAPACITY`, 300 CKB) when omitted.
+    /// Absolute Intention capacity (shannons). Default: example Process deposit
+    /// minimum ([`default_intention_capacity`] = 600 CKB) so a default create can
+    /// DigestOk as a CKB deposit. Create still sizes to
+    /// `max(requested, DEFAULT_MIN_INTENTION_CAPACITY, occupied)`.
     #[serde(default = "default_intention_capacity")]
     pub intention_capacity: u64,
     pub funding: FundingCell,
@@ -55,7 +57,8 @@ fn default_process_capacity() -> u64 {
 }
 
 fn default_intention_capacity() -> u64 {
-    ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY
+    // Example Process deposit min (600 CKB) ≥ protocol Intention floor (500 CKB).
+    cid_process_example_calculator::MIN_DEPOSIT_CAPACITY
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

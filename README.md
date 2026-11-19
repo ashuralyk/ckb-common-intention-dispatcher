@@ -125,16 +125,17 @@ the owner updates it post-redeploy.
 on-chain and off-chain. Pack height is the block that committed the Intention;
 judge height is the newest header dep.
 
-**Intention capacity floor / Process deposits:** Intention cells use absolute
-capacity (`AddOutputCell` / `new_from_scripts`). `DEFAULT_MIN_INTENTION_CAPACITY`
-(= **300 CKB**) is the dual-written default floor covering typical occupied
-capacity for CID lock args (CLI templates and `create_intention` enforce it).
-Process authors with CKB deposit actions fulfilled by consuming an Intention
-must declare a deposit minimum **strictly greater** than that floor
-(`CkbDepositPolicy` / `deposit_min_satisfies_intention_floor`) so a minimum
-deposit Intention is always createable and can fund the deposit alone. The
-example Process uses `MIN_DEPOSIT_CAPACITY` = **400 CKB** and rejects smaller
-CKB DigestOk Intentions on-chain and in assemble (`DepositBelowMinimum` = 39).
+**Intention capacity floor / Process deposits:** Intention creates size capacity
+to `max(requested, DEFAULT_MIN_INTENTION_CAPACITY, occupied)` so cells always
+cover the policy floor (**500 CKB**) and concrete occupied capacity (multisig /
+xUDT / large args may exceed the floor and are bumped). Process authors with
+CKB deposit actions fulfilled by consuming an Intention must declare a deposit
+minimum **strictly greater** than that floor (`CkbDepositPolicy` /
+`assert_ckb_deposit_policy`). The example Process uses
+`EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY` = **600 CKB** (single protocol constant
+shared by on-chain + calculator) and rejects smaller CKB DigestOk Intentions
+for **its own** process_type_hash (`DepositBelowMinimum` = 39). CLI defaults to
+that 600 CKB deposit minimum so a default create can DigestOk as a deposit.
 
 ## Build and test
 

@@ -77,23 +77,23 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 
 ## CKB deposit minimum (Intention consume)
 
-Intention cells are created with an **absolute** capacity that must cover
-occupied capacity for typical CID lock args. The shared protocol constant
-`DEFAULT_MIN_INTENTION_CAPACITY` (= **300 CKB**) is the default floor used by
-CLI templates and off-chain create checks.
+Intention creates size capacity to
+`max(requested, DEFAULT_MIN_INTENTION_CAPACITY, occupied)`. The shared protocol
+constant `DEFAULT_MIN_INTENTION_CAPACITY` (= **500 CKB**) is the **policy floor**
+deposit minima compare against; occupied bumps still apply for larger lock
+args / xUDT.
 
-This example Process treats DigestOk **CKB** Intentions as deposits fulfilled by
-consuming the Intention into the beneficiary. Process authors must declare a
-deposit minimum **strictly greater** than that floor
-(`deposit_min_satisfies_intention_floor` / `CkbDepositPolicy`) so a minimum
-deposit is always a createable Intention and can fund the deposit alone:
+This example Process treats DigestOk **CKB** Intentions **for its own**
+`process_type_hash` as deposits fulfilled by consuming the Intention into the
+beneficiary. Process authors must declare a deposit minimum **strictly greater**
+than that floor (`CkbDepositPolicy` / `assert_ckb_deposit_policy`):
 
 | Constant | Value | Where |
 |----------|-------|--------|
-| `DEFAULT_MIN_INTENTION_CAPACITY` | 300 CKB | `cid-protocol` |
-| `MIN_DEPOSIT_CAPACITY` | 400 CKB | example Process (on-chain + calculator) |
+| `DEFAULT_MIN_INTENTION_CAPACITY` | 500 CKB | `cid-protocol` |
+| `EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY` | 600 CKB | `cid-protocol` (single source; on-chain + calculator alias as `MIN_DEPOSIT_CAPACITY`) |
 
-Enforced in Process lock Verify (DigestOk), `Process.assemble`, and the
+Enforced in Process lock Verify (own DigestOk only), `Process.assemble`, and the
 calculator draft path. xUDT Intentions are not subject to this CKB deposit
 floor (token amount rules are separate).
 

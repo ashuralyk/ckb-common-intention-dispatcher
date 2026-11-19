@@ -7,13 +7,14 @@
 //! deposit alone.
 
 use cid_protocol::{
-    deposit_min_satisfies_intention_floor, CkbDepositPolicy, DEFAULT_MIN_INTENTION_CAPACITY,
+    assert_ckb_deposit_policy, CkbDepositPolicy, DEFAULT_MIN_INTENTION_CAPACITY,
+    EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY,
 };
 
-/// Minimum CKB capacity (shannons) for a deposit Intention: **400 CKB**.
+/// Minimum CKB capacity (shannons) for a deposit Intention.
 ///
-/// Strictly greater than [`DEFAULT_MIN_INTENTION_CAPACITY`] (300 CKB).
-pub const MIN_DEPOSIT_CAPACITY: u64 = 400_0000_0000;
+/// Single source: [`EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY`] in `cid-protocol`.
+pub const MIN_DEPOSIT_CAPACITY: u64 = EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY;
 
 /// Example Process deposit policy (CKB Intentions only; xUDT amounts are separate).
 pub struct ExampleDepositPolicy;
@@ -22,9 +23,7 @@ impl CkbDepositPolicy for ExampleDepositPolicy {
     const MIN_DEPOSIT_CAPACITY: u64 = MIN_DEPOSIT_CAPACITY;
 }
 
-const _: () = assert!(deposit_min_satisfies_intention_floor(
-    ExampleDepositPolicy::MIN_DEPOSIT_CAPACITY
-));
+const _: () = assert_ckb_deposit_policy::<ExampleDepositPolicy>();
 const _: () = assert!(ExampleDepositPolicy::MIN_DEPOSIT_CAPACITY > DEFAULT_MIN_INTENTION_CAPACITY);
 
 /// Reject CKB-only deposit Intentions below [`MIN_DEPOSIT_CAPACITY`].
