@@ -1,69 +1,58 @@
-use ckb_types::packed::{CellOutput, OutPoint, Transaction};
+use ckb_types::packed::{
+    Byte32, Bytes, CellDep, CellInput, CellOutput, OutPoint, RawTransaction, Transaction,
+};
 use ckb_types::prelude::*;
 
-/// Input intention cell for assemble
-#[derive(Clone, Debug, Default)]
-pub struct IntentionInput {
-    pub out_point: OutPoint,
-    pub lock_args: Vec<u8>,
-    pub capacity: u64,
-    pub data: Vec<u8>,
-    /// Packed molecule `Script` of the intention type, if any (official xUDT).
-    pub type_script: Option<Vec<u8>>,
-}
-
-impl IntentionInput {
-    /// Encode for SSRI Process.assemble input
-    /// Format: capacity (u64 LE) + lock_args_len (u32 LE) + lock_args + data_len (u32 LE) + data
-    /// + optional type_len (u32 LE) + type_script molecule
-    pub fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&self.capacity.to_le_bytes());
-        buf.extend_from_slice(&(self.lock_args.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&self.lock_args);
-        buf.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&self.data);
-        if let Some(type_script) = &self.type_script {
-            buf.extend_from_slice(&(type_script.len() as u32).to_le_bytes());
-            buf.extend_from_slice(type_script);
-        }
-        buf
-    }
-}
-
-/// Encode array of intentions for SSRI Process.assemble
-/// Format: count (u32 LE) + for each intention: len (u32 LE) + encoded intention
-pub fn encode_intentions(intentions: &[IntentionInput]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&(intentions.len() as u32).to_le_bytes());
-    for intention in intentions {
-        let encoded = intention.encode();
-        buf.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
-        buf.extend_from_slice(&encoded);
-    }
-    buf
-}
-
-/// Partial transaction returned by assemble.
-///
-/// Wire format is a packed molecule `Transaction` (typically outputs +
-/// `outputs_data` only; other fields empty).
+/// Live cell attached to a draft input for offline assemble.
 #[derive(Clone, Debug)]
-pub struct PartialTx {
+pub struct DraftCell {
+    pub out_point: OutPoint,
+    pub output: CellOutput,
+    pub data: Vec<u8>,
+}
+
+/// Build a molecule `Transaction` draft from input cells (outputs/deps empty).
+pub fn build_draft_tx(cells: &[DraftCell]) -> Vec<u8> {
+    let inputs: Vec<CellInput> = cells
+        .iter()
+        .map(|c| {
+            CellInput::new_builder()
+                .previous_output(c.out_point.clone())
+                .build()
+        })
+        .collect();
+    Transaction::new_builder()
+        .raw(RawTransaction::new_builder().inputs(inputs.pack()).build())
+        .build()
+        .as_slice()
+        .to_vec()
+}
+
+/// Complete transaction returned by `Process.assemble`.
+///
+/// Wire format is a packed molecule `Transaction` with inputs, outputs,
+/// outputs_data, cell_deps, header_deps, and witnesses filled as needed.
+/// The backend submits this blob unchanged.
+#[derive(Clone, Debug)]
+pub struct AssembledTx {
     packed: Vec<u8>,
+    pub inputs: Vec<CellInput>,
     pub outputs: Vec<CellOutput>,
     pub outputs_data: Vec<Vec<u8>>,
+    pub cell_deps: Vec<CellDep>,
+    pub header_deps: Vec<Byte32>,
+    pub witnesses: Vec<Bytes>,
 }
 
-/// Explicit output-count budget. Assemble only emits BATCH_MAX=4; this is a
-/// parser ceiling so a malicious vector cannot allocate unbounded outputs.
-const MAX_PARTIAL_TX_OUTPUTS: usize = 256;
-const MAX_PARTIAL_TX_BYTES: usize = 1024 * 1024;
+/// Explicit budgets so a malicious vector cannot allocate unbounded structures.
+const MAX_TX_OUTPUTS: usize = 256;
+const MAX_TX_INPUTS: usize = 256;
+const MAX_TX_BYTES: usize = 1024 * 1024;
 
-impl PartialTx {
+impl AssembledTx {
     /// Parse a packed molecule `Transaction` from SSRI response bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, super::ExecutorError> {
-        if bytes.len() > MAX_PARTIAL_TX_BYTES {
+        if bytes.len() > MAX_TX_BYTES {
             return Err(super::ExecutorError::InvalidResponse(
                 "response exceeds byte budget".into(),
             ));
@@ -75,12 +64,20 @@ impl PartialTx {
         let raw = tx.raw();
         let packed_outputs = raw.outputs();
         let packed_data = raw.outputs_data();
+        let packed_inputs = raw.inputs();
         let output_count = packed_outputs.len();
+        let input_count = packed_inputs.len();
 
-        if output_count > MAX_PARTIAL_TX_OUTPUTS {
+        if output_count > MAX_TX_OUTPUTS {
             return Err(super::ExecutorError::InvalidResponse(format!(
                 "output count {} exceeds budget {}",
-                output_count, MAX_PARTIAL_TX_OUTPUTS
+                output_count, MAX_TX_OUTPUTS
+            )));
+        }
+        if input_count > MAX_TX_INPUTS {
+            return Err(super::ExecutorError::InvalidResponse(format!(
+                "input count {} exceeds budget {}",
+                input_count, MAX_TX_INPUTS
             )));
         }
         if packed_data.len() != output_count {
@@ -93,11 +90,15 @@ impl PartialTx {
 
         let mut outputs = Vec::new();
         let mut outputs_data = Vec::new();
+        let mut inputs = Vec::new();
         outputs.try_reserve(output_count).map_err(|_| {
             super::ExecutorError::InvalidResponse("output vec reserve failed".into())
         })?;
         outputs_data.try_reserve(output_count).map_err(|_| {
             super::ExecutorError::InvalidResponse("output data vec reserve failed".into())
+        })?;
+        inputs.try_reserve(input_count).map_err(|_| {
+            super::ExecutorError::InvalidResponse("input vec reserve failed".into())
         })?;
 
         for output in packed_outputs.into_iter() {
@@ -107,11 +108,22 @@ impl PartialTx {
             let unpacked: Vec<u8> = data.unpack();
             outputs_data.push(unpacked);
         }
+        for input in packed_inputs.into_iter() {
+            inputs.push(input);
+        }
 
-        Ok(PartialTx {
+        let cell_deps: Vec<CellDep> = raw.cell_deps().into_iter().collect();
+        let header_deps: Vec<Byte32> = raw.header_deps().into_iter().collect();
+        let witnesses: Vec<Bytes> = tx.witnesses().into_iter().collect();
+
+        Ok(AssembledTx {
             packed: bytes.to_vec(),
+            inputs,
             outputs,
             outputs_data,
+            cell_deps,
+            header_deps,
+            witnesses,
         })
     }
 
@@ -120,6 +132,9 @@ impl PartialTx {
         &self.packed
     }
 }
+
+/// Legacy alias kept for call-site clarity during the PartialTx → AssembledTx rename.
+pub type PartialTx = AssembledTx;
 
 /// Executor errors
 #[derive(Debug)]

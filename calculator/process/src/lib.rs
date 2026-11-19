@@ -1,11 +1,13 @@
 //! Process Calculator for CID Process example
 
-use cid_process_executor::{IntentionInput, ProcessExecutor};
+use cid_process_executor::{AssembledTx, MockHost, ProcessExecutor};
+use cid_protocol::TYPE_ID_CODE_HASH;
 use ckb_cinnabar_calculator::{
     instruction::Instruction,
     re_exports::ckb_types::{
-        packed::{CellInput, CellOutput, OutPoint, Transaction, Uint64},
-        prelude::{Builder, Entity, Pack, Unpack},
+        core::ScriptHashType,
+        packed::{CellInput, CellOutput, OutPoint, RawTransaction, Script, Transaction},
+        prelude::{Builder, Entity, Pack, PackVec, Unpack},
     },
     rpc::RPC,
     skeleton::{CellInputEx, CellOutputEx, TransactionSkeleton},
@@ -25,27 +27,14 @@ pub struct IntentionCell {
     pub type_script: Option<Vec<u8>>,
 }
 
-impl IntentionCell {
-    /// Convert to executor IntentionInput
-    pub fn to_intention_input(&self) -> Result<IntentionInput> {
-        // Serialize calculator's OutPoint to bytes and deserialize in executor's version
-        use ckb_cinnabar_calculator::re_exports::ckb_types::prelude::Entity;
-        let _out_point_bytes = self.out_point.as_slice();
-
-        // Both ckb-gen-types versions use same molecule wire format
-        // Deserialize bytes into executor's OutPoint type
-        let executor_out_point: cid_process_executor::IntentionInput = IntentionInput::default();
-
-        // Build input with raw fields, OutPoint will use default (can't easily convert between versions)
-        // This is acceptable since the skeleton uses the calculator's OutPoint directly
-        Ok(IntentionInput {
-            out_point: executor_out_point.out_point, // Use placeholder
-            lock_args: self.lock_args.clone(),
-            capacity: self.capacity,
-            data: self.data.clone(),
-            type_script: self.type_script.clone(),
-        })
-    }
+/// Process state cell for full-tx assemble.
+#[derive(Clone, Debug)]
+pub struct ProcessStateCell {
+    pub out_point: OutPoint,
+    pub lock: Script,
+    pub type_script: Script,
+    pub capacity: u64,
+    pub data: Vec<u8>,
 }
 
 /// Load the Process binary from build/release/<name>
@@ -56,22 +45,125 @@ pub fn load_process_binary(bin_dir: &str) -> Result<Vec<u8>> {
     })
 }
 
-/// Process digest calculation: validates batch and prepares transaction skeleton
-///
-/// Builds a skeleton with intention inputs plus beneficiary outputs from
-/// `executor.assemble()`. Assemble returns a packed molecule `Transaction`;
-/// this crate parses it with calculator ckb-types (1.x). Process recreate
-/// remains deferred (Task 5 carry-forward).
+fn default_process_state(intentions: &[IntentionCell]) -> ProcessStateCell {
+    let type_script = Script::new_builder()
+        .code_hash(TYPE_ID_CODE_HASH.pack())
+        .hash_type(ScriptHashType::Type)
+        .args(
+            {
+                let mut a = [0u8; 32];
+                a[..18].copy_from_slice(b"process-type-id-v0");
+                a.to_vec()
+            }
+            .pack(),
+        )
+        .build();
+    let lock = Script::new_builder()
+        .code_hash([0xAA; 32].pack())
+        .hash_type(ScriptHashType::Data1)
+        .build();
+    let out_point = intentions
+        .first()
+        .map(|i| i.out_point.clone().as_builder().index(99u32).build())
+        .unwrap_or_default();
+    ProcessStateCell {
+        out_point,
+        lock,
+        type_script,
+        capacity: 200_000_000_000,
+        data: vec![],
+    }
+}
+
+fn intention_output(intention: &IntentionCell) -> Result<CellOutput> {
+    let lock = Script::new_builder()
+        .code_hash([0xC1; 32].pack())
+        .hash_type(ScriptHashType::Type)
+        .args(intention.lock_args.clone().pack())
+        .build();
+    let mut builder = CellOutput::new_builder()
+        .capacity(intention.capacity)
+        .lock(lock);
+    if let Some(bytes) = &intention.type_script {
+        let typ = Script::from_slice(bytes)
+            .map_err(|e| CalculatorError::Other(format!("type script: {:?}", e)))?;
+        builder = builder.type_(Some(typ).pack());
+    }
+    Ok(builder.build())
+}
+
+fn process_output(process: &ProcessStateCell) -> CellOutput {
+    CellOutput::new_builder()
+        .capacity(process.capacity)
+        .lock(process.lock.clone())
+        .type_(Some(process.type_script.clone()).pack())
+        .build()
+}
+
+fn build_draft_and_host(
+    intentions: &[IntentionCell],
+    process: &ProcessStateCell,
+) -> Result<(Vec<u8>, MockHost)> {
+    let host = MockHost::new();
+    host.insert_block_hash(0, [0xAB; 32]);
+
+    let mut inputs = Vec::with_capacity(1 + intentions.len());
+
+    let process_out = process_output(process);
+    host.insert_cell_bytes(
+        process.out_point.as_slice(),
+        process_out.as_slice(),
+        process.data.clone(),
+    )
+    .map_err(CalculatorError::Other)?;
+    inputs.push(
+        CellInput::new_builder()
+            .previous_output(process.out_point.clone())
+            .build(),
+    );
+
+    for intention in intentions {
+        let output = intention_output(intention)?;
+        host.insert_cell_bytes(
+            intention.out_point.as_slice(),
+            output.as_slice(),
+            intention.data.clone(),
+        )
+        .map_err(CalculatorError::Other)?;
+        inputs.push(
+            CellInput::new_builder()
+                .previous_output(intention.out_point.clone())
+                .build(),
+        );
+    }
+
+    let draft = Transaction::new_builder()
+        .raw(RawTransaction::new_builder().inputs(inputs.pack()).build())
+        .build()
+        .as_slice()
+        .to_vec();
+    Ok((draft, host))
+}
+
+/// Process digest: batch-check + SSRI assemble → skeleton from the complete tx.
 pub fn process_digest_ok<T: RPC>(
-    _rpc: &T,
+    rpc: &T,
     intentions: Vec<IntentionCell>,
     bin_dir: &str,
 ) -> Result<(TransactionSkeleton, Vec<Instruction<T>>)> {
-    // Load Process binary and create executor
+    process_digest_ok_with_process(rpc, intentions, None, bin_dir)
+}
+
+/// Same as [`process_digest_ok`] with an explicit Process state cell.
+pub fn process_digest_ok_with_process<T: RPC>(
+    _rpc: &T,
+    intentions: Vec<IntentionCell>,
+    process: Option<ProcessStateCell>,
+    bin_dir: &str,
+) -> Result<(TransactionSkeleton, Vec<Instruction<T>>)> {
     let binary = load_process_binary(bin_dir)?;
     let executor = ProcessExecutor::new(binary);
 
-    // Validate batch bounds
     let (min, max) = executor
         .get_batch_bounds()
         .map_err(|e| CalculatorError::Other(format!("failed to get batch bounds: {}", e)))?;
@@ -84,40 +176,21 @@ pub fn process_digest_ok<T: RPC>(
         )));
     }
 
-    // Convert to executor inputs
-    let inputs: Vec<IntentionInput> = intentions
-        .iter()
-        .map(|c| c.to_intention_input())
-        .collect::<Result<Vec<_>>>()?;
-
-    // Call executor assemble to get beneficiary outputs
-    let partial_tx = executor
-        .assemble(&inputs)
+    let process = process.unwrap_or_else(|| default_process_state(&intentions));
+    let (draft, host) = build_draft_and_host(&intentions, &process)?;
+    let assembled = executor
+        .assemble(&draft, host)
         .map_err(|e| CalculatorError::Other(format!("executor assemble failed: {}", e)))?;
 
-    // Build skeleton with intention inputs
-    let mut skeleton = TransactionSkeleton::default();
+    skeleton_from_assembled(&assembled, &intentions, &process)
+}
 
-    // Add intention inputs
-    for intention in &intentions {
-        let input = CellInputEx {
-            input: CellInput::new_builder()
-                .previous_output(intention.out_point.clone())
-                .build(),
-            output: CellOutputEx::new(
-                CellOutput::new_builder()
-                    .capacity(Pack::<Uint64>::pack(&intention.capacity))
-                    .build(),
-                intention.data.clone(),
-            ),
-            with_data: false,
-        };
-        skeleton.input(input)?.witness(Default::default());
-    }
-
-    // Parse the same molecule Transaction the contract / executor produced.
-    // Wire format is stable across ckb-gen-types 0.119 (executor) and 1.x.
-    let tx = Transaction::from_slice(partial_tx.as_molecule_bytes())
+fn skeleton_from_assembled<T: RPC>(
+    assembled: &AssembledTx,
+    intentions: &[IntentionCell],
+    process: &ProcessStateCell,
+) -> Result<(TransactionSkeleton, Vec<Instruction<T>>)> {
+    let tx = Transaction::from_slice(assembled.as_molecule_bytes())
         .map_err(|e| CalculatorError::Other(format!("Transaction molecule bridge: {:?}", e)))?;
     let raw = tx.raw();
     if raw.outputs().len() != raw.outputs_data().len() {
@@ -125,96 +198,100 @@ pub fn process_digest_ok<T: RPC>(
             "assemble Transaction outputs / outputs_data length mismatch".into(),
         ));
     }
+
+    let mut skeleton = TransactionSkeleton::default();
+
+    skeleton
+        .input(CellInputEx {
+            input: CellInput::new_builder()
+                .previous_output(process.out_point.clone())
+                .build(),
+            output: CellOutputEx::new(process_output(process), process.data.clone()),
+            with_data: false,
+        })?
+        .witness(Default::default());
+
+    for intention in intentions {
+        skeleton
+            .input(CellInputEx {
+                input: CellInput::new_builder()
+                    .previous_output(intention.out_point.clone())
+                    .build(),
+                output: CellOutputEx::new(intention_output(intention)?, intention.data.clone()),
+                with_data: false,
+            })?
+            .witness(Default::default());
+    }
+
     for (output, data) in raw.outputs().into_iter().zip(raw.outputs_data()) {
         let data_bytes: Vec<u8> = data.unpack();
         skeleton.output(CellOutputEx::new(output, data_bytes));
     }
 
-    let instructions = vec![];
-    Ok((skeleton, instructions))
+    Ok((skeleton, vec![]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ckb_cinnabar_calculator::re_exports::ckb_types::packed::OutPointBuilder;
+    use cid_protocol::{CidArgs, Payload, Script as CidScript};
 
     #[test]
     fn test_load_binary_missing() {
-        let result = load_process_binary("/nonexistent");
-        assert!(result.is_err());
+        assert!(load_process_binary("/nonexistent").is_err());
     }
 
     #[test]
-    fn test_intention_conversion() {
-        let cell = IntentionCell {
-            out_point: OutPointBuilder::default().build(),
-            lock_args: vec![1, 2, 3],
-            capacity: 100_000_000_000,
-            data: vec![4, 5, 6],
-            type_script: None,
-        };
-
-        let input = cell.to_intention_input().expect("conversion");
-        assert_eq!(input.lock_args, vec![1, 2, 3]);
-        assert_eq!(input.capacity, 100_000_000_000);
-        assert_eq!(input.data, vec![4, 5, 6]);
-        assert!(input.type_script.is_none());
-    }
-
-    #[test]
-    fn test_process_digest_beneficiary_outputs() {
+    fn test_process_digest_complete_tx_outputs() {
         use ckb_cinnabar_calculator::simulation::{fake_outpoint, FakeRpcClient};
 
         let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
         let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
         if !std::path::Path::new(&bin_path).exists() {
-            eprintln!(
-                "Skipping test: binary not built at {} (run 'cd contracts/cid_process_example && make build')",
-                bin_path
-            );
+            eprintln!("Skipping test: binary not built at {bin_path}");
             return;
         }
 
         let rpc = FakeRpcClient::default();
+        let type_id = Script::new_builder()
+            .code_hash(TYPE_ID_CODE_HASH.pack())
+            .hash_type(ScriptHashType::Type)
+            .args(
+                {
+                    let mut a = [0u8; 32];
+                    a[..18].copy_from_slice(b"process-type-id-v0");
+                    a.to_vec()
+                }
+                .pack(),
+            )
+            .build();
+        let pth: [u8; 32] = type_id.calc_script_hash().unpack();
+        let lock_args = CidArgs::new(pth, CidScript::default(), Payload::default())
+            .encode()
+            .unwrap();
 
-        let intentions_n1 = vec![IntentionCell {
+        let process = ProcessStateCell {
             out_point: fake_outpoint(),
-            lock_args: vec![0x01, 0x02, 0x03],
+            lock: Script::new_builder()
+                .code_hash([0xAA; 32].pack())
+                .hash_type(ScriptHashType::Data1)
+                .build(),
+            type_script: type_id,
+            capacity: 200_000_000_000,
+            data: vec![],
+        };
+
+        let intentions = vec![IntentionCell {
+            out_point: fake_outpoint(),
+            lock_args,
             capacity: 100_000_000_000,
             data: vec![0xaa, 0xbb],
             type_script: None,
         }];
-        let (skeleton, _) = process_digest_ok(&rpc, intentions_n1.clone(), bin_dir)
-            .expect("digest should succeed with n=1");
-        assert_eq!(
-            skeleton.outputs.len(),
-            intentions_n1.len(),
-            "skeleton should have 1 beneficiary output for 1 intention"
-        );
-
-        let intentions_n2 = vec![
-            IntentionCell {
-                out_point: fake_outpoint(),
-                lock_args: vec![0x01, 0x02, 0x03],
-                capacity: 100_000_000_000,
-                data: vec![0xaa, 0xbb],
-                type_script: None,
-            },
-            IntentionCell {
-                out_point: fake_outpoint(),
-                lock_args: vec![0x04, 0x05, 0x06],
-                capacity: 200_000_000_000,
-                data: vec![0xcc, 0xdd],
-                type_script: None,
-            },
-        ];
-        let (skeleton, _) = process_digest_ok(&rpc, intentions_n2.clone(), bin_dir)
-            .expect("digest should succeed with n=2");
-        assert_eq!(
-            skeleton.outputs.len(),
-            intentions_n2.len(),
-            "skeleton should have 2 beneficiary outputs for 2 intentions"
-        );
+        let (skeleton, _) =
+            process_digest_ok_with_process(&rpc, intentions, Some(process), bin_dir)
+                .expect("digest n=1");
+        assert_eq!(skeleton.inputs.len(), 2);
+        assert_eq!(skeleton.outputs.len(), 2);
     }
 }

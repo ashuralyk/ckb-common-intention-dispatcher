@@ -1,7 +1,9 @@
+use crate::host_query::MockHost;
 use crate::{ExecutorError, CUSTOM_ERROR_START};
 use ckb_hash::blake2b_256;
+use ckb_types::prelude::Entity;
 use ckb_vm::cost_model::estimate_cycles;
-use ckb_vm::registers::{A0, A1, A2, A7};
+use ckb_vm::registers::{A0, A1, A2, A3, A7};
 use ckb_vm::{
     Bytes, CoreMachine, DefaultCoreMachine, DefaultMachineBuilder, Error as VmError, Memory,
     Register, SparseMemory, SupportMachine, Syscalls, ISA_A, ISA_B, ISA_IMC, ISA_MOP,
@@ -31,29 +33,42 @@ const SYS_CKB_READ: u64 = 2606;
 const SYS_INHERITED_FDS: u64 = 2607;
 const SYS_CLOSE: u64 = 2608;
 
+/// ckb-ssri-std host-query catalog (native injection).
+const SYS_FIND_CELL_BY_OUT_POINT: u64 = 2287;
+const SYS_FIND_CELL_DATA_BY_OUT_POINT: u64 = 2297;
+const SYS_GET_BLOCK_HASH: u64 = 2347;
+const SYS_GET_CELLS: u64 = 2367;
+
+/// CKB syscall errno for syscall_load results.
+const ERRNO_OK: u64 = 0;
+const ERRNO_INDEX_OUT_OF_BOUND: u64 = 1;
+const ERRNO_ITEM_MISSING: u64 = 2;
+
 /// Pipe pair (read_fd, write_fd)
 #[derive(Clone, Debug)]
 struct Pipe {
     buffer: Vec<u8>,
 }
 
-/// SSRI stdio syscalls
+/// SSRI stdio syscalls + optional host-query mock.
 struct SsriSyscalls {
     input: Arc<Mutex<Vec<u8>>>,
     output: Arc<Mutex<Vec<u8>>>,
     exit_code: Arc<Mutex<Option<i8>>>,
     pipes: Arc<Mutex<HashMap<u64, Pipe>>>,
     next_fd: Arc<Mutex<u64>>,
+    host: MockHost,
 }
 
 impl SsriSyscalls {
-    fn new(input: Vec<u8>) -> Self {
+    fn new(input: Vec<u8>, host: MockHost) -> Self {
         Self {
             input: Arc::new(Mutex::new(input)),
             output: Arc::new(Mutex::new(Vec::new())),
             exit_code: Arc::new(Mutex::new(None)),
             pipes: Arc::new(Mutex::new(HashMap::new())),
             next_fd: Arc::new(Mutex::new(3)), // Start at fd 3 (0=stdin, 1=stdout, 2=stderr)
+            host,
         }
     }
 }
@@ -80,6 +95,44 @@ fn load_guest_bytes<Mac: SupportMachine>(
         ));
     }
     machine.memory_mut().load_bytes(addr, len)
+}
+
+/// syscall_load convention: a0=buf, a1=*len (capacity in / actual out), return errno in a0.
+fn serve_load<Mac: SupportMachine>(machine: &mut Mac, data: Option<&[u8]>) -> Result<(), VmError> {
+    let buf_addr = machine.registers()[A0].to_u64();
+    let len_ptr = machine.registers()[A1].to_u64();
+    let len_bytes = machine.memory_mut().load_bytes(len_ptr, 8)?;
+    let capacity = usize::from_le_bytes(len_bytes.as_ref().try_into().unwrap());
+
+    let Some(data) = data else {
+        machine.set_register(A0, Mac::REG::from_u64(ERRNO_ITEM_MISSING));
+        return Ok(());
+    };
+
+    machine
+        .memory_mut()
+        .store_bytes(len_ptr, &(data.len() as u64).to_le_bytes())?;
+
+    if data.len() > capacity {
+        // LengthNotEnough path: errno 0 with actual > capacity, or we mirror
+        // ckb-ssri-std which checks actual_data_len > load_len after errno 0.
+        machine.set_register(A0, Mac::REG::from_u64(ERRNO_OK));
+        return Ok(());
+    }
+
+    machine.memory_mut().store_bytes(buf_addr, data)?;
+    machine.set_register(A0, Mac::REG::from_u64(ERRNO_OK));
+    Ok(())
+}
+
+fn read_out_point_arg<Mac: SupportMachine>(machine: &mut Mac) -> Result<Vec<u8>, VmError> {
+    let ptr = machine.registers()[A2].to_u64();
+    // OutPoint molecule TOTAL_SIZE is 36.
+    const OUT_POINT_SIZE: u64 = 36;
+    Ok(machine
+        .memory_mut()
+        .load_bytes(ptr, OUT_POINT_SIZE)?
+        .to_vec())
 }
 
 impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
@@ -231,6 +284,34 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 machine.set_register(A0, Mac::REG::from_u64(SSRI_VM_VERSION));
                 Ok(true)
             }
+            SYS_FIND_CELL_BY_OUT_POINT => {
+                let out_point = read_out_point_arg(machine)?;
+                let cell = self.host.get_cell(&out_point);
+                let data = cell.as_ref().map(|c| c.output.as_slice());
+                serve_load(machine, data)?;
+                Ok(true)
+            }
+            SYS_FIND_CELL_DATA_BY_OUT_POINT => {
+                let out_point = read_out_point_arg(machine)?;
+                let cell = self.host.get_cell(&out_point);
+                let data = cell.as_ref().map(|c| c.data.as_slice());
+                serve_load(machine, data)?;
+                Ok(true)
+            }
+            SYS_GET_BLOCK_HASH => {
+                let number = machine.registers()[A3].to_u64();
+                let hash = self.host.get_block_hash(number);
+                let data = hash.as_ref().map(|h| h.as_slice());
+                serve_load(machine, data)?;
+                Ok(true)
+            }
+            SYS_GET_CELLS => {
+                // Minimal mock: empty pagination (serde_molecule empty table).
+                // Counterparties are not required for the example assemble path.
+                let empty = serde_molecule_empty_pagination();
+                serve_load(machine, Some(&empty))?;
+                Ok(true)
+            }
             // Stub implementations for syscalls we don't need for SSRI but might be called
             SYS_SPAWN => {
                 // Spawn not supported in offline mode
@@ -258,13 +339,26 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 Ok(true)
             }
             _ if (2041..=3000).contains(&syscall_num) => {
-                // CKB syscall range - return error for unsupported ones
+                // CKB / SSRI syscall range - return error for unsupported ones
+                // Prefer ItemMissing-style for load-shaped calls.
+                let _ = ERRNO_INDEX_OUT_OF_BOUND;
                 machine.set_register(A0, Mac::REG::from_u64(1)); // error
                 Ok(true)
             }
             _ => Ok(false),
         }
     }
+}
+
+fn serde_molecule_empty_pagination() -> Vec<u8> {
+    // Pagination { objects: [], last_cursor: [] } via serde_molecule table.
+    // Encode with a tiny hand-built empty dynvec table: use serde_molecule if
+    // available; otherwise a minimal valid empty response the guest tolerates.
+    // Guest maps decode failure to HostQueryFailed — empty objects is enough.
+    // Use serde_molecule through a simple struct if the host crate adds the dep;
+    // for now return a zero-length objects encoding that decode may reject →
+    // assemble does not call get_cells in the happy path.
+    Vec::new()
 }
 
 /// Convert method path to hex-encoded method ID for argv[0]
@@ -280,16 +374,26 @@ pub fn call_ssri_method(
     method_path: &str,
     input: &[u8],
 ) -> Result<Vec<u8>, ExecutorError> {
-    call_ssri_method_with_cycles(binary, method_path, input, MAX_CYCLES)
+    call_ssri_method_with_host(binary, method_path, input, MockHost::new())
+}
+
+pub fn call_ssri_method_with_host(
+    binary: &[u8],
+    method_path: &str,
+    input: &[u8],
+    host: MockHost,
+) -> Result<Vec<u8>, ExecutorError> {
+    call_ssri_method_with_cycles(binary, method_path, input, host, MAX_CYCLES)
 }
 
 pub fn call_ssri_method_with_cycles(
     binary: &[u8],
     method_path: &str,
     input: &[u8],
+    host: MockHost,
     max_cycles: u64,
 ) -> Result<Vec<u8>, ExecutorError> {
-    let syscalls = SsriSyscalls::new(input.to_vec());
+    let syscalls = SsriSyscalls::new(input.to_vec(), host);
     let output_handle = syscalls.output.clone();
     let exit_handle = syscalls.exit_code.clone();
 

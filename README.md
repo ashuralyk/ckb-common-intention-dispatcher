@@ -28,26 +28,32 @@ enum:
 
 | Hop | When | What CID checks |
 |-----|------|-----------------|
-| `digest_ok` | Committed Process type hash present in **both inputs and outputs** | Destroy; Process scripts enforce execution; no User Lock input/signature required |
+| `digest_ok` | Committed Process Type ID (state cell TYPE_ID type hash) present in **both inputs and outputs** | Destroy; Process **lock** enforces execution; no User Lock input/signature required |
 | `digest_incompatible` | No matching Process pair, User Lock refund present, User Lock absent from inputs | Destroy + User Lock refund; token amount/type exact; CKB capacity within fee window |
 | `timeout_burn` | User Lock in inputs, no matching Process pair, headers prove `judge - pack >= 10800` | Destroy + exact capacity/token refund + User Lock authorization |
 
 **Delegated execution:** the user chooses `process_type_hash` when creating
-an Intention. For `digest_ok`, CID finds that exact full type-script hash on
-an input AND an output. The live Process cell is consumed and recreated, not
-added as a CellDep. CKB executes its input lock and its type script as part of
-normal transaction validation; CID only checks the matching Process pair.
-The user does not need another input or signature for execution. The encoded
-User Lock is the refund destination and authorizes the timeout reclaim path.
+an Intention. That hash is the script hash of the Process state cell’s built-in
+**TYPE_ID** type script (Process Type ID). The state cell’s **lock** is the
+Process contract (referenced by its code Type ID). For `digest_ok`, CID finds
+that exact type-script hash on an input AND an output. The live Process cell is
+consumed and recreated, not added as a CellDep. CKB executes the Process lock
+(and TYPE_ID type) as part of normal validation; CID only checks the matching
+pair. The user does not need another input or signature for execution. The
+encoded User Lock is the refund destination and authorizes the timeout reclaim
+path.
 
-Code cells needed to execute the Process lock/type scripts still belong in
-CellDeps; these are distinct from the live Process state cell. A dependency-only,
-input-only, output-only, or mismatched Process cannot authorize `digest_ok`.
-A type hash identifies a script, not necessarily a globally unique cell: the
-Process scripts must enforce any required singleton/continuity rules and the
-Intention payload, asset destinations, and state transition. CID does not
-implement those application-specific rules. A permissive Process script delegates
-permissive execution; choose and audit the Process accordingly.
+Code cells needed to execute the Process lock still belong in CellDeps; these
+are distinct from the live Process state cell. A dependency-only, input-only,
+output-only, or mismatched Process cannot authorize `digest_ok`. TYPE_ID
+provides identity continuity; the Process lock enforces payload, destinations,
+and state transition. CID does not implement those application-specific rules.
+A permissive Process lock delegates permissive execution; choose and audit the
+Process accordingly.
+
+Off-chain, `Process.assemble` returns a complete molecule transaction (see
+`docs/ssri-backend-interface.md`); the backend submits it without rewriting
+structure.
 
 The matching Process branch takes precedence over refund-shaped outputs, so
 partial user proceeds are allowed. Multiple distinct Intention lock groups for

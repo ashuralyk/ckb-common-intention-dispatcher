@@ -1,16 +1,19 @@
 extern crate alloc;
 
+use crate::host::{self, HostCell};
 use crate::ProcessError;
 use alloc::vec::Vec;
 use cid_protocol::CidArgs;
 use ckb_cinnabar_verifier::ssri::{SsriArgs, SsriSource};
-use ckb_std::ckb_types::packed::{Byte32, Bytes, CellOutput, RawTransaction, Script, Transaction};
+use ckb_std::ckb_types::packed::{
+    Byte32, Bytes, CellInput, CellOutput, OutPoint, RawTransaction, Script, Transaction,
+};
 use ckb_std::ckb_types::prelude::*;
 
 const BATCH_MIN: u32 = 1;
 const BATCH_MAX: u32 = 4;
 
-// Default lock code_hash for beneficiary outputs (using a recognizable constant)
+// Default lock code_hash for beneficiary outputs (placeholder for raw lock_args tests)
 const DEFAULT_LOCK_CODE_HASH: [u8; 32] = [
     0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
     0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
@@ -28,162 +31,158 @@ pub fn batch_handler(
     Ok(output)
 }
 
-type ParsedIntention = (u64, Vec<u8>, Vec<u8>, Option<Vec<u8>>, usize);
+struct LoadedInput {
+    out_point: OutPoint,
+    cell: HostCell,
+}
 
-/// Parse a single intention from buffer at given position
-/// Returns (capacity, lock_args, data, type_script molecule, next_position)
-fn parse_intention(buf: &[u8], mut pos: usize) -> Result<ParsedIntention, ProcessError> {
-    // Read intention length
-    if pos + 4 > buf.len() {
-        return Err(ProcessError::ReadFailed);
-    }
-    let intention_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4;
-
-    if pos + intention_len > buf.len() {
-        return Err(ProcessError::ReadFailed);
-    }
-
-    let intention_start = pos;
-
-    // Parse capacity (u64 LE)
-    if pos + 8 > buf.len() {
-        return Err(ProcessError::ReadFailed);
-    }
-    let capacity = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
-    pos += 8;
-
-    // Parse lock_args_len (u32 LE)
-    if pos + 4 > buf.len() {
-        return Err(ProcessError::ReadFailed);
-    }
-    let lock_args_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4;
-
-    // Parse lock_args
-    if pos + lock_args_len > buf.len() {
-        return Err(ProcessError::ReadFailed);
-    }
-    let lock_args = buf[pos..pos + lock_args_len].to_vec();
-    pos += lock_args_len;
-
-    // Parse data_len (u32 LE)
-    if pos + 4 > buf.len() {
-        return Err(ProcessError::ReadFailed);
-    }
-    let data_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4;
-
-    // Parse data
-    if pos + data_len > buf.len() {
-        return Err(ProcessError::ReadFailed);
-    }
-    let data = buf[pos..pos + data_len].to_vec();
-    pos += data_len;
-
-    // Optional type script: present when the record still has bytes after data.
-    let type_script = if pos - intention_start < intention_len {
-        if pos + 4 > buf.len() {
-            return Err(ProcessError::ReadFailed);
-        }
-        let type_len = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4;
-        if pos + type_len > buf.len() {
-            return Err(ProcessError::ReadFailed);
-        }
-        let bytes = buf[pos..pos + type_len].to_vec();
-        pos += type_len;
-        if bytes.is_empty() {
-            None
-        } else {
-            Some(bytes)
-        }
-    } else {
-        None
-    };
-
-    if pos - intention_start != intention_len {
-        return Err(ProcessError::ReadFailed);
-    }
-
-    Ok((capacity, lock_args, data, type_script, pos))
+struct IntentionView {
+    capacity: u64,
+    lock_args: Vec<u8>,
+    data: Vec<u8>,
+    type_script: Option<Script>,
 }
 
 /// SSRI handler for Process.assemble
-/// Reads intentions from stdin, generates partial tx with beneficiary outputs
+///
+/// Stdin: packed molecule `Transaction` draft (Intentions + Process state cell as
+/// inputs; outputs/deps may be empty). The guest resolves each input via the
+/// SSRI host (`find_cell_by_out_point` / `find_cell_data_by_out_point`), may
+/// query tip info, then returns a **complete** molecule `Transaction` the
+/// backend submits unchanged.
 pub fn assemble_handler(
     _src: &SsriSource,
     _args: SsriArgs,
 ) -> core::result::Result<Vec<u8>, ProcessError> {
-    // Read full input from stdin (max 8KB for safety)
-    let mut input_buf = [0u8; 8192];
-    let mut total_read = 0;
+    let draft_bytes = read_stdin()?;
+    let draft = Transaction::from_slice(&draft_bytes).map_err(|_| ProcessError::ReadFailed)?;
+    let raw = draft.raw();
 
-    loop {
-        let read_result = ckb_std::syscalls::read(0, &mut input_buf[total_read..])
-            .map_err(|_| ProcessError::ReadFailed)?;
+    let mut loaded = Vec::new();
+    for input in raw.inputs().into_iter() {
+        let out_point = input.previous_output();
+        let cell = host::get_cell_by_out_point(&out_point)?;
+        loaded.push(LoadedInput { out_point, cell });
+    }
 
-        if read_result == 0 {
-            break; // EOF
-        }
+    // Tip probe so backends exercise header/tip host queries during assemble.
+    let _ = host::block_hash(0);
 
-        total_read += read_result;
+    let mut intentions = Vec::new();
+    let mut process_cell: Option<&LoadedInput> = None;
+    let mut process_type_hash: Option<[u8; 32]> = None;
 
-        if total_read >= input_buf.len() {
-            return Err(ProcessError::ReadFailed); // Input too large
+    for item in &loaded {
+        let lock = item.cell.output.lock();
+        let args = lock.args().raw_data();
+        if let Ok(cid) = CidArgs::decode(&args) {
+            if let Some(expected) = process_type_hash {
+                if cid.process_type_hash != expected {
+                    return Err(ProcessError::IncompatibleBatch);
+                }
+            } else {
+                process_type_hash = Some(cid.process_type_hash);
+            }
+            intentions.push(IntentionView {
+                capacity: item.cell.output.capacity().unpack(),
+                lock_args: args.to_vec(),
+                data: item.cell.data.clone(),
+                type_script: item.cell.output.type_().to_opt(),
+            });
+        } else if item.cell.output.type_().is_some() {
+            // Candidate Process state cell (TYPE_ID type); keep the first.
+            if process_cell.is_none() {
+                process_cell = Some(item);
+            }
         }
     }
 
-    let input = &input_buf[..total_read];
-    let mut pos = 0;
-
-    // Parse intention count
-    if input.len() < 4 {
-        return Err(ProcessError::ReadFailed);
-    }
-    let count = u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap());
-    pos += 4;
-
-    // Validate batch bounds
+    let count = intentions.len() as u32;
     if !(BATCH_MIN..=BATCH_MAX).contains(&count) {
         return Err(ProcessError::IncompatibleBatch);
     }
 
-    // Parse intentions and generate beneficiary outputs
-    let mut outputs = Vec::with_capacity(count as usize);
-    let mut outputs_data = Vec::with_capacity(count as usize);
-
-    for _ in 0..count {
-        let (capacity, lock_args, data, type_script, next_pos) = parse_intention(input, pos)?;
-        pos = next_pos;
-
-        let lock = beneficiary_lock(lock_args);
-
-        let mut output = CellOutput::new_builder().capacity(capacity).lock(lock);
-        if let Some(type_bytes) = type_script {
-            let script = Script::from_slice(&type_bytes).map_err(|_| ProcessError::ReadFailed)?;
-            output = output.type_(Some(script).pack());
+    let process = process_cell.ok_or(ProcessError::ReadFailed)?;
+    if let Some(pth) = process_type_hash {
+        let typ = process
+            .cell
+            .output
+            .type_()
+            .to_opt()
+            .ok_or(ProcessError::ReadFailed)?;
+        let hash: [u8; 32] = typ.calc_script_hash().unpack();
+        if hash != pth {
+            return Err(ProcessError::IncompatibleBatch);
         }
-        let output = output.build();
-
-        outputs.push(output);
-        outputs_data.push(data);
     }
 
-    // Packed molecule Transaction: outputs + outputs_data; other fields empty.
+    // Outputs: Process recreate (same lock/type/capacity/data) + beneficiaries.
+    let mut outputs = Vec::with_capacity(1 + intentions.len());
+    let mut outputs_data = Vec::with_capacity(1 + intentions.len());
+
+    outputs.push(process.cell.output.clone());
+    outputs_data.push(process.cell.data.clone());
+
+    for intention in &intentions {
+        let lock = beneficiary_lock(intention.lock_args.clone());
+        let mut output = CellOutput::new_builder()
+            .capacity(intention.capacity)
+            .lock(lock);
+        if let Some(ref typ) = intention.type_script {
+            output = output.type_(Some(typ.clone()).pack());
+        }
+        outputs.push(output.build());
+        outputs_data.push(intention.data.clone());
+    }
+
+    // Inputs: draft order (Process may have added none in this example).
+    let inputs: Vec<CellInput> = loaded
+        .iter()
+        .map(|item| {
+            CellInput::new_builder()
+                .previous_output(item.out_point.clone())
+                .build()
+        })
+        .collect();
+
+    // Preserve draft deps; witnesses: one empty per input (backend fills unlocks).
+    let cell_deps = raw.cell_deps();
+    let header_deps = raw.header_deps();
+    let witnesses: Vec<Bytes> = (0..inputs.len()).map(|_| Bytes::default()).collect();
+
     let tx = Transaction::new_builder()
         .raw(
             RawTransaction::new_builder()
+                .version(raw.version())
+                .cell_deps(cell_deps)
+                .header_deps(header_deps)
+                .inputs(inputs.pack())
                 .outputs(outputs.pack())
                 .outputs_data(outputs_data.into_iter().map(Bytes::from).pack())
                 .build(),
         )
+        .witnesses(witnesses.pack())
         .build();
     Ok(tx.as_slice().to_vec())
 }
 
-/// Prefer the Script encoded in `CidEntry.payload`; fall back to the
-/// placeholder lock used by host unit tests that pass raw `lock_args`.
+fn read_stdin() -> Result<Vec<u8>, ProcessError> {
+    let mut input_buf = [0u8; 16384];
+    let mut total_read = 0;
+    loop {
+        let read_result = ckb_std::syscalls::read(0, &mut input_buf[total_read..])
+            .map_err(|_| ProcessError::ReadFailed)?;
+        if read_result == 0 {
+            break;
+        }
+        total_read += read_result;
+        if total_read >= input_buf.len() {
+            return Err(ProcessError::ReadFailed);
+        }
+    }
+    Ok(input_buf[..total_read].to_vec())
+}
+
 fn beneficiary_lock(lock_args: Vec<u8>) -> Script {
     if let Ok(cid) = CidArgs::decode(&lock_args) {
         if let Ok(script) = cid.entry.payload.to_script() {

@@ -47,9 +47,10 @@ fn bundled(name: &str) -> Vec<u8> {
 
 pub fn fixture_request(secret: &SecretKey) -> CreateRequest {
     let lock = secp_data_lock(secret);
+    // Process Type ID = built-in TYPE_ID type script of the Process state cell.
     let process_type = Script::new_builder()
-        .code_hash([0x11; 32].pack())
-        .hash_type(ScriptHashType::Data1)
+        .code_hash(TYPE_ID_CODE_HASH.pack())
+        .hash_type(ScriptHashType::Type)
         .args(hex::decode("aabb").unwrap().pack())
         .build();
     let beneficiary = Script::new_builder()
