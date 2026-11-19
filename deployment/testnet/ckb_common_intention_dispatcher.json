@@ -12,6 +12,6 @@
     "contract_owner_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
     "type_id": "0xf3f8a56c2594030f99f05b09ff1b6a1b07e6e07ed04309c1c4e246561faad326",
     "type_id_args": "0xdfe0a1416c7373e8aaae5257445e940b6ff08e9cbc62ebca8541d28997370f25",
-    "__comment": null
+    "__comment": "STALE: see deployment/README.md for the expected post-rebuild data_hash (fee-binding + TimeoutBurn exact). Rebuild, redeploy, and replace data_hash / tx_hash before creating new Intentions. Not a live code hash until updated post-redeploy."
   }
 ]

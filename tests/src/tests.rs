@@ -22,15 +22,16 @@ use ckb_cinnabar_calculator::{
     CalculatorError, TransactionCalculator,
 };
 use ckb_common_intention_dispatcher_calculator::{
-    cid_lock, create_intention, digest_incompatible, digest_ok, timeout_burn, ERROR_ARGS_INVALID,
-    ERROR_HEADER_MISSING, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH,
-    ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED,
-    ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
+    cid_lock, create_intention, digest_incompatible, digest_ok, encode_cid_args, timeout_burn,
+    Payload, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING, ERROR_MIXED_CID_LOCK, ERROR_PARTIAL_DIGEST,
+    ERROR_PROCESS_MISMATCH, ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING,
+    ERROR_TIMEOUT_NOT_REACHED, ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET,
+    MAX_REFUND_FEE, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
 };
 
 use crate::faker::{
-    cid_args, dest_lock, outpoint_ids, prepared_skeleton, process_type_hash,
-    seed_fakenet_xudt_cell, seed_header, seed_intention, seed_minimal_ckb_intention,
+    cid_args, dest_lock, dest_script, outpoint_ids, prepared_skeleton, process_type_hash,
+    script_to_cid, seed_fakenet_xudt_cell, seed_header, seed_intention, seed_minimal_ckb_intention,
     seed_process_cell, seed_typed_dummy_cell, seed_typed_intention, seed_user_cell, user_address,
     user_lock, user_script, xudt_type_script, CKB_CAPACITY, CONTRACT_BIN, CONTRACT_NAME,
     PACK_BLOCK, USER_CELL_CAPACITY, XUDT_AMOUNT,
@@ -314,6 +315,763 @@ async fn digest_incompatible_xudt() {
     verify(&rpc, skeleton, vec![ix])
         .await
         .expect("digest_incompatible xUDT");
+}
+
+#[tokio::test]
+async fn digest_incompatible_refund_fee_within_cap() {
+    require_binary();
+    for (label, fee, xudt) in [
+        ("ckb-exact", 0u64, None),
+        ("ckb-half-cap", MAX_REFUND_FEE / 2, None),
+        ("ckb-full-cap", MAX_REFUND_FEE, None),
+        (
+            "xudt-full-cap",
+            MAX_REFUND_FEE,
+            Some((xudt_type_script(), XUDT_AMOUNT)),
+        ),
+    ] {
+        let mut rpc = FakeRpcClient::default();
+        seed_fakenet_xudt_cell(&mut rpc);
+        let skeleton = prepared_skeleton(&rpc);
+        let intention = seed_intention(
+            &mut rpc,
+            &skeleton,
+            cid_args(process_type_hash(), label.as_bytes()),
+            CKB_CAPACITY,
+            xudt.clone(),
+            PACK_BLOCK,
+        );
+        // Pure incompatible haircut: no Process cells; shortfall == miner fee.
+        let ix = digest_incompatible::<FakeRpcClient>(
+            outpoint_ids(&intention),
+            user_lock(),
+            CKB_CAPACITY - fee,
+            xudt,
+        );
+        verify(&rpc, skeleton, vec![ix])
+            .await
+            .unwrap_or_else(|e| panic!("refund fee within cap ({label}): {e:?}"));
+    }
+}
+
+#[tokio::test]
+async fn digest_incompatible_refund_fee_beyond_cap_rejected() {
+    require_binary();
+    for xudt in [None, Some((xudt_type_script(), XUDT_AMOUNT))] {
+        let mut rpc = FakeRpcClient::default();
+        seed_fakenet_xudt_cell(&mut rpc);
+        let skeleton = prepared_skeleton(&rpc);
+        let intention = seed_intention(
+            &mut rpc,
+            &skeleton,
+            cid_args(process_type_hash(), b"fee-over"),
+            CKB_CAPACITY,
+            xudt.clone(),
+            PACK_BLOCK,
+        );
+        let ix = digest_incompatible::<FakeRpcClient>(
+            outpoint_ids(&intention),
+            user_lock(),
+            CKB_CAPACITY - MAX_REFUND_FEE - 1,
+            xudt,
+        );
+        let err = verify(&rpc, skeleton, vec![ix])
+            .await
+            .expect_err("fee beyond MAX_REFUND_FEE");
+        assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
+    }
+}
+
+#[tokio::test]
+async fn digest_incompatible_wrong_lock_rejected() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"wrong-lock"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    // Refund to a different lock: no User Lock output → not DigestIncompatible.
+    let ix = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        dest_lock(),
+        CKB_CAPACITY - MAX_REFUND_FEE,
+        None,
+    );
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("wrong refund lock");
+    assert_eq!(exit(err), ERROR_UNKNOWN_BRANCH);
+}
+
+#[tokio::test]
+async fn digest_incompatible_token_amount_change_rejected() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let xudt = xudt_type_script();
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"token-mut"),
+        CKB_CAPACITY,
+        Some((xudt.clone(), XUDT_AMOUNT)),
+        PACK_BLOCK,
+    );
+    let ix = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        user_lock(),
+        CKB_CAPACITY - MAX_REFUND_FEE,
+        Some((xudt, XUDT_AMOUNT - 1)),
+    );
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("token amount must stay exact");
+    assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
+}
+
+#[tokio::test]
+async fn digest_incompatible_batch_two_users_fee_covers_aggregate() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+
+    let user_a = user_lock();
+    let user_b = dest_lock();
+    let args_a = cid_args(process_type_hash(), b"batch-a");
+    let args_b = encode_cid_args(
+        process_type_hash(),
+        script_to_cid(&dest_script()),
+        Payload {
+            data: b"batch-b".to_vec(),
+        },
+    );
+    let intention_a = seed_intention(&mut rpc, &skeleton, args_a, CKB_CAPACITY, None, PACK_BLOCK);
+    let intention_b = seed_intention(&mut rpc, &skeleton, args_b, CKB_CAPACITY, None, PACK_BLOCK);
+
+    // Aggregate shortfall = MAX + MAX/2 equals miner fee when only these cells exist.
+    let refund_a = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention_a),
+        user_a,
+        CKB_CAPACITY - MAX_REFUND_FEE,
+        None,
+    );
+    let refund_b = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention_b),
+        user_b,
+        CKB_CAPACITY - MAX_REFUND_FEE / 2,
+        None,
+    );
+    verify(&rpc, skeleton, vec![refund_a, refund_b])
+        .await
+        .expect("multi-user batch when fee covers aggregate shortfall");
+}
+
+#[tokio::test]
+async fn digest_incompatible_rejects_third_party_siphon_of_shortfall() {
+    require_binary();
+    use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"siphon"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    // Funding input lets the siphon cell stay above occupied while absorbing the
+    // shaved shortfall so miner fee drops to 0.
+    let fund = {
+        let out = fake_outpoint();
+        rpc.insert_fake_cell(
+            out.clone(),
+            CellOutputEx::new_from_scripts(dest_script(), None, vec![], Some(USER_CELL_CAPACITY))
+                .unwrap(),
+            None,
+        );
+        out
+    };
+    let shortfall = MAX_REFUND_FEE;
+    let ix = Instruction::<FakeRpcClient>::new(vec![
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention).0,
+                index: outpoint_ids(&intention).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&fund).0,
+                index: outpoint_ids(&fund).1,
+                since: None,
+            },
+        ),
+        Box::new(AddOutputCell {
+            lock_script: user_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: USER_CELL_CAPACITY + shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    ]);
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("shortfall must not fund third-party outputs");
+    assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
+}
+
+#[tokio::test]
+async fn digest_incompatible_rejects_fee_reuse_across_users() {
+    require_binary();
+    use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let args_a = cid_args(process_type_hash(), b"reuse-a");
+    let args_b = encode_cid_args(
+        process_type_hash(),
+        script_to_cid(&dest_script()),
+        Payload {
+            data: b"reuse-b".to_vec(),
+        },
+    );
+    let intention_a = seed_intention(&mut rpc, &skeleton, args_a, CKB_CAPACITY, None, PACK_BLOCK);
+    let intention_b = seed_intention(&mut rpc, &skeleton, args_b, CKB_CAPACITY, None, PACK_BLOCK);
+    let fund = {
+        let out = fake_outpoint();
+        // Third lock so refund lookups for A/B stay unique.
+        let other = always_success_script(vec![0xDD]);
+        rpc.insert_fake_cell(
+            out.clone(),
+            CellOutputEx::new_from_scripts(other.clone(), None, vec![], Some(USER_CELL_CAPACITY))
+                .unwrap(),
+            None,
+        );
+        (out, other)
+    };
+
+    // Each shaves MAX (aggregate 2×MAX); fund change absorbs both shortfalls → fee 0.
+    let ix = Instruction::<FakeRpcClient>::new(vec![
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention_a).0,
+                index: outpoint_ids(&intention_a).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention_b).0,
+                index: outpoint_ids(&intention_b).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&fund.0).0,
+                index: outpoint_ids(&fund.0).1,
+                since: None,
+            },
+        ),
+        Box::new(AddOutputCell {
+            lock_script: user_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - MAX_REFUND_FEE,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - MAX_REFUND_FEE,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: fund.1.into(),
+            type_script: None,
+            data: vec![],
+            capacity: USER_CELL_CAPACITY + MAX_REFUND_FEE * 2,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    ]);
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("fee must cover aggregate shortfall, not one MAX reused twice");
+    assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
+}
+
+#[tokio::test]
+async fn digest_incompatible_sponsor_change_ok_when_fee_covers() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"sponsor-ok"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    // Sponsor must not use the Intention user_lock (that would select TimeoutBurn).
+    let sponsor = {
+        use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
+        let out = fake_outpoint();
+        rpc.insert_fake_cell(
+            out.clone(),
+            CellOutputEx::new_from_scripts(dest_script(), None, vec![], Some(USER_CELL_CAPACITY))
+                .unwrap(),
+            None,
+        );
+        out
+    };
+    let shortfall = MAX_REFUND_FEE;
+    let ix = Instruction::<FakeRpcClient>::new(vec![
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention).0,
+                index: outpoint_ids(&intention).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&sponsor).0,
+                index: outpoint_ids(&sponsor).1,
+                since: None,
+            },
+        ),
+        Box::new(AddOutputCell {
+            lock_script: user_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        // Sponsor change breaks even; miner fee == shortfall.
+        Box::new(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: USER_CELL_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    ]);
+    verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect("sponsor change ok when fee equals shortfall");
+}
+
+#[tokio::test]
+async fn digest_incompatible_sponsor_cannot_inflate_siphon() {
+    require_binary();
+    use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"sponsor-siphon"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let sponsor = {
+        let out = fake_outpoint();
+        rpc.insert_fake_cell(
+            out.clone(),
+            CellOutputEx::new_from_scripts(dest_script(), None, vec![], Some(USER_CELL_CAPACITY))
+                .unwrap(),
+            None,
+        );
+        out
+    };
+    let shortfall = MAX_REFUND_FEE;
+    // Sponsor "change" absorbs the shortfall → fee 0 < shortfall.
+    let ix = Instruction::<FakeRpcClient>::new(vec![
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention).0,
+                index: outpoint_ids(&intention).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&sponsor).0,
+                index: outpoint_ids(&sponsor).1,
+                since: None,
+            },
+        ),
+        Box::new(AddOutputCell {
+            lock_script: user_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: USER_CELL_CAPACITY + shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    ]);
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("sponsor must not underwrite a siphon from the shortfall");
+    assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
+}
+
+#[tokio::test]
+async fn digest_incompatible_rejects_refund_below_occupied() {
+    require_binary();
+    use ckb_cinnabar_calculator::skeleton::CellOutputEx;
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let occupied = CellOutputEx::new_from_scripts(user_script(), None, vec![], None)
+        .unwrap()
+        .capacity_shannons();
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"occupied"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    // Below-occupied outputs cannot be assembled (consensus/occupied floor). The
+    // lock predicate is covered by protocol::refund_capacity_window; here we prove
+    // the tx cannot be built with a sub-occupied refund cell.
+    let mut skel = skeleton;
+    let err = TransactionCalculator::default()
+        .instruction(digest_incompatible::<FakeRpcClient>(
+            outpoint_ids(&intention),
+            user_lock(),
+            occupied - 1,
+            None,
+        ))
+        .apply_skeleton(&rpc, &mut skel)
+        .expect_err("sub-occupied refund must fail assembly");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("InsufficientCapacity") || msg.contains("capacity"),
+        "unexpected assembly error: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn timeout_burn_rejects_shaved_refund() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    seed_user_cell(&mut rpc, USER_CELL_CAPACITY);
+    let skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"timeout-shave"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let judge = PACK_BLOCK + TIMEOUT_BLOCKS;
+    seed_header(&mut rpc, judge);
+    let ix = timeout_burn::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        user_address(),
+        user_lock(),
+        CKB_CAPACITY - MAX_REFUND_FEE,
+        None,
+        judge,
+    );
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("TimeoutBurn requires exact capacity");
+    assert_eq!(exit(err), ERROR_REFUND_ASSET_MISMATCH);
+}
+
+#[tokio::test]
+async fn shaved_digest_incompatible_rejects_co_bundle_with_digest_ok() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let process = seed_process_cell(&mut rpc);
+    // Process fixture cells use dest_script as lock — refund user must differ.
+    let refund_user = always_success_script(vec![0xBB]);
+    let ok_intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"ok-bundle"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    // Unrelated process_type_hash so this Intention stays DigestIncompatible while
+    // the Process pair is present for the DigestOk Intention.
+    let refund_intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        encode_cid_args(
+            [0xAB; 32],
+            script_to_cid(&refund_user),
+            Payload {
+                data: b"refund-bundle".to_vec(),
+            },
+        ),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let digest = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&ok_intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: user_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    let refund = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&refund_intention),
+        refund_user.into(),
+        CKB_CAPACITY - MAX_REFUND_FEE,
+        None,
+    );
+    let err = verify(&rpc, skeleton, vec![digest, refund])
+        .await
+        .expect_err("shaved refund must not co-bundle with DigestOk");
+    assert_eq!(exit(err), ERROR_PARTIAL_DIGEST);
+}
+
+/// Foreign lock with CID-shaped args in a DigestIncompatible tx must be rejected
+/// (`MixedCidLock`) — cannot safely ignore spoofs without enabling cross-version
+/// fee reuse.
+#[tokio::test]
+async fn digest_incompatible_rejects_foreign_cid_shaped_lock() {
+    require_binary();
+    use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"mixed-foreign"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let decoy_args = encode_cid_args(
+        process_type_hash(),
+        script_to_cid(&dest_script()),
+        Payload {
+            data: b"decoy-cid-args".to_vec(),
+        },
+    );
+    let decoy_lock = always_success_script(decoy_args);
+    let decoy = {
+        let out = fake_outpoint();
+        rpc.insert_fake_cell(
+            out.clone(),
+            CellOutputEx::new_from_scripts(
+                decoy_lock.clone(),
+                None,
+                vec![],
+                Some(USER_CELL_CAPACITY),
+            )
+            .unwrap(),
+            None,
+        );
+        out
+    };
+    let shortfall = 1_000u64;
+    let ix = Instruction::<FakeRpcClient>::new(vec![
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention).0,
+                index: outpoint_ids(&intention).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&decoy).0,
+                index: outpoint_ids(&decoy).1,
+                since: None,
+            },
+        ),
+        Box::new(AddOutputCell {
+            lock_script: user_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: decoy_lock.into(),
+            type_script: None,
+            data: vec![],
+            capacity: USER_CELL_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    ]);
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("foreign CID-shaped lock must MixedCidLock");
+    assert_eq!(exit(err), ERROR_MIXED_CID_LOCK);
+}
+
+/// Two CID identities (Data1 vs Data2) each shaving; F = max(S_i) would pass
+/// broken per-group checks while S_A+S_B > F funds a third-party siphon.
+#[tokio::test]
+async fn digest_incompatible_rejects_cross_identity_fee_reuse() {
+    require_binary();
+    use ckb_cinnabar_calculator::{simulation::fake_outpoint, skeleton::CellOutputEx};
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let skeleton = prepared_skeleton(&rpc);
+    let shortfall = 1_000u64;
+    let intention_a = seed_intention(
+        &mut rpc,
+        &skeleton,
+        cid_args(process_type_hash(), b"id-a"),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    // Second Intention: same binary code_hash, Data2 hash_type → distinct identity.
+    let args_b = encode_cid_args(
+        process_type_hash(),
+        script_to_cid(&dest_script()),
+        Payload {
+            data: b"id-b".to_vec(),
+        },
+    );
+    let lock_b = cid_lock(args_b)
+        .to_script(&skeleton)
+        .unwrap()
+        .as_builder()
+        .hash_type(ScriptHashType::Data2)
+        .build();
+    let intention_b = {
+        let out = fake_outpoint();
+        rpc.insert_fake_cell(
+            out.clone(),
+            CellOutputEx::new_from_scripts(lock_b, None, vec![], Some(CKB_CAPACITY)).unwrap(),
+            Some(ckb_cinnabar_calculator::simulation::fake_header_view(
+                PACK_BLOCK, PACK_BLOCK, PACK_BLOCK,
+            )),
+        );
+        out
+    };
+    // Funder lets the siphon cell stay above occupied while absorbing one shortfall
+    // so F = shortfall = max(S_A, S_B) < S_A+S_B (the broken per-group accept case).
+    let siphon_lock = always_success_script(vec![0xDD]);
+    let funder = {
+        let out = fake_outpoint();
+        rpc.insert_fake_cell(
+            out.clone(),
+            CellOutputEx::new_from_scripts(
+                siphon_lock.clone(),
+                None,
+                vec![],
+                Some(USER_CELL_CAPACITY),
+            )
+            .unwrap(),
+            None,
+        );
+        out
+    };
+    let ix = Instruction::<FakeRpcClient>::new(vec![
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention_a).0,
+                index: outpoint_ids(&intention_a).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&intention_b).0,
+                index: outpoint_ids(&intention_b).1,
+                since: None,
+            },
+        ),
+        Box::new(
+            ckb_cinnabar_calculator::operation::basic::AddInputCellByOutPoint {
+                tx_hash: outpoint_ids(&funder).0,
+                index: outpoint_ids(&funder).1,
+                since: None,
+            },
+        ),
+        Box::new(AddOutputCell {
+            lock_script: user_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY - shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+        Box::new(AddOutputCell {
+            lock_script: siphon_lock.into(),
+            type_script: None,
+            data: vec![],
+            capacity: USER_CELL_CAPACITY + shortfall,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    ]);
+    let err = verify(&rpc, skeleton, vec![ix])
+        .await
+        .expect_err("mixed CID identities must not share DigestIncompatible tx");
+    assert_eq!(exit(err), ERROR_MIXED_CID_LOCK);
 }
 
 #[tokio::test]

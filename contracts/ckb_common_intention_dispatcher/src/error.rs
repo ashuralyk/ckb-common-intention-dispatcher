@@ -11,4 +11,5 @@ define_errors!(CidError, {
     HeaderMissing,
     ZeroAsset,
     UnsupportedType,
+    MixedCidLock,
 });

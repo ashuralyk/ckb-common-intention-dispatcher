@@ -29,8 +29,8 @@ enum:
 | Hop | When | What CID checks |
 |-----|------|-----------------|
 | `digest_ok` | Committed Process type hash present in **both inputs and outputs** | Destroy; Process scripts enforce execution; no User Lock input/signature required |
-| `digest_incompatible` | No matching Process pair, User Lock refund present, User Lock absent from inputs | Destroy + exact CKB capacity and token refund |
-| `timeout_burn` | User Lock in inputs, no matching Process pair, headers prove `judge - pack >= 10800` | Destroy + exact refund + User Lock authorization |
+| `digest_incompatible` | No matching Process pair, User Lock refund present, User Lock absent from inputs | Destroy + User Lock refund; token amount/type exact; CKB capacity within fee window |
+| `timeout_burn` | User Lock in inputs, no matching Process pair, headers prove `judge - pack >= 10800` | Destroy + exact capacity/token refund + User Lock authorization |
 
 **Delegated execution:** the user chooses `process_type_hash` when creating
 an Intention. For `digest_ok`, CID finds that exact full type-script hash on
@@ -56,21 +56,58 @@ the one-input/no-output rule still applies to each CID lock group. The shared
 refund guard below applies only to refund paths. Without a matching Process
 pair, exact refund and timeout rules remain available; arbitrary spending fails.
 
-Refunds preserve the Intention's **exact capacity**, and xUDT refunds preserve
-both the full type hash and token amount. Fees come from separate funding inputs.
+Refunds must go to the exact User Lock. xUDT refunds preserve both the full type
+hash and token amount.
+
+**DigestIncompatible (keyless) fee haircut:** refund CKB capacity may be at most
+`MAX_REFUND_FEE` (= `0.01 CKB` = `1_000_000` shannons) below the Intention, and
+must stay `>=` the refund cell's occupied capacity. That ceiling alone is not
+enough: Verify also requires `tx_fee >= Σ shortfalls` over **every**
+DigestIncompatible Intention in the transaction (same aggregate in each lock
+group). Equivalently, non-refund outputs must be funded by inputs that are **not**
+counted in `S` (non-DigestIncompatible inputs — sponsors, TimeoutBurn/user cells,
+DigestOk Process cells, etc.), so a shortfall cannot be redirected to a third
+party and cannot be double-counted across groups. `MAX_REFUND_FEE` is only a
+per-Intention ceiling on how much of that fee one refund may contribute — never
+a skim allowance.
+
+**TimeoutBurn** keeps **exact** capacity refunds (user can add fee inputs).
+**DigestOk** is unchanged. Process example still requires exact beneficiary
+capacity. **Do not co-bundle shaved DigestIncompatible refunds with DigestOk**
+(CID rejects shortfall > 0 when any DigestOk Intention is present); backends
+must build separate transactions. Exact incompatible refunds may still share a
+tx with DigestOk as today.
+
+**Mixed CID lock identities forbidden on DigestIncompatible:** a DigestIncompatible
+spend rejects the tx if any other input lock decodes as CID args but has a
+different `code_hash` or `hash_type` than the executing script (`MixedCidLock`).
+That covers two deployments, Data1/Data2 aliases, and foreign locks that only
+embed CID-shaped args — they cannot share a DigestIncompatible transaction
+(otherwise each group could accept `F >= S_local` while `S_A+S_B > F`). Same
+identity (same code_hash+hash_type) multi-Intention batches remain OK when
+`F >= Σ shortfalls`.
+
+No Intention-args / encoding change: fixed dual-written `MAX_REFUND_FEE`.
+
 Until aggregate refunds are specified, refund paths accept at most one Intention
 per User Lock per transaction, including different payloads and deployment aliases.
 The guard conservatively counts any input lock whose args decode as CID v0.1
 with that User Lock, even if it belongs to another program.
 This prevents two script groups from counting the same refund twice. The first
-output to the User Lock must be the exact refund; append fee change afterwards.
+output to the User Lock must be the refund; with a fee sponsor, keep
+`sponsor_in >= sponsor_change` so fee still covers the Intention shortfall.
 
-Existing deployed binaries are unchanged by this source fix. Rebuild/redeploy
-and use the new code hash for new Intentions; existing cells locked to the old
-binary do not automatically acquire these protections.
+**Redeploy required:** changing refund matching changes the `cid_lock` binary /
+data hash. Rebuild, redeploy, and point new Intentions at the new code hash;
+existing cells locked to an older binary keep the old exact-capacity rule.
+**TimeoutBurn stays exact** after redeploy (only DigestIncompatible gains the
+fee-bound haircut). See `deployment/README.md` for the expected RISC-V
+`data_hash` and how to verify it; `deployment/testnet/` JSON may still list a
+stale deployed hash — do not treat that as current until post-redeploy update.
 
-`TIMEOUT_BLOCKS = 10800` is dual-written on-chain and off-chain. Pack height is
-the block that committed the Intention; judge height is the newest header dep.
+`TIMEOUT_BLOCKS = 10800` and `MAX_REFUND_FEE = 1_000_000` are dual-written
+on-chain and off-chain. Pack height is the block that committed the Intention;
+judge height is the newest header dep.
 
 ## Build and test
 
@@ -222,9 +259,14 @@ A standard secp256k1 integration should:
 
 1. Add CID, xUDT (recipes handle this), and the real secp256k1 code/data deps.
 2. Apply the recipe, Process code deps/witnesses, and any server/sponsor inputs.
-3. Balance CKB with a separate change output, preserving exact refund outputs.
-4. Sign every input lock group, then check actual fees against the chosen budget
-   and the node's fee rate. Do not alter the transaction after signing.
+3. For keyless `digest_incompatible` without a sponsor: set refund capacity to
+   `intention_capacity - fee` with `fee ∈ (0, MAX_REFUND_FEE]`, `>=` occupied,
+   and ensure the tx has no other outputs that would make `tx_fee < Σ shortfalls`.
+   With a sponsor, fund change so `tx_fee >= Σ shortfalls` still holds. Never
+   co-bundle shaved refunds with DigestOk. TimeoutBurn / signed refunds keep
+   exact capacity and pay fees from user/sponsor inputs. Do not change xUDT amounts.
+4. Sign every input lock group (when any), then check actual fees against the
+   chosen budget and the node's fee rate. Do not alter the transaction after signing.
 5. Dry-run the final signed transaction against a CKB node before broadcasting.
 
 Example finalization with an explicit fee budget (shannons); `signatures` is an
@@ -256,7 +298,8 @@ let tx = skeleton.clone().into_transaction_view();
 let size = tx.data().serialized_size_in_block() as u64;
 let required_fee = size.checked_mul(rpc.min_fee_rate()?).unwrap().div_ceil(1000);
 assert!(paid_fee >= required_fee);
-// If too low, rebuild and re-sign with a higher approved fee; never shave refunds.
+// Keyless DigestIncompatible: shave refund by exactly the miner fee (≤ MAX_REFUND_FEE)
+// with tx_fee covering the tx-wide shortfall aggregate — never divert into other outputs.
 // Dry-run and broadcast `tx` using your node/client only after all checks pass.
 ```
 
@@ -276,9 +319,13 @@ enforce branch protection.
 
 Tests include CKB/xUDT delegation without a User Lock input, Process pair
 presence/mismatch checks, a failing executable Process, authorized batch digest,
-CellDep-only theft, xUDT capacity theft on both refund paths,
-non-issuer token collection/change/insufficient balance, missing output with xUDT
-input dependency, timeout boundaries 10799/10800/10801, partial user proceeds,
+CellDep-only theft, xUDT capacity theft on both refund paths, DigestIncompatible
+fee-binding (exact / within-cap / beyond-cap CKB+xUDT / wrong lock / token mutation /
+multi-user aggregate fee / third-party siphon / fee reuse / sponsor change /
+occupied floor / shaved+DigestOk co-bundle / MixedCidLock for foreign CID-shaped
+locks and cross-identity Data1/Data2 fee reuse / TimeoutBurn shaved rejection),
+non-issuer token collection/change/insufficient balance, missing output with
+xUDT input dependency, timeout boundaries 10799/10800/10801, partial user proceeds,
 and cross-Intention refund reuse. `tests/src/signed.rs` executes the real genesis
 secp256k1 script and real signatures for create/digest/refund/timeout, checks fee
 and change, and rejects missing funding signatures and post-signing output mutations. Digest
