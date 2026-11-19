@@ -103,8 +103,9 @@ lock with `hash_type=type` and `code_hash=type_id` (see Intention CLI) so they
 track the live code cell across upgrades. Existing cells locked to an older
 **data hash** (`data1`) stay on that binary until spent. **TimeoutBurn stays
 exact** after redeploy (only DigestIncompatible gains the fee-bound haircut).
-See `deployment/README.md` for live testnet Type ID / outpoints and the local
-rebuild `data_hash` oracle.
+See `deployment/README.md` for the expected RISC-V `data_hash` and how to
+verify it; `deployment/testnet/` JSON may still list a stale deployed hash —
+do not treat that as current until the owner updates it post-redeploy.
 
 `TIMEOUT_BLOCKS = 10800` and `MAX_REFUND_FEE = 1_000_000` are dual-written
 on-chain and off-chain. Pack height is the block that committed the Intention;
