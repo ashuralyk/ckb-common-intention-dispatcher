@@ -344,6 +344,9 @@ dependencies = [
 [[package]]
 name = "cid-process-example-policy"
 version = "0.1.0"
+dependencies = [
+ "cid-protocol",
+]
 
 [[package]]
 name = "cid-process-executor"

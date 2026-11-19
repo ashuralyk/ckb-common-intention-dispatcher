@@ -36,6 +36,21 @@ impl ProcessExecutor {
             .and_then(|response| parse_batch_bounds(&response))
     }
 
+    /// Classify Intention candidates via SSRI `Process.filter`.
+    ///
+    /// `request` is [`cid_protocol::encode_filter_request`] bytes. Returns
+    /// per-cell reason codes in request order (`0` = accepted). Empty request
+    /// (or empty cell list) yields an empty reason list. Does not use host
+    /// queries — cell payloads are embedded in the request.
+    pub fn filter(&self, request: &[u8]) -> Result<Vec<i8>, ExecutorError> {
+        if self.binary.is_empty() {
+            return Err(ExecutorError::VmError("empty binary".into()));
+        }
+        let response = vm::call_ssri_method(&self.binary, "Process.filter", request)?;
+        cid_protocol::decode_filter_response(&response)
+            .map_err(|e| ExecutorError::InvalidResponse(format!("filter response: {:?}", e)))
+    }
+
     /// Assemble a complete digest transaction via SSRI `Process.assemble`.
     ///
     /// `draft_tx` is a packed molecule `Transaction` whose inputs are the
@@ -355,13 +370,16 @@ mod tests {
             vec![],
         ));
         for i in 0..n {
-            let lock_args = cid_protocol::CidArgs::new(
-                pth,
-                cid_protocol::Script::default(),
-                cid_protocol::Payload::default(),
-            )
-            .encode()
+            let payload = cid_protocol::Payload::from_script(&cid_protocol::Script {
+                code_hash: [0xBE; 32],
+                hash_type: 1,
+                args: vec![0x01],
+            })
             .unwrap();
+            let lock_args =
+                cid_protocol::CidArgs::new(pth, cid_protocol::Script::default(), payload)
+                    .encode()
+                    .unwrap();
             cells.push(intention_draft_cell(
                 OutPoint::new_builder()
                     .tx_hash(Byte32::from_slice(&[0x10 + i as u8; 32]).unwrap())
@@ -770,13 +788,15 @@ mod tests {
         let executor = ProcessExecutor::new(binary);
         let type_id = type_id_script(b"process-type-id-v0");
         let pth: [u8; 32] = type_id.calc_script_hash().unpack();
-        let lock_args = cid_protocol::CidArgs::new(
-            pth,
-            cid_protocol::Script::default(),
-            cid_protocol::Payload::default(),
-        )
-        .encode()
+        let payload = cid_protocol::Payload::from_script(&cid_protocol::Script {
+            code_hash: [0xBE; 32],
+            hash_type: 1,
+            args: vec![0x01],
+        })
         .unwrap();
+        let lock_args = cid_protocol::CidArgs::new(pth, cid_protocol::Script::default(), payload)
+            .encode()
+            .unwrap();
         // Mirror Process guest occupied formula: pin capacity exactly at floor
         // so any nonzero fee leaves recreate below occupied.
         let process_lock = process_lock_script();

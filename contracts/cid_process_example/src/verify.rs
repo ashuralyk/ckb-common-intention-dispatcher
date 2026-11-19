@@ -179,6 +179,7 @@ fn collect_output_obligations(
                 Err(e) => return Err(e),
             };
             // Deposit floor is Process-local: only this Process's Intentions.
+            // Deposit minimum is Process-local (`ours_prefix`), same rule as filter.
             if ours_prefix
                 && !crate::deposit::ckb_deposit_capacity_ok(
                     transfer.capacity,

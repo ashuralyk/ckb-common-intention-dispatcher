@@ -45,12 +45,59 @@ The backend **must not** rewrite or fill anything in the molecule transaction
 returned by `Process.assemble` — including witnesses. Capacity balance and fee
 are Process responsibilities; submit the returned bytes unchanged.
 
+## Sequencer flow (scan → route → filter → assemble)
+
+1. **Scan** live Intention cells (indexer / node).
+2. **Route** with the Process-independent protocol helper
+   [`intention_process_type_id`](../protocol/src/route.rs): require CID lock
+   `hash_type = type` and `code_hash =` the Sequencer's CID code Type ID script
+   hash; extract `process_type_hash`. Group Intentions by that Process Type ID.
+   Non-Intentions / malformed cells get a typed [`IntentionRouteError`].
+3. **Filter** per Process: call SSRI `Process.filter` with that Process's
+   identity + the CID Type ID hash + the routed cell batch. The filter
+   **must** verify ownership itself (same protocol helper: CID Type-ID lock +
+   `process_type_hash` equals this Process) and reject foreign / non-CID cells
+   with dedicated reason codes — consistent with on-chain `ours_prefix`.
+4. **Assemble** with the accepted Intentions + live Process state via
+   `Process.assemble`.
+
+Host wrapper: `cid_process_example_calculator::process_filter`.
+
 ## SSRI methods
 
 ### `Process.batch`
 
 - **stdin:** empty  
 - **stdout:** 8 bytes LE = `batch_min` ‖ `batch_max` (example: `1` / `4`)
+
+### `Process.filter`
+
+- **stdin:** [`FilterRequest`](../protocol/src/filter.rs) via
+  `encode_filter_request`:
+  - `process_type_hash[32]` — this Process instance (state TYPE_ID script hash)
+  - `cid_code_type_id_hash[32]` — CID lock code Type ID script hash
+  - `count:u32 LE` then per cell: length-prefixed packed `OutPoint`, packed
+    `CellOutput`, and `data` (same molecule cell encoding as elsewhere)
+  - empty stdin or `count = 0` → empty verdict list
+  - soft cap: `FILTER_MAX_CELLS` (64)
+- **stdout:** `count:u32 LE || reason:i8 * count` (same order as input)
+- **Semantics:** per-cell; one bad cell does **not** abort the batch. Ownership
+  (CID Type-ID Intention lock targeting this Process) is a **required** first
+  check. Then Process-owned rules (deposit min, supported assets, digest).
+
+| Reason | Code | Meaning |
+|--------|------|---------|
+| `FILTER_ACCEPTED` | 0 | Meets this Process's requirements |
+| `FILTER_MALFORMED_CELL` | 1 | Packed `CellOutput` / framing invalid |
+| `FILTER_NOT_INTENTION` | 2 | Not a CID Type-ID Intention lock |
+| `FILTER_PROCESS_MISMATCH` | 3 | CID Intention for another Process Type ID |
+| `FILTER_UNSUPPORTED_ASSET` | 4 | Typed asset not supported (e.g. non-xUDT) |
+| `FILTER_DEPOSIT_BELOW_MINIMUM` | 5 | CKB deposit below Process minimum |
+| `FILTER_MALFORMED_DIGEST` | 6 | Payload / digest undecodable for this Process |
+| `FILTER_UNSUPPORTED_ACTION` | 7 | Action not supported (reserved) |
+
+Example Process classification is shared with assemble / on-chain verify via
+`crates/cid-process-example-policy` (`classify_intention`).
 
 ### `Process.assemble`
 
