@@ -162,8 +162,10 @@ fn dest_script_data2() -> Script {
         .build()
 }
 
+/// Default fixture: CID code celldep carries a Type ID so Intention locks
+/// resolve as `hash_type=type` — required for shared classify / filter ownership.
 fn prepared_process_skeleton(rpc: &FakeRpcClient) -> TransactionSkeleton {
-    prepared_process_skeleton_with_cid_type_id(rpc, None)
+    prepared_process_skeleton_with_cid_type_id(rpc, Some([0x71u8; 32]))
 }
 
 /// When `cid_type_id_args` is set, the CID code celldep carries a Type ID type
@@ -1268,6 +1270,7 @@ async fn assemble_and_verify_xudt_beneficiary() {
         AssembleExtras {
             funding_cells: vec![],
             cell_deps: deps,
+            cid_code_type_id_hash: None,
         },
         CONTRACT_BIN,
     )

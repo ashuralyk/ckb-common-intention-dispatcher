@@ -37,12 +37,13 @@ cd tests && cargo test process_example -- --nocapture
 ## SSRI
 
 - **Process.batch** — `(min, max)` = `(1, 4)` as 8 LE bytes  
-- **Process.assemble** — stdin = molecule `Transaction` draft (Intention + Process
-  inputs and required code `cell_deps`); stdout =
-  complete molecule `Transaction` (inputs, outputs, outputs_data, cell_deps,
-  header_deps, witnesses). Cells are loaded via ckb-ssri-std host queries
-  (`find_cell_by_out_point`, …). Extra funding inputs return
-  `UnsupportedFundingLock` (38). The Process state pays the fee.
+- **Process.assemble** — stdin = `cid_code_type_id_hash[32] ||` molecule
+  `Transaction` draft (Intention + Process inputs and required code
+  `cell_deps`); the 32-byte prefix is the same expected CID Type ID as
+  `Process.filter`. Stdout = complete molecule `Transaction` (inputs, outputs,
+  outputs_data, cell_deps, header_deps, witnesses). Cells are loaded via
+  ckb-ssri-std host queries (`find_cell_by_out_point`, …). Extra funding inputs
+  return `UnsupportedFundingLock` (38). The Process state pays the fee.
 
 ## On-chain verification (Process **lock**)
 

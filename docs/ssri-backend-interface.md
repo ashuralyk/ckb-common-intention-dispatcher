@@ -99,12 +99,18 @@ Host wrapper: `cid_process_example_calculator::process_filter`.
 | `FILTER_UNSUPPORTED_ACTION` | 7 | Action not supported (reserved) |
 
 Example Process classification is shared with assemble / on-chain verify via
-`crates/cid-process-example-policy` (`classify_intention`).
+`crates/cid-process-example-policy` (`classify_intention`). Filter, assemble, and
+on-chain Verify all call that helper with one expected CID Type ID (filter /
+assemble: Sequencer-supplied; on-chain: the unique Type-hash `code_hash` among
+this Process's Intentions).
 
 ### `Process.assemble`
 
-- **stdin:** packed molecule `Transaction` **draft**. Each Process defines its
-  own draft preconditions. For `cid_process_example`, the draft must include:
+- **stdin:** `cid_code_type_id_hash[32] ||` packed molecule `Transaction`
+  **draft**. The 32-byte prefix is the same expected CID lock code Type ID the
+  Sequencer passes to `Process.filter` — every Intention is classified against
+  that single value (not each cell's own `lock.code_hash`). Each Process defines
+  its own draft preconditions. For `cid_process_example`, the draft must include:
   - `raw.inputs`: Intention and Process state out points only
   - `raw.cell_deps`: at least CID lock code, Process code, and any official
     xUDT code deps needed to execute the returned tx
