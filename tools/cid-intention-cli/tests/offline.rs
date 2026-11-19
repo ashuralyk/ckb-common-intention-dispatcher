@@ -219,6 +219,27 @@ fn insufficient_funds_rejected() {
 }
 
 #[test]
+fn create_intention_accepts_tight_funding_intention_plus_fee_plus_change_dust() {
+    // Regression: early check must not require FEE_HEADROOM=1_000_000 when
+    // fee_shannons=10000 already covers rate-1000 min. Documented budget
+    // intention + fee + 61 CKB change must succeed.
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    assert_eq!(req.fee_shannons, 10_000);
+    const MIN_CHANGE: u64 = 61_0000_0000;
+    req.funding.capacity = req
+        .intention_capacity
+        .checked_add(req.fee_shannons)
+        .unwrap()
+        .checked_add(MIN_CHANGE)
+        .unwrap();
+    let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
+    let (paid, need) = assert_fee_covers_rate(&bundle.skeleton, MIN_FEE_RATE).unwrap();
+    assert!(paid >= need);
+    assert_eq!(paid, req.fee_shannons.max(need));
+}
+
+#[test]
 fn duplicate_outpoints_rejected() {
     let secret = key(0x42);
     let mut req = fixture_request(&secret);
@@ -355,7 +376,8 @@ fn create_intention_bumps_sub_min_fee_shannons_to_rate_1000() {
     let secret = key(0x42);
     let mut req = fixture_request(&secret);
     req.fee_shannons = 1; // far below rate-1000 min for a create tx
-                          // Funding must still clear early headroom (max(1, 1_000_000) + change dust).
+                          // Early check only asks for fee_shannons; need_exact enforces real min fee.
+                          // Pad so post-placeholder effective_fee still fits with change dust.
     req.funding.capacity = req.intention_capacity + 1_000_000 + 61_0000_0000 + 10_0000_0000;
     let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
     let (paid, need) = assert_fee_covers_rate(&bundle.skeleton, MIN_FEE_RATE).unwrap();

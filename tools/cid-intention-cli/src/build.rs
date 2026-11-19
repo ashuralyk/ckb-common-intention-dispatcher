@@ -361,14 +361,14 @@ fn create_signed_intention_bundle_inner(
         return Err(CliError::LockKeyMismatch);
     }
 
-    // Headroom uses effective fee budget: max(requested, conservative rate-1000
-    // estimate). Exact effective_fee is re-checked after placeholders below.
+    // Early budget uses only the requested fee_shannons so it is never stricter
+    // than the post-placeholder need_exact check (effective_fee = max(fee, min)).
+    // A fixed FEE_HEADROOM here would reject tight-but-sufficient funding such as
+    // intention + fee_shannons(10000) + 61 CKB change dust.
     const MIN_CHANGE: u64 = 61_0000_0000;
-    const FEE_HEADROOM: u64 = 1_000_000; // covers >1KB at rate 1000
-    let fee_budget = req.fee_shannons.max(FEE_HEADROOM);
     let need = req
         .intention_capacity
-        .checked_add(fee_budget)
+        .checked_add(req.fee_shannons)
         .and_then(|v| v.checked_add(MIN_CHANGE))
         .ok_or(CliError::InsufficientFunds)?;
     if req.funding.capacity < need {
