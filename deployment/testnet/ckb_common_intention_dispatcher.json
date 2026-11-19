@@ -1,17 +1,17 @@
 [
   {
     "name": "ckb_common_intention_dispatcher",
-    "date": "2026-11-18T05:19:44.015060+00:00",
-    "operation": "deploy",
-    "version": "v0.1.1",
-    "tx_hash": "0xdd5b21773f2822b1369336bdaa1b6ea49ac9762f59bfe0c244395dbb95560690",
+    "date": "2026-11-19T00:00:00+00:00",
+    "operation": "migrate",
+    "version": "v0.1.1-live",
+    "tx_hash": "0x5d9e44fca3beb712c9efe848c24f83fb8dba3ff35cfb23353a89631322a155fc",
     "out_index": 0,
-    "data_hash": "0xa6ff4ce51172a208ca820fc07e81c596287c256e747fcb5a46434032655c087d",
-    "occupied_capacity": 8520600000000,
+    "data_hash": "0x110f6f793b0a22ccc3942791573933206c5d6b24a8f5ddfe9749ff04f8646dca",
+    "occupied_capacity": 8835000000000,
     "payer_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
     "contract_owner_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
     "type_id": "0xf3f8a56c2594030f99f05b09ff1b6a1b07e6e07ed04309c1c4e246561faad326",
     "type_id_args": "0xdfe0a1416c7373e8aaae5257445e940b6ff08e9cbc62ebca8541d28997370f25",
-    "__comment": "STALE: see deployment/README.md for the expected post-rebuild data_hash (fee-binding + TimeoutBurn exact). Rebuild, redeploy, and replace data_hash / tx_hash before creating new Intentions. Not a live code hash until updated post-redeploy."
+    "__comment": "Verified live on testnet.ckb.dev (get_live_cell + data blake2b + Type ID script hash). Intention locks must use code_hash=type_id, hash_type=type. See deployment/README.md."
   }
 ]

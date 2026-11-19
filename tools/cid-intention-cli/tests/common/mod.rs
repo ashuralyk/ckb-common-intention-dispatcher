@@ -1,10 +1,13 @@
 //! Shared synthetic-key fixtures for CLI integration tests (no network).
 
 use cid_intention_cli::{CreateRequest, ScriptJson};
-use ckb_cinnabar_calculator::re_exports::{
-    ckb_hash::blake2b_256,
-    ckb_types::{core::ScriptHashType, packed::Script, prelude::*},
-    secp256k1::{PublicKey, Secp256k1, SecretKey},
+use ckb_cinnabar_calculator::{
+    re_exports::{
+        ckb_hash::blake2b_256,
+        ckb_types::{core::ScriptHashType, packed::Script, prelude::*},
+        secp256k1::{PublicKey, Secp256k1, SecretKey},
+    },
+    TYPE_ID_CODE_HASH,
 };
 use serde_json::json;
 
@@ -55,6 +58,11 @@ pub fn fixture_request(secret: &SecretKey) -> CreateRequest {
         .args([0xEEu8].pack())
         .build();
     let cid_bin = vec![0xC1u8; 64];
+    let cid_type = Script::new_builder()
+        .code_hash(TYPE_ID_CODE_HASH.pack())
+        .hash_type(ScriptHashType::Type)
+        .args([0xABu8; 32].to_vec().pack())
+        .build();
     serde_json::from_value(json!({
         "network": "fake",
         "fee_shannons": 10000,
@@ -70,7 +78,8 @@ pub fn fixture_request(secret: &SecretKey) -> CreateRequest {
             "name": "ckb_common_intention_dispatcher",
             "tx_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
             "index": 0,
-            "data": format!("0x{}", hex::encode(&cid_bin))
+            "data": format!("0x{}", hex::encode(&cid_bin)),
+            "type_script": script_json(&cid_type)
         },
         "sighash_deps": [
             {

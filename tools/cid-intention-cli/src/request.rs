@@ -11,6 +11,8 @@ pub struct CreateRequest {
     pub fee_shannons: u64,
     pub intention_capacity: u64,
     pub funding: FundingCell,
+    /// Live CID lock **code** cell. Must include Type ID `type_script` so the
+    /// Intention lock resolves as `hash_type=type` (no data-hash fallback).
     pub cid_lock_dep: NamedDep,
     /// Genesis secp code + data cell deps (with binary `data` for offline signing).
     pub sighash_deps: Vec<NamedDep>,
@@ -35,8 +37,12 @@ pub struct NamedDep {
     pub name: String,
     pub tx_hash: String,
     pub index: u32,
-    /// Cell data hex; required so Data1 / offline signing can resolve hashes.
+    /// Cell data hex; required so the dep cell (and offline signing) can be seeded.
     pub data: String,
+    /// Type script of the dep cell. **Required** on `cid_lock_dep` (Type ID);
+    /// optional on sighash deps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_script: Option<ScriptJson>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
