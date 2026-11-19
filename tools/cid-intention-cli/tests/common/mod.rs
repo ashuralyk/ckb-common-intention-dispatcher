@@ -71,7 +71,6 @@ pub fn fixture_request(secret: &SecretKey) -> CreateRequest {
     serde_json::from_value(json!({
         "network": "fake",
         "fee_shannons": 10000,
-        "intention_capacity": 600_0000_0000u64,
         "funding": {
             "tx_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
             "index": 0,

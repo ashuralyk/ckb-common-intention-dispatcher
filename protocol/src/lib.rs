@@ -60,9 +60,8 @@ pub const DEFAULT_MIN_INTENTION_CAPACITY: u64 = 500_0000_0000;
 /// Example Process (`cid_process_example`) CKB deposit minimum: **600 CKB**.
 ///
 /// Single source of truth for on-chain Verify/assemble and the host calculator.
-/// Strictly greater than [`DEFAULT_MIN_INTENTION_CAPACITY`] so a minimum deposit
-/// Intention is always at/above the create floor and can fund the deposit by
-/// consuming Intention capacity alone.
+/// Strictly greater than [`DEFAULT_MIN_INTENTION_CAPACITY`]. Creation may raise
+/// the effective capacity further to cover the cell's occupied capacity.
 pub const EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY: u64 = 600_0000_0000;
 
 const _: () = assert!(EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY > DEFAULT_MIN_INTENTION_CAPACITY);
@@ -71,9 +70,8 @@ const _: () = assert!(EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY > DEFAULT_MIN_INTENTI
 /// [`DEFAULT_MIN_INTENTION_CAPACITY`].
 ///
 /// Process authors: for every CKB deposit action fulfilled by consuming an
-/// Intention's capacity, declare `min_deposit` that satisfies this so a
-/// minimum deposit is always a createable Intention and can fund the deposit
-/// alone (no extra capacity input).
+/// Intention's capacity, declare a `min_deposit` above the create floor.
+/// The concrete cell's occupied capacity can still require a larger deposit.
 pub const fn deposit_min_satisfies_intention_floor(min_deposit: u64) -> bool {
     min_deposit > DEFAULT_MIN_INTENTION_CAPACITY
 }

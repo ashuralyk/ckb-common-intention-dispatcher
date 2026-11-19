@@ -1,5 +1,6 @@
 //! Assemble and offline-sign a CKB-only Intention create tx.
 
+use cid_process_example_calculator::MIN_DEPOSIT_CAPACITY;
 use ckb_cinnabar_calculator::{
     instruction::Instruction,
     occupied_capacity_shannons,
@@ -360,21 +361,6 @@ fn create_signed_intention_bundle_inner(
         return Err(CliError::LockKeyMismatch);
     }
 
-    // Early budget uses max(requested, Intention floor); occupied bump happens
-    // after deps resolve. fee_shannons-only so this stays no stricter than
-    // need_exact (effective_fee = max(fee, min)).
-    const MIN_CHANGE: u64 = 61_0000_0000;
-    let floor_capacity = req
-        .intention_capacity
-        .max(ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY);
-    let need = floor_capacity
-        .checked_add(req.fee_shannons)
-        .and_then(|v| v.checked_add(MIN_CHANGE))
-        .ok_or(CliError::InsufficientFunds)?;
-    if req.funding.capacity < need {
-        return Err(CliError::InsufficientFunds);
-    }
-
     let process_type = require_process_type_id_script(&req.process_type_script)?;
     let process_type_hash = script_hash32(&process_type);
     let beneficiary = req.beneficiary_lock.to_cid_script()?;
@@ -453,6 +439,22 @@ fn create_signed_intention_bundle_inner(
         .intention_capacity
         .max(DEFAULT_MIN_INTENTION_CAPACITY)
         .max(occupied);
+    if intention_capacity < MIN_DEPOSIT_CAPACITY {
+        return Err(CliError::InvalidRequest(format!(
+            "effective intention_capacity {intention_capacity} is below the example Process minimum of {MIN_DEPOSIT_CAPACITY} shannons"
+        )));
+    }
+
+    // Check the pinned input before balance can scan for extra cells. The
+    // exact fee is checked after change and witness placeholders are present.
+    const MIN_CHANGE: u64 = 61_0000_0000;
+    let need = intention_capacity
+        .checked_add(req.fee_shannons)
+        .and_then(|v| v.checked_add(MIN_CHANGE))
+        .ok_or(CliError::InsufficientFunds)?;
+    if req.funding.capacity < need {
+        return Err(CliError::InsufficientFunds);
+    }
 
     // Pin funding by explicit outpoint (CKB-only create path; no address scan).
     let create = Instruction::new(vec![

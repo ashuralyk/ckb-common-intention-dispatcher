@@ -1026,6 +1026,39 @@ mod tests {
     }
 
     #[test]
+    fn test_ssri_guest_rejects_ckb_deposit_below_process_minimum() {
+        use cid_process_executor::ExecutorError;
+
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!("Skipping test: binary not built at {bin_path}");
+            return;
+        }
+        let executor = ProcessExecutor::new(load_process_binary(bin_dir).unwrap());
+        let (process, mut intentions) = sample_process_and_intention();
+        intentions[0].capacity = MIN_DEPOSIT_CAPACITY;
+        let extras = AssembleExtras {
+            funding_cells: vec![],
+            cell_deps: vec![sample_code_dep()],
+        };
+        let (draft, mut known) = build_draft_and_known(&intentions, &process, &extras).unwrap();
+        // Change the cell served to the guest so the host draft guard does not
+        // intercept the below-minimum case.
+        let (output, _) = known.get_mut(intentions[0].out_point.as_slice()).unwrap();
+        *output = output
+            .clone()
+            .as_builder()
+            .capacity(MIN_DEPOSIT_CAPACITY - 1)
+            .build();
+        let result = executor.assemble(&draft, seed_mock_from_known(&known).unwrap());
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(39))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn test_assemble_deposit_by_consuming_intention_at_min() {
         let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
         let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);

@@ -637,7 +637,8 @@ async fn reject_batch_when_one_deposit_below_minimum() {
     let process_hash = process_example_type_hash(&type_script);
     let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
     let args_ok = beneficiary_args(process_hash, &dest_script());
-    let args_bad = beneficiary_args(process_hash, &dest_script());
+    let other_dest = always_success_script(vec![0xBD]);
+    let args_bad = beneficiary_args(process_hash, &other_dest);
     let int_ok = seed_intention(
         &mut rpc,
         &skeleton,
@@ -680,8 +681,7 @@ async fn reject_batch_when_one_deposit_below_minimum() {
         )
         .unwrap()
         .witness(Default::default());
-    skeleton
-        .output(CellOutputEx::new_from_scripts(dest_script(), None, vec![], Some(below)).unwrap());
+    skeleton.output(CellOutputEx::new_from_scripts(other_dest, None, vec![], Some(below)).unwrap());
 
     let err = verify(&rpc, skeleton, vec![])
         .await
@@ -786,6 +786,62 @@ async fn reject_two_processes_sharing_one_beneficiary() {
         .await
         .expect_err("two Processes must not share one beneficiary output");
     assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
+}
+
+#[tokio::test]
+async fn digest_ok_accepts_subminimum_deposit_for_another_process() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let example_type = process_example_type_script(b"example-process".to_vec());
+    let other_type = process_example_type_script(b"other-process".to_vec());
+    let other_dest = always_success_script(vec![0xBD]);
+
+    let example_digest = (
+        process_example_lock_script(),
+        example_type,
+        dest_script(),
+        MIN_DEPOSIT_CAPACITY,
+    );
+    let other_digest = (
+        always_success_script(vec![0xB2]),
+        other_type,
+        other_dest,
+        DEFAULT_MIN_INTENTION_CAPACITY,
+    );
+
+    for (process_lock, type_script, beneficiary, capacity) in [example_digest, other_digest] {
+        let process_hash = process_example_type_hash(&type_script);
+        let process = seed_process_example_cell(&mut rpc, process_lock, type_script);
+        let intention = seed_intention(
+            &mut rpc,
+            &skeleton,
+            beneficiary_args(process_hash, &beneficiary),
+            capacity,
+            None,
+            PACK_BLOCK,
+        );
+        let digest = digest_ok::<FakeRpcClient>(
+            outpoint_ids(&intention),
+            outpoint_ids(&process),
+            Some(AddOutputCell {
+                lock_script: beneficiary.into(),
+                type_script: None,
+                data: vec![],
+                capacity,
+                absolute_capacity: true,
+                type_id: false,
+            }),
+        );
+        TransactionCalculator::default()
+            .instruction(digest)
+            .apply_skeleton(&rpc, &mut skeleton)
+            .unwrap();
+    }
+
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("example Process applies its deposit minimum only to its own Intentions");
 }
 
 #[tokio::test]

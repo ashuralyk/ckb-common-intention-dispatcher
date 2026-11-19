@@ -97,6 +97,17 @@ Enforced in Process lock Verify (own DigestOk only), `Process.assemble`, and the
 calculator draft path. xUDT Intentions are not subject to this CKB deposit
 floor (token amount rules are separate).
 
+### Upgrading an existing Process deployment
+
+Replacing the example Process binary at the same code Type ID applies the new
+minimum to existing Intention cells that target its live Process state. Pause
+new deposits and check for live CKB Intentions below 600 CKB for every Process
+instance using that code Type ID. Settle them using the previous assembler
+and deployed binary, or refund them before replacing the code cell. After the
+upgrade, any remaining sub-minimum Intention fails DigestOk with error 39. Use
+the CID refund path without a matching Process pair to return capacity to its
+User Lock.
+
 ## Capacity / fee (example assemble)
 
 `Process.assemble` computes fee as `FeeRate(FEE_RATE).fee(serialized_size_in_block)`

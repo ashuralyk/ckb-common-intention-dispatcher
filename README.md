@@ -135,7 +135,9 @@ minimum **strictly greater** than that floor (`CkbDepositPolicy` /
 `EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY` = **600 CKB** (single protocol constant
 shared by on-chain + calculator) and rejects smaller CKB DigestOk Intentions
 for **its own** process_type_hash (`DepositBelowMinimum` = 39). CLI defaults to
-that 600 CKB deposit minimum so a default create can DigestOk as a deposit.
+that 600 CKB deposit minimum and rejects a smaller effective capacity before
+signing. See the [upgrade steps](docs/process-example-usage.md#upgrading-an-existing-process-deployment)
+before replacing the example Process binary at the same code Type ID.
 
 ## Build and test
 

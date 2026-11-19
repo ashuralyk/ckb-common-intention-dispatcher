@@ -376,19 +376,37 @@ fn create_intention_fee_covers_rate_1000_serialized_size_in_block() {
 }
 
 #[test]
-fn create_bumps_intention_capacity_below_default_min_to_floor() {
+fn create_rejects_intention_below_example_deposit_minimum() {
     let secret = key(0x42);
     let mut req = fixture_request(&secret);
     let floor = ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY;
-    req.intention_capacity = floor - 1;
-    // Funding must cover the bumped floor + fee + change dust.
-    req.funding.capacity = floor + req.fee_shannons + 61_0000_0000 + 10_0000_0000;
+    let minimum = cid_process_example_calculator::MIN_DEPOSIT_CAPACITY;
+
+    for capacity in [floor - 1, minimum - 1] {
+        req.intention_capacity = capacity;
+        let err = create_signed_intention(&req, &secret).unwrap_err();
+        assert!(
+            matches!(err, CliError::InvalidRequest(ref message)
+                if message.contains("intention_capacity") && message.contains(&minimum.to_string())),
+            "unexpected error for requested capacity {capacity}: {err}"
+        );
+    }
+}
+
+#[test]
+fn create_checks_funding_against_occupied_capacity() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    req.beneficiary_lock.args = format!("0x{}", "ab".repeat(512));
     let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
-    let cap = bundle.skeleton.outputs[0].capacity_shannons();
-    assert!(
-        cap >= floor,
-        "sub-floor request must size to at least DEFAULT_MIN_INTENTION_CAPACITY: got {cap}"
-    );
+    let effective = bundle.skeleton.outputs[0].capacity_shannons();
+    assert!(effective > req.intention_capacity);
+
+    // Enough for the requested capacity, but not the same output at its
+    // occupied capacity.
+    req.funding.capacity = req.intention_capacity + req.fee_shannons + 61_0000_0000;
+    let err = create_signed_intention(&req, &secret).unwrap_err();
+    assert!(matches!(err, CliError::InsufficientFunds), "{err}");
 }
 
 #[test]

@@ -2,9 +2,8 @@
 //!
 //! DigestOk CKB Intentions are deposits fulfilled by consuming the Intention
 //! cell's capacity into the beneficiary output. The minimum must sit strictly
-//! above [`cid_protocol::DEFAULT_MIN_INTENTION_CAPACITY`] so a minimum deposit
-//! Intention is always createable (covers occupied capacity) and can fund the
-//! deposit alone.
+//! above [`cid_protocol::DEFAULT_MIN_INTENTION_CAPACITY`]. Creation may further
+//! increase the deposit to cover the Intention cell's occupied capacity.
 
 use cid_protocol::{
     assert_ckb_deposit_policy, CkbDepositPolicy, DEFAULT_MIN_INTENTION_CAPACITY,
