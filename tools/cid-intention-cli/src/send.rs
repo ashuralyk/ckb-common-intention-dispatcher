@@ -186,9 +186,12 @@ fn script_json_from_rpc(v: &Value) -> Result<ScriptJson, CliError> {
     })
 }
 
-/// Collect `code_hash` values of output locks that use `hash_type=type`
-/// (CLI Intention create locks CID by Type ID).
-fn type_hash_lock_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, CliError> {
+/// Collect Type-ID `code_hash` values for **CID Intention** output locks only.
+///
+/// Must not treat every `hash_type=type` lock as CID: testnet secp256k1/blake160
+/// also uses `hash_type=type`, often with a sighash `dep_group` whose group cell
+/// is not a TYPE_ID code cell. Scope by successful `CidArgs` decode.
+fn cid_intention_type_id_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, CliError> {
     let outputs = tx
         .get("outputs")
         .and_then(|o| o.as_array())
@@ -202,22 +205,31 @@ fn type_hash_lock_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, CliError> {
         if !ht.eq_ignore_ascii_case("type") {
             continue;
         }
+        let args_hex = lock.get("args").and_then(|a| a.as_str()).unwrap_or("0x");
+        let args = decode_hex(args_hex)?;
+        if cid_protocol::CidArgs::decode(&args).is_err() {
+            continue;
+        }
         let code = lock
             .get("code_hash")
             .and_then(|c| c.as_str())
-            .ok_or_else(|| CliError::InvalidRequest("type lock missing code_hash".into()))?;
+            .ok_or_else(|| {
+                CliError::InvalidRequest("CID Intention lock missing code_hash".into())
+            })?;
         out.push(decode_hash32(code)?);
     }
     Ok(out)
 }
 
-/// Fail-closed: every Type-ID Intention lock in `tx` must match a **live**
-/// celldep whose type script is TYPE_ID and whose script hash equals the lock
-/// `code_hash`. Offline `create` only consistency-checks the request against
-/// itself; a mistyped Type ID args with the correct outpoint would otherwise
-/// broadcast a stranded Intention (create does not execute the output lock).
+/// Fail-closed: every CID Intention lock (`hash_type=type` + CID args) in `tx`
+/// must match a **live** celldep whose type script is TYPE_ID and whose script
+/// hash equals the lock `code_hash`. Offline `create` only consistency-checks
+/// the request against itself; a mistyped Type ID args with the correct
+/// outpoint would otherwise broadcast a stranded Intention. Non-CID type locks
+/// (e.g. genesis secp) are ignored so raw-transaction send with `dep_group`
+/// remains usable.
 fn assert_live_cid_type_id_matches_intention(url: &str, tx: &Value) -> Result<(), CliError> {
-    let want_hashes = type_hash_lock_code_hashes(tx)?;
+    let want_hashes = cid_intention_type_id_code_hashes(tx)?;
     if want_hashes.is_empty() {
         return Ok(());
     }

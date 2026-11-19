@@ -90,10 +90,13 @@ cell. Intention args encoding is unchanged. This CLI only creates Intentions —
 it does not assemble refunds.
 
 `send` (after chain/genesis guards) fetches each `cell_deps` live cell and
-requires every Type-ID Intention output lock (`hash_type=type`) to match a
-live dep cell whose type script is TYPE_ID and whose script hash equals the
-lock `code_hash`. That catches a correct live outpoint paired with mistyped
-Type ID args in the offline request (create alone cannot see the chain).
+requires every **CID Intention** output lock (`hash_type=type` and args that
+decode as CID v0.1) to match a live dep cell whose type script is TYPE_ID and
+whose script hash equals the lock `code_hash`. Other `hash_type=type` locks
+(e.g. genesis secp256k1/blake160 with a sighash `dep_group`) are ignored so
+raw-transaction send stays usable. The CID check catches a correct live
+outpoint paired with mistyped Type ID args in the offline request (create
+alone cannot see the chain).
 
 ## Usage
 

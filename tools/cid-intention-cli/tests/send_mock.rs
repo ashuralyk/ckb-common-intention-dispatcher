@@ -130,6 +130,37 @@ fn sample_tx() -> Value {
     })
 }
 
+/// Standard testnet-shaped secp256k1/blake160 lock (`hash_type=type`) + sighash
+/// `dep_group` (group cell is not a TYPE_ID code cell). Must not trip the CID
+/// live Type ID guard.
+fn secp_type_dep_group_tx() -> Value {
+    // Genesis secp type hash (RFC 0024); args are 20-byte blake160, not CidArgs.
+    let secp_type_hash = "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8";
+    json!({
+        "version": "0x0",
+        "cell_deps": [{
+            "out_point": {"tx_hash": h256(0x71), "index": "0x1"},
+            "dep_type": "dep_group"
+        }],
+        "header_deps": [],
+        "inputs": [{
+            "since":"0x0",
+            "previous_output":{"tx_hash": h256(0x11), "index":"0x0"}
+        }],
+        "outputs": [{
+            "capacity":"0x1",
+            "lock":{
+                "code_hash": secp_type_hash,
+                "hash_type":"type",
+                "args": format!("0x{}", hex::encode([0xABu8; 20]))
+            },
+            "type":null
+        }],
+        "outputs_data": ["0x"],
+        "witnesses": ["0x"]
+    })
+}
+
 #[test]
 fn send_success_returns_hash_after_guards() {
     let genesis = h256(0xAB);
@@ -219,6 +250,47 @@ fn create_output_sends_after_stripping_view_metadata() {
     let hash = send_signed_transaction(&opts, &created).unwrap();
     assert_eq!(hash, tx_hash);
     assert!(*saw_send.lock().unwrap());
+}
+
+#[test]
+fn send_allows_secp_type_lock_with_dep_group() {
+    let genesis = h256(0xAB);
+    let tx_hash = h256(0xCD);
+    let genesis_c = genesis.clone();
+    let tx_hash_c = tx_hash.clone();
+    let saw_send = Arc::new(Mutex::new(false));
+    let saw_send_c = Arc::clone(&saw_send);
+    let saw_live = Arc::new(Mutex::new(false));
+    let saw_live_c = Arc::clone(&saw_live);
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, _params| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+            "get_block_hash" => json!(genesis_c.clone()),
+            "get_live_cell" => {
+                *saw_live_c.lock().unwrap() = true;
+                // Group cell itself has no TYPE_ID matching the secp type hash.
+                live_untyped_cell()
+            }
+            "send_transaction" => {
+                *saw_send_c.lock().unwrap() = true;
+                json!(tx_hash_c.clone())
+            }
+            _ => json!({"error": {"code": -1, "message": "unknown"}}),
+        },
+    ))));
+
+    let opts = SendOptions {
+        rpc_url: url,
+        network: "testnet".into(),
+        genesis_hash: genesis,
+    };
+    let hash = send_signed_transaction(&opts, &secp_type_dep_group_tx()).unwrap();
+    assert_eq!(hash, tx_hash);
+    assert!(*saw_send.lock().unwrap(), "send_transaction must run");
+    assert!(
+        !*saw_live.lock().unwrap(),
+        "CID Type ID live-cell probe must not run for non-CID type locks"
+    );
 }
 
 #[test]
