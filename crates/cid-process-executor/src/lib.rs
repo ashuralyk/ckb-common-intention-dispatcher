@@ -40,8 +40,13 @@ impl ProcessExecutor {
     ///
     /// `draft_tx` is a packed molecule `Transaction` whose inputs are the
     /// Intention + Process out points. `host` must resolve those out points
-    /// (and any tip queries) so the guest can build a directly-submittable tx.
-    pub fn assemble(&self, draft_tx: &[u8], host: MockHost) -> Result<AssembledTx, ExecutorError> {
+    /// (and any tip queries) interactively via [`HostQuery`] syscalls during
+    /// VM execution — use [`MockHost`] offline or an RPC-backed impl live.
+    pub fn assemble<H: HostQuery + Send + 'static>(
+        &self,
+        draft_tx: &[u8],
+        host: H,
+    ) -> Result<AssembledTx, ExecutorError> {
         if self.binary.is_empty() {
             return Err(ExecutorError::VmError("empty binary".into()));
         }
@@ -533,6 +538,173 @@ mod tests {
         let got = host.get_cell(op.as_slice()).expect("cell");
         assert_eq!(got.output.as_slice(), output.as_slice());
         assert_eq!(got.data, vec![1, 2, 3]);
+    }
+
+    /// Custom HostQuery that records interactive syscall traffic and uses an
+    /// opaque 12-byte indexer-style cursor (not MockHost's 8-byte LE offset).
+    struct RecordingHost {
+        inner: MockHost,
+        finds: std::sync::atomic::AtomicUsize,
+        last_get_cells_cursor: std::sync::Mutex<Option<Vec<u8>>>,
+        last_get_cells_order: std::sync::Mutex<Option<u64>>,
+        opaque_cursor: Vec<u8>,
+    }
+
+    impl RecordingHost {
+        fn wrap(inner: MockHost) -> Self {
+            Self {
+                inner,
+                finds: std::sync::atomic::AtomicUsize::new(0),
+                last_get_cells_cursor: std::sync::Mutex::new(None),
+                last_get_cells_order: std::sync::Mutex::new(None),
+                opaque_cursor: vec![
+                    0xC0, 0xFF, 0xEE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+                ],
+            }
+        }
+    }
+
+    impl HostQuery for RecordingHost {
+        fn find_cell_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>> {
+            self.finds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.find_cell_by_out_point(out_point)
+        }
+        fn find_cell_data_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>> {
+            self.inner.find_cell_data_by_out_point(out_point)
+        }
+        fn get_live_cell(
+            &self,
+            out_point: &[u8],
+            with_data: bool,
+        ) -> Result<Vec<u8>, host_query::HostQueryError> {
+            self.inner.get_live_cell(out_point, with_data)
+        }
+        fn get_header(&self, block_hash: &[u8]) -> Option<Vec<u8>> {
+            self.inner.get_header(block_hash)
+        }
+        fn get_header_by_number(&self, number: u64) -> Option<Vec<u8>> {
+            self.inner.get_header_by_number(number)
+        }
+        fn get_block_hash(&self, number: u64) -> Option<[u8; 32]> {
+            self.inner.get_block_hash(number)
+        }
+        fn get_cells(
+            &self,
+            search_key: &[u8],
+            order: u64,
+            limit: u64,
+            last_cursor: &[u8],
+        ) -> Result<Vec<u8>, host_query::HostQueryError> {
+            *self.last_get_cells_order.lock().unwrap() = Some(order);
+            *self.last_get_cells_cursor.lock().unwrap() = Some(last_cursor.to_vec());
+            // Accept our opaque 12-byte cursor (or empty); ignore MockHost's
+            // fixed-width decode and return a page that carries the same cursor
+            // shape forward when more results remain.
+            let _ = (search_key, limit);
+            if !last_cursor.is_empty() && last_cursor != self.opaque_cursor.as_slice() {
+                return Err(host_query::HostQueryError::InvalidArgs);
+            }
+            let page = host_query::Pagination {
+                objects: vec![],
+                last_cursor: if last_cursor.is_empty() {
+                    self.opaque_cursor.clone()
+                } else {
+                    Vec::new()
+                },
+            };
+            serde_molecule::to_vec(&page, false).map_err(|_| host_query::HostQueryError::Encoding)
+        }
+    }
+
+    #[test]
+    fn assemble_invokes_custom_host_query_interactively() {
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let cells = make_assemble_cells(1);
+        let mock = MockHost::new();
+        mock.insert_block_hash(0, [0xAB; 32]);
+        for cell in &cells {
+            mock.insert_cell(
+                cell.out_point.clone(),
+                cell.output.clone(),
+                cell.data.clone(),
+            );
+        }
+        let host = RecordingHost::wrap(mock);
+        let draft = build_draft_tx(&cells);
+        let assembled = executor
+            .assemble(&draft, host)
+            .expect("assemble with custom HostQuery");
+        assert!(!assembled.outputs.is_empty());
+        // find_cell_by_out_point must have been called during VM syscalls
+        // (RecordingHost was moved; re-check via a second run with Arc).
+    }
+
+    #[test]
+    fn assemble_with_arc_custom_host_records_finds() {
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let cells = make_assemble_cells(1);
+        let mock = MockHost::new();
+        mock.insert_block_hash(0, [0xAB; 32]);
+        for cell in &cells {
+            mock.insert_cell(
+                cell.out_point.clone(),
+                cell.output.clone(),
+                cell.data.clone(),
+            );
+        }
+        let host = std::sync::Arc::new(RecordingHost::wrap(mock));
+        let draft = build_draft_tx(&cells);
+        let _ = executor
+            .assemble(&draft, host.clone())
+            .expect("assemble with Arc<dyn-capable HostQuery>");
+        assert!(
+            host.finds.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "VM must call find_cell_by_out_point interactively on the custom host"
+        );
+    }
+
+    #[test]
+    fn custom_host_get_cells_accepts_opaque_cursor_and_order() {
+        let host = RecordingHost::wrap(MockHost::new());
+        let key = host_query::SearchKey {
+            script: host_query::Script {
+                code_hash: [0x11; 32],
+                hash_type: 0,
+                args: vec![],
+            },
+            script_type: host_query::ScriptType::Lock,
+            script_search_mode: None,
+            filter: None,
+            with_data: Some(false),
+            group_by_transaction: None,
+        };
+        let key_bytes = serde_molecule::to_vec(&key, false).unwrap();
+
+        // Asc + empty cursor → opaque 12-byte next cursor
+        let page0 = HostQuery::get_cells(&host, &key_bytes, 0, 1, &[]).unwrap();
+        let pag0: host_query::Pagination = serde_molecule::from_slice(&page0, false).unwrap();
+        assert_eq!(pag0.last_cursor.len(), 12);
+        assert_eq!(*host.last_get_cells_order.lock().unwrap(), Some(0));
+        assert_eq!(
+            host.last_get_cells_cursor.lock().unwrap().as_deref(),
+            Some(&[][..])
+        );
+
+        // Desc + opaque cursor round-trip
+        let page1 = HostQuery::get_cells(&host, &key_bytes, 1, 1, &pag0.last_cursor).unwrap();
+        let pag1: host_query::Pagination = serde_molecule::from_slice(&page1, false).unwrap();
+        assert!(pag1.last_cursor.is_empty());
+        assert_eq!(*host.last_get_cells_order.lock().unwrap(), Some(1));
+        assert_eq!(
+            host.last_get_cells_cursor.lock().unwrap().as_deref(),
+            Some(pag0.last_cursor.as_slice())
+        );
     }
 
     #[test]

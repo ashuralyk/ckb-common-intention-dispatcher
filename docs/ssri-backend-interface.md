@@ -116,9 +116,14 @@ length exceeds capacity, guest retries with a larger buffer
 
 ```text
 get_cell_by_out_point(out_point) -> (CellOutput, data)
-get_cells_by_search_key(search_key, limit) -> Pagination
+get_cells_by_search_key(search_key, order, limit, last_cursor) -> Pagination
 header_by_number(n) / block_hash(n)       -> tip / header info
 ```
+
+`order` is Asc (`0`) or Desc (`1`). `last_cursor` is an **opaque** indexer
+cursor of **arbitrary length** (empty = first page) — pass
+`Pagination.last_cursor` from the previous page through unchanged. Do not
+assume a fixed 0/8-byte layout; live ckb-indexer cursors are host-defined.
 
 `SearchKey` / `Pagination` encodings are the ckb-indexer molecule tables
 documented in `ckb-ssri-std` (`indexer.rs`).
@@ -126,27 +131,35 @@ documented in `ckb-ssri-std` (`indexer.rs`).
 `MockHost::get_cells` matches ckb-indexer ordering and metadata: results sort by
 `(block_number, tx_index, output_index)` (Asc/Desc), and each `IndexerCell`
 carries those fields. Missing `HostCell::{block_number,tx_index}` defaults to
-`0` (callers that care about first-cell / pagination must set them).
+`0`. MockHost's own opaque cursor encoding is a little-endian page offset
+(typically 8 bytes when non-empty); RPC-backed hosts use real indexer cursors.
 
 ## Executor API (Rust)
 
 ```rust
-use cid_process_executor::{build_draft_tx, AssembledTx, DraftCell, MockHost, ProcessExecutor};
+use cid_process_executor::{build_draft_tx, AssembledTx, DraftCell, HostQuery, MockHost, ProcessExecutor};
 
+// Offline: MockHost. Live backend: any HostQuery (RPC/indexer) impl.
 let host = MockHost::new();
 // host.insert_cell(out_point, output, data);
 // host.insert_block_hash(0, tip_hash);
 let draft = build_draft_tx(&cells);
 let assembled: AssembledTx = executor.assemble(&draft, host)?;
 // assembled.as_molecule_bytes() → submit unchanged
+// Syscalls invoke HostQuery interactively during VM execution.
 ```
 
+`ProcessExecutor::assemble` is generic over `H: HostQuery` (also accepts
+`Box<dyn HostQuery>` / `Arc<…>` via blanket impls). Calculator
+`process_digest_ok_with_extras` seeds a `MockHost`; use
+`process_digest_ok_with_host` to pass a live host.
+
 Calculator helpers require a **live** [`ProcessStateCell`] (no fabricated
-defaults). **Documented submit entry:** `process_digest_ok_with_extras` with
-non-empty `AssembleExtras.cell_deps` (CID + Process + any xUDT) and optional
-AlwaysSuccess funding. It returns the packed [`AssembledTx`] for byte-identical
-submit. `process_digest_ok_with_process` is a thinner helper that still requires
-non-empty `cell_deps` (cannot silently emit a dep-less tx). Resolve state via
+defaults). **Documented submit entry:** `process_digest_ok_with_extras` /
+`process_digest_ok_with_host` with non-empty `AssembleExtras.cell_deps` (CID +
+Process + any xUDT) and optional AlwaysSuccess funding. Returns packed
+[`AssembledTx`] for byte-identical submit. `process_digest_ok_with_process`
+still requires non-empty `cell_deps`. Resolve state via
 `resolve_process_state_by_type` when you have the TYPE_ID type script.
 
 ## Intention CLI

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use cid_process_executor::{AssembledTx, MockHost, ProcessExecutor};
+use cid_process_executor::{AssembledTx, HostQuery, MockHost, ProcessExecutor};
 use cid_protocol::{CidArgs, TYPE_ID_CODE_HASH};
 use ckb_cinnabar_calculator::{
     instruction::Instruction,
@@ -115,24 +115,16 @@ fn process_output(process: &ProcessStateCell) -> CellOutput {
         .build()
 }
 
-fn build_draft_and_host(
+/// Build draft molecule bytes + known cell payloads for skeleton hydration.
+fn build_draft_and_known(
     intentions: &[IntentionCell],
     process: &ProcessStateCell,
     extras: &AssembleExtras,
-) -> Result<(Vec<u8>, MockHost, KnownCells)> {
-    let host = MockHost::new();
-    host.insert_block_hash(0, [0xAB; 32]);
-
+) -> Result<(Vec<u8>, KnownCells)> {
     let mut known = KnownCells::new();
     let mut inputs = Vec::with_capacity(1 + intentions.len() + extras.funding_cells.len());
 
     let process_out = process_output(process);
-    host.insert_cell_bytes(
-        process.out_point.as_slice(),
-        process_out.as_slice(),
-        process.data.clone(),
-    )
-    .map_err(CalculatorError::Other)?;
     known.insert(
         process.out_point.as_slice().to_vec(),
         (process_out, process.data.clone()),
@@ -145,12 +137,6 @@ fn build_draft_and_host(
 
     for intention in intentions {
         let output = intention_output(intention)?;
-        host.insert_cell_bytes(
-            intention.out_point.as_slice(),
-            output.as_slice(),
-            intention.data.clone(),
-        )
-        .map_err(CalculatorError::Other)?;
         known.insert(
             intention.out_point.as_slice().to_vec(),
             (output.clone(), intention.data.clone()),
@@ -165,12 +151,6 @@ fn build_draft_and_host(
     for funding in &extras.funding_cells {
         let output = process_output(funding);
         let output = output.as_builder().type_(None).build();
-        host.insert_cell_bytes(
-            funding.out_point.as_slice(),
-            output.as_slice(),
-            funding.data.clone(),
-        )
-        .map_err(CalculatorError::Other)?;
         known.insert(
             funding.out_point.as_slice().to_vec(),
             (output, funding.data.clone()),
@@ -199,7 +179,60 @@ fn build_draft_and_host(
         .build()
         .as_slice()
         .to_vec();
+    Ok((draft, known))
+}
+
+fn seed_mock_from_known(known: &KnownCells) -> Result<MockHost> {
+    let host = MockHost::new();
+    host.insert_block_hash(0, [0xAB; 32]);
+    for (op, (output, data)) in known {
+        host.insert_cell_bytes(op, output.as_slice(), data.clone())
+            .map_err(CalculatorError::Other)?;
+    }
+    Ok(host)
+}
+
+fn build_draft_and_host(
+    intentions: &[IntentionCell],
+    process: &ProcessStateCell,
+    extras: &AssembleExtras,
+) -> Result<(Vec<u8>, MockHost, KnownCells)> {
+    let (draft, known) = build_draft_and_known(intentions, process, extras)?;
+    let host = seed_mock_from_known(&known)?;
     Ok((draft, host, known))
+}
+
+fn assemble_with_host<T: RPC, H: HostQuery + Send + 'static>(
+    intentions: &[IntentionCell],
+    process: &ProcessStateCell,
+    extras: &AssembleExtras,
+    host: H,
+    bin_dir: &str,
+) -> Result<(TransactionSkeleton, AssembledTx, Vec<Instruction<T>>)> {
+    let binary = load_process_binary(bin_dir)?;
+    let executor = ProcessExecutor::new(binary);
+
+    let (min, max) = executor
+        .get_batch_bounds()
+        .map_err(|e| CalculatorError::Other(format!("failed to get batch bounds: {}", e)))?;
+
+    let count = intentions.len() as u32;
+    if count < min || count > max {
+        return Err(CalculatorError::Other(format!(
+            "intention count {} out of bounds [{}, {}]",
+            count, min, max
+        )));
+    }
+
+    require_submit_cell_deps(extras)?;
+    require_process_matches_intentions(process, intentions)?;
+    let (draft, known) = build_draft_and_known(intentions, process, extras)?;
+    let assembled = executor
+        .assemble(&draft, host)
+        .map_err(|e| CalculatorError::Other(format!("executor assemble failed: {}", e)))?;
+
+    let skeleton = skeleton_from_assembled(&assembled, &known)?;
+    Ok((skeleton, assembled, vec![]))
 }
 
 /// Resolve a live Process state cell whose **type** script equals `type_script`
@@ -319,6 +352,9 @@ pub fn process_digest_ok_with_process<T: RPC>(
 /// Documented submit entry: live Process state, required `cell_deps`, optional
 /// AlwaysSuccess funding inputs.
 ///
+/// Seeds an offline [`MockHost`] from the draft cells. For a live RPC/indexer
+/// host, use [`process_digest_ok_with_host`] instead.
+///
 /// Returns the skeleton (witnesses preserved as raw bytes), the packed
 /// [`AssembledTx`] for byte-identical submit, and instructions (empty).
 /// Rejects empty `cell_deps` so a dep-less tx cannot be produced silently.
@@ -329,30 +365,25 @@ pub fn process_digest_ok_with_extras<T: RPC>(
     extras: AssembleExtras,
     bin_dir: &str,
 ) -> Result<(TransactionSkeleton, AssembledTx, Vec<Instruction<T>>)> {
-    let binary = load_process_binary(bin_dir)?;
-    let executor = ProcessExecutor::new(binary);
+    let (_draft, host, _known) = build_draft_and_host(&intentions, &process, &extras)?;
+    // Re-run through the generic host path (MockHost implements HostQuery).
+    assemble_with_host(&intentions, &process, &extras, host, bin_dir)
+}
 
-    let (min, max) = executor
-        .get_batch_bounds()
-        .map_err(|e| CalculatorError::Other(format!("failed to get batch bounds: {}", e)))?;
-
-    let count = intentions.len() as u32;
-    if count < min || count > max {
-        return Err(CalculatorError::Other(format!(
-            "intention count {} out of bounds [{}, {}]",
-            count, min, max
-        )));
-    }
-
-    require_submit_cell_deps(&extras)?;
-    require_process_matches_intentions(&process, &intentions)?;
-    let (draft, host, known) = build_draft_and_host(&intentions, &process, &extras)?;
-    let assembled = executor
-        .assemble(&draft, host)
-        .map_err(|e| CalculatorError::Other(format!("executor assemble failed: {}", e)))?;
-
-    let skeleton = skeleton_from_assembled(&assembled, &known)?;
-    Ok((skeleton, assembled, vec![]))
+/// Submit assemble with a caller-supplied [`HostQuery`] (RPC-backed or custom).
+///
+/// `host` must resolve draft out points / tip queries interactively during VM
+/// execution. Draft shape and `cell_deps` rules match
+/// [`process_digest_ok_with_extras`].
+pub fn process_digest_ok_with_host<T: RPC, H: HostQuery + Send + 'static>(
+    _rpc: &T,
+    intentions: Vec<IntentionCell>,
+    process: ProcessStateCell,
+    extras: AssembleExtras,
+    host: H,
+    bin_dir: &str,
+) -> Result<(TransactionSkeleton, AssembledTx, Vec<Instruction<T>>)> {
+    assemble_with_host(&intentions, &process, &extras, host, bin_dir)
 }
 
 /// Rebuild a skeleton from the assembled molecule Transaction **as-is**.

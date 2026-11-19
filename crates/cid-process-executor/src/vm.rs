@@ -52,18 +52,18 @@ struct Pipe {
     buffer: Vec<u8>,
 }
 
-/// SSRI stdio syscalls + optional host-query mock.
-struct SsriSyscalls {
+/// SSRI stdio syscalls + interactive [`HostQuery`] (MockHost or live RPC host).
+struct SsriSyscalls<H: HostQuery> {
     input: Arc<Mutex<Vec<u8>>>,
     output: Arc<Mutex<Vec<u8>>>,
     exit_code: Arc<Mutex<Option<i8>>>,
     pipes: Arc<Mutex<HashMap<u64, Pipe>>>,
     next_fd: Arc<Mutex<u64>>,
-    host: MockHost,
+    host: H,
 }
 
-impl SsriSyscalls {
-    fn new(input: Vec<u8>, host: MockHost) -> Self {
+impl<H: HostQuery> SsriSyscalls<H> {
+    fn new(input: Vec<u8>, host: H) -> Self {
         Self {
             input: Arc::new(Mutex::new(input)),
             output: Arc::new(Mutex::new(Vec::new())),
@@ -137,7 +137,7 @@ fn read_out_point_arg<Mac: SupportMachine>(machine: &mut Mac) -> Result<Vec<u8>,
         .to_vec())
 }
 
-impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
+impl<Mac: SupportMachine, H: HostQuery + Send> Syscalls<Mac> for SsriSyscalls<H> {
     fn initialize(&mut self, _machine: &mut Mac) -> Result<(), VmError> {
         Ok(())
     }
@@ -413,20 +413,20 @@ pub fn call_ssri_method(
     call_ssri_method_with_host(binary, method_path, input, MockHost::new())
 }
 
-pub fn call_ssri_method_with_host(
+pub fn call_ssri_method_with_host<H: HostQuery + Send + 'static>(
     binary: &[u8],
     method_path: &str,
     input: &[u8],
-    host: MockHost,
+    host: H,
 ) -> Result<Vec<u8>, ExecutorError> {
     call_ssri_method_with_cycles(binary, method_path, input, host, MAX_CYCLES)
 }
 
-pub fn call_ssri_method_with_cycles(
+pub fn call_ssri_method_with_cycles<H: HostQuery + Send + 'static>(
     binary: &[u8],
     method_path: &str,
     input: &[u8],
-    host: MockHost,
+    host: H,
     max_cycles: u64,
 ) -> Result<Vec<u8>, ExecutorError> {
     let syscalls = SsriSyscalls::new(input.to_vec(), host);

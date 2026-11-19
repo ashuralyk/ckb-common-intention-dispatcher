@@ -56,7 +56,11 @@ pub enum HostQueryError {
     Encoding,
 }
 
-/// Full offline host-query catalog (ckb-ssri-std native injection).
+/// Full host-query catalog (ckb-ssri-std native injection).
+///
+/// Backends implement this for live RPC/indexer resolution; [`MockHost`] is the
+/// offline test impl. `ProcessExecutor::assemble` is generic over this trait so
+/// syscalls invoke the host interactively during VM execution.
 pub trait HostQuery {
     /// 2287 — packed `CellOutput` molecule bytes, or `None` if missing.
     fn find_cell_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>>;
@@ -79,12 +83,15 @@ pub trait HostQuery {
 
     /// 2367 — `serde_molecule` [`Pagination`] for indexer search.
     ///
-    /// `search_key` is molecule `SearchKey` bytes; `order` is 0=Asc / 1=Desc;
-    /// `last_cursor` is the prior page cursor (empty = start). Page size is
-    /// bounded by `limit` exactly as ckb-ssri-std on-chain `page_window`.
+    /// - `search_key`: molecule `SearchKey` bytes  
+    /// - `order`: `0` = Asc, `1` = Desc (ckb-ssri-std [`Order`])  
+    /// - `last_cursor`: **opaque** indexer cursor of **arbitrary length**
+    ///   (empty = start). Do not assume a fixed 0/8-byte layout — live
+    ///   ckb-indexer cursors are host-defined opaque bytes.  
+    /// - `limit`: page size (`page_window`)
     ///
-    /// Result order matches ckb-indexer: `(block_number, tx_index, output_index)`
-    /// ascending (or descending). Missing metadata defaults to `0`.
+    /// Result cell order matches ckb-indexer:
+    /// `(block_number, tx_index, output_index)`.
     fn get_cells(
         &self,
         search_key: &[u8],
@@ -92,6 +99,96 @@ pub trait HostQuery {
         limit: u64,
         last_cursor: &[u8],
     ) -> Result<Vec<u8>, HostQueryError>;
+}
+
+impl<T: HostQuery + ?Sized> HostQuery for &T {
+    fn find_cell_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>> {
+        (**self).find_cell_by_out_point(out_point)
+    }
+    fn find_cell_data_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>> {
+        (**self).find_cell_data_by_out_point(out_point)
+    }
+    fn get_live_cell(&self, out_point: &[u8], with_data: bool) -> Result<Vec<u8>, HostQueryError> {
+        (**self).get_live_cell(out_point, with_data)
+    }
+    fn get_header(&self, block_hash: &[u8]) -> Option<Vec<u8>> {
+        (**self).get_header(block_hash)
+    }
+    fn get_header_by_number(&self, number: u64) -> Option<Vec<u8>> {
+        (**self).get_header_by_number(number)
+    }
+    fn get_block_hash(&self, number: u64) -> Option<[u8; 32]> {
+        (**self).get_block_hash(number)
+    }
+    fn get_cells(
+        &self,
+        search_key: &[u8],
+        order: u64,
+        limit: u64,
+        last_cursor: &[u8],
+    ) -> Result<Vec<u8>, HostQueryError> {
+        (**self).get_cells(search_key, order, limit, last_cursor)
+    }
+}
+
+impl<T: HostQuery + ?Sized> HostQuery for Box<T> {
+    fn find_cell_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>> {
+        (**self).find_cell_by_out_point(out_point)
+    }
+    fn find_cell_data_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>> {
+        (**self).find_cell_data_by_out_point(out_point)
+    }
+    fn get_live_cell(&self, out_point: &[u8], with_data: bool) -> Result<Vec<u8>, HostQueryError> {
+        (**self).get_live_cell(out_point, with_data)
+    }
+    fn get_header(&self, block_hash: &[u8]) -> Option<Vec<u8>> {
+        (**self).get_header(block_hash)
+    }
+    fn get_header_by_number(&self, number: u64) -> Option<Vec<u8>> {
+        (**self).get_header_by_number(number)
+    }
+    fn get_block_hash(&self, number: u64) -> Option<[u8; 32]> {
+        (**self).get_block_hash(number)
+    }
+    fn get_cells(
+        &self,
+        search_key: &[u8],
+        order: u64,
+        limit: u64,
+        last_cursor: &[u8],
+    ) -> Result<Vec<u8>, HostQueryError> {
+        (**self).get_cells(search_key, order, limit, last_cursor)
+    }
+}
+
+impl<T: HostQuery + ?Sized> HostQuery for std::sync::Arc<T> {
+    fn find_cell_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>> {
+        (**self).find_cell_by_out_point(out_point)
+    }
+    fn find_cell_data_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>> {
+        (**self).find_cell_data_by_out_point(out_point)
+    }
+    fn get_live_cell(&self, out_point: &[u8], with_data: bool) -> Result<Vec<u8>, HostQueryError> {
+        (**self).get_live_cell(out_point, with_data)
+    }
+    fn get_header(&self, block_hash: &[u8]) -> Option<Vec<u8>> {
+        (**self).get_header(block_hash)
+    }
+    fn get_header_by_number(&self, number: u64) -> Option<Vec<u8>> {
+        (**self).get_header_by_number(number)
+    }
+    fn get_block_hash(&self, number: u64) -> Option<[u8; 32]> {
+        (**self).get_block_hash(number)
+    }
+    fn get_cells(
+        &self,
+        search_key: &[u8],
+        order: u64,
+        limit: u64,
+        last_cursor: &[u8],
+    ) -> Result<Vec<u8>, HostQueryError> {
+        (**self).get_cells(search_key, order, limit, last_cursor)
+    }
 }
 
 // --- serde_molecule shapes (ckb-ssri-std indexer.rs) -------------------------
@@ -367,13 +464,11 @@ impl HostQuery for MockHost {
             1 => Order::Desc,
             _ => return Err(HostQueryError::InvalidArgs),
         };
-        let start = if last_cursor.is_empty() {
-            0
-        } else if let Ok(bytes) = <[u8; 8]>::try_from(last_cursor) {
-            u64::from_le_bytes(bytes)
-        } else {
-            return Err(HostQueryError::InvalidArgs);
-        };
+        // MockHost's opaque cursor encoding is little-endian page offset
+        // (typically 8 bytes when non-empty). Accept 1..=8 as LE with
+        // zero-extension so the API does not hard-require fixed 0/8 only;
+        // longer opaque cursors are for live indexer hosts, not MockHost.
+        let start = decode_mock_page_cursor(last_cursor)?;
 
         let inner = self.inner.lock().unwrap();
         let mut matched: Vec<(&Vec<u8>, &HostCell)> = inner
@@ -553,6 +648,19 @@ fn indexer_order_key(op_bytes: &[u8], cell: &HostCell) -> (u64, u32, u32) {
         cell.tx_index.unwrap_or(0),
         output_index,
     )
+}
+
+/// Decode MockHost's opaque page cursor (LE offset, empty or 1..=8 bytes).
+fn decode_mock_page_cursor(last_cursor: &[u8]) -> Result<u64, HostQueryError> {
+    if last_cursor.is_empty() {
+        return Ok(0);
+    }
+    if last_cursor.len() > 8 {
+        return Err(HostQueryError::InvalidArgs);
+    }
+    let mut buf = [0u8; 8];
+    buf[..last_cursor.len()].copy_from_slice(last_cursor);
+    Ok(u64::from_le_bytes(buf))
 }
 
 #[cfg(test)]
@@ -744,11 +852,17 @@ mod tests {
             HostQuery::get_cells(&host, &[0xff, 0x00], 0, 1, &[]),
             Err(HostQueryError::InvalidArgs)
         );
-        // Invalid cursor length
+        // Opaque cursor longer than MockHost's LE-u64 encoding is invalid here;
+        // live indexer hosts accept arbitrary-length opaque cursors.
         assert_eq!(
-            HostQuery::get_cells(&host, &key_bytes, 0, 1, &[1, 2, 3]),
+            HostQuery::get_cells(&host, &key_bytes, 0, 1, &[0u8; 9]),
             Err(HostQueryError::InvalidArgs)
         );
+        // Shorter opaque LE cursor (1..=8) is accepted (zero-extended).
+        let short = HostQuery::get_cells(&host, &key_bytes, 0, 1, &[1u8]).unwrap();
+        let short_pag: Pagination = serde_molecule::from_slice(&short, false).unwrap();
+        assert_eq!(short_pag.objects.len(), 1);
+        assert!(short_pag.last_cursor.is_empty());
     }
 
     #[test]

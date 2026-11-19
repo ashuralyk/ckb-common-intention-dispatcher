@@ -31,11 +31,18 @@ pub fn get_cell_by_out_point(out_point: &OutPoint) -> Result<HostCell, ProcessEr
     Ok(HostCell { output, data })
 }
 
+/// Indexer `get_cells` with explicit order and opaque cursor.
+///
+/// `order` is [`Order::Asc`] / [`Order::Desc`]. `last_cursor` is an opaque
+/// indexer cursor of arbitrary length (empty = first page); pass through
+/// `Pagination.last_cursor` from the previous page unchanged.
 pub fn get_cells_by_search_key(
     search_key: &SearchKey,
+    order: Order,
     limit: u64,
+    last_cursor: &[u8],
 ) -> Result<ckb_ssri_std::indexer::Pagination, ProcessError> {
-    get_cells(search_key, Order::Asc, limit, &[]).map_err(|_| ProcessError::HostQueryFailed)
+    get_cells(search_key, order, limit, last_cursor).map_err(|_| ProcessError::HostQueryFailed)
 }
 
 /// Tip / header helpers. Pass the tip height the backend advertises (or a
