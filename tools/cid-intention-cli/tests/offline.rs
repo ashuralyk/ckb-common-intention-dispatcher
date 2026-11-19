@@ -5,10 +5,11 @@ mod common;
 use std::sync::{Mutex, OnceLock};
 
 use cid_intention_cli::{
-    create_signed_intention, create_signed_intention_bundle,
+    assert_fee_covers_rate, create_signed_intention, create_signed_intention_bundle,
     create_signed_intention_with_same_lock_decoy, create_signed_process_state,
-    create_signed_process_state_bundle, parse_privkey, process_type_hash_of, CliError,
-    CreateProcessRequest, CreateRequest, ScriptJson, PRIVKEY_ENV,
+    create_signed_process_state_bundle, fee_at_rate, parse_privkey, process_type_hash_of,
+    serialized_size_in_block, CliError, CreateProcessRequest, CreateRequest, ScriptJson,
+    MIN_FEE_RATE, PRIVKEY_ENV,
 };
 use ckb_cinnabar_calculator::{
     re_exports::ckb_types::{core::ScriptHashType, packed::Script, prelude::*},
@@ -318,6 +319,35 @@ fn funding_outpoint_pinned_despite_alternate_same_lock_cell() {
             .unwrap(),
         req.funding.tx_hash
     );
+}
+
+#[test]
+fn create_process_fee_covers_rate_1000_serialized_size_in_block() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let bundle = create_signed_process_state_bundle(&req, &secret).unwrap();
+    let (paid, need) = assert_fee_covers_rate(&bundle.skeleton, MIN_FEE_RATE).unwrap();
+    let size = serialized_size_in_block(&bundle.skeleton);
+    assert_eq!(need, fee_at_rate(size, MIN_FEE_RATE));
+    assert!(
+        paid >= 641 || paid >= need,
+        "regression: underpay vs rate-1000 size (paid={paid} need={need} size={size})"
+    );
+    assert!(paid >= need);
+    assert_eq!(bundle.tx_json["fee_shannons"].as_u64().unwrap(), paid);
+}
+
+#[test]
+fn create_intention_fee_covers_rate_1000_serialized_size_in_block() {
+    let secret = key(0x42);
+    let req = fixture_request(&secret);
+    let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
+    let (paid, need) = assert_fee_covers_rate(&bundle.skeleton, MIN_FEE_RATE).unwrap();
+    let size = serialized_size_in_block(&bundle.skeleton);
+    assert_eq!(need, fee_at_rate(size, MIN_FEE_RATE));
+    assert!(paid >= need, "paid={paid} need={need} size={size}");
+    // Requested fee_shannons=10000 should win over min when larger.
+    assert_eq!(paid, req.fee_shannons.max(need));
 }
 
 #[test]

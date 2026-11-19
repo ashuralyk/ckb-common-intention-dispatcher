@@ -678,6 +678,149 @@ mod tests {
     }
 
     #[test]
+    fn test_create_process_state_type_id_matches_independent_blake2b() {
+        use ckb_cinnabar_calculator::re_exports::ckb_hash::Blake2bBuilder;
+        use ckb_cinnabar_calculator::TYPE_ID_CODE_HASH as CINNABAR_TYPE_ID;
+
+        let funding_tx = [0x31u8; 32];
+        let process_code_tx = [0x32u8; 32];
+        let process_type_script = Script::new_builder()
+            .code_hash(CINNABAR_TYPE_ID.pack())
+            .hash_type(ScriptHashType::Type)
+            .args([0x99u8; 32].to_vec().pack())
+            .build();
+
+        let mut rpc = FakeRpcClient::default();
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(funding_tx).pack(), 0),
+            CellOutputEx::new_from_scripts(
+                always_success_script(vec![0x02]),
+                None,
+                vec![],
+                Some(500_0000_0000u64),
+            )
+            .unwrap(),
+            None,
+        );
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(process_code_tx).pack(), 0),
+            CellOutputEx::new_from_scripts(
+                Script::default(),
+                Some(process_type_script),
+                vec![0xBE, 0xEF],
+                None,
+            )
+            .unwrap(),
+            None,
+        );
+
+        let mut skeleton = TransactionSkeleton::default();
+        TransactionCalculator::default()
+            .instruction(Instruction::new(vec![Box::new(AddCellDep {
+                name: PROCESS_CONTRACT_NAME.into(),
+                tx_hash: h256_to_hash(&H256(process_code_tx)),
+                index: 0,
+                dep_type: CalcDepType::Code,
+                with_data: true,
+            })]))
+            .apply_skeleton(&rpc, &mut skeleton)
+            .unwrap();
+        TransactionCalculator::default()
+            .instruction(create_process_state_by_outpoint(
+                (h256_to_hash(&H256(funding_tx)), 0),
+                b"tid-check".to_vec(),
+                DEFAULT_PROCESS_STATE_CAPACITY,
+            ))
+            .apply_skeleton(&rpc, &mut skeleton)
+            .unwrap();
+
+        let first_input = &skeleton.inputs[0].input;
+        let out_index = 0u64;
+        let mut hasher = Blake2bBuilder::new(32)
+            .personal(b"ckb-default-hash")
+            .build();
+        hasher.update(first_input.as_slice());
+        hasher.update(&out_index.to_le_bytes());
+        let mut independent = [0u8; 32];
+        hasher.finalize(&mut independent);
+
+        let typ = skeleton.outputs[0].type_script().unwrap();
+        let mut got = [0u8; 32];
+        got.copy_from_slice(&typ.args().raw_data());
+        assert_eq!(
+            got, independent,
+            "TYPE_ID args must equal blake2b(first CellInput molecule || le64(out_index))"
+        );
+        assert_eq!(got, skeleton.calc_type_id(0).unwrap());
+    }
+
+    #[test]
+    fn test_create_process_state_address_scanned() {
+        use ckb_cinnabar_calculator::address::{Address, AddressPayload};
+        use ckb_cinnabar_calculator::rpc::Network;
+        use ckb_cinnabar_calculator::TYPE_ID_CODE_HASH as CINNABAR_TYPE_ID;
+
+        let funding_lock = always_success_script(vec![0x03]);
+        let address = Address::new(Network::Fake, AddressPayload::from(funding_lock.clone()));
+        let process_code_tx = [0x42u8; 32];
+        let process_type_script = Script::new_builder()
+            .code_hash(CINNABAR_TYPE_ID.pack())
+            .hash_type(ScriptHashType::Type)
+            .args([0x77u8; 32].to_vec().pack())
+            .build();
+        let expected_lock_code: [u8; 32] = process_type_script.calc_script_hash().unpack();
+
+        let mut rpc = FakeRpcClient::default();
+        // Address scan finds this live cell by lock.
+        rpc.insert_fake_cell(
+            OutPoint::new(H256([0x55u8; 32]).pack(), 0),
+            CellOutputEx::new_from_scripts(funding_lock, None, vec![], Some(500_0000_0000u64))
+                .unwrap(),
+            None,
+        );
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(process_code_tx).pack(), 0),
+            CellOutputEx::new_from_scripts(
+                Script::default(),
+                Some(process_type_script),
+                vec![0x11, 0x22],
+                None,
+            )
+            .unwrap(),
+            None,
+        );
+
+        let mut skeleton = TransactionSkeleton::default();
+        TransactionCalculator::default()
+            .instruction(Instruction::new(vec![Box::new(AddCellDep {
+                name: PROCESS_CONTRACT_NAME.into(),
+                tx_hash: h256_to_hash(&H256(process_code_tx)),
+                index: 0,
+                dep_type: CalcDepType::Code,
+                with_data: true,
+            })]))
+            .apply_skeleton(&rpc, &mut skeleton)
+            .unwrap();
+        TransactionCalculator::default()
+            .instruction(create_process_state(
+                address,
+                b"addr-instance".to_vec(),
+                DEFAULT_PROCESS_STATE_CAPACITY,
+            ))
+            .apply_skeleton(&rpc, &mut skeleton)
+            .expect("address-scanned create_process_state");
+
+        assert_eq!(skeleton.inputs.len(), 1);
+        assert_eq!(skeleton.outputs.len(), 1);
+        let lock = skeleton.outputs[0].lock_script();
+        let lock_code: [u8; 32] = lock.code_hash().unpack();
+        assert_eq!(u8::from(lock.hash_type()), 1);
+        assert_eq!(lock_code, expected_lock_code);
+        let typ = skeleton.outputs[0].type_script().expect("TYPE_ID");
+        assert_eq!(typ.args().raw_data().len(), 32);
+    }
+
+    #[test]
     fn test_process_digest_ok_requires_live_state() {
         use ckb_cinnabar_calculator::simulation::FakeRpcClient;
 

@@ -25,7 +25,7 @@ Lean host binary in this contract repo that:
 | CID lock identity | Intention lock always references the CID code cell by **Type ID**: `lock.code_hash = hash(cid_lock_dep.type_script)`, `lock.hash_type = type`. Data-hash (`data1`) referencing is rejected. |
 | Payload | Required beneficiary lock → `Payload::from_script` (Process example semantics) |
 | User lock | Funding lock (= payer) |
-| Fee / change | Explicit `fee_shannons`; change to payer via skeleton `balance` |
+| Fee / change | Explicit `fee_shannons` (Intention) or rate **1000** (Process); sized on `serialized_size_in_block` (= molecule + 4) **after** change + sighash witness placeholders; change to payer via skeleton `balance` |
 | Signing | `CID_INTENTION_PRIVKEY` env (32-byte hex); never CLI flags / files / `.env` / logs / JSON |
 | Broadcast | `send` subcommand only; requires `--network testnet` + `--genesis-hash`; strips `hash`/`process_type_hash` then validates as RPC `Transaction`; fail-closed on mainnet / missing-empty-unknown chain (whitelist `ckb_testnet`) / genesis mismatch; `safe_message` keeps structured genesis hashes actionable while omitting hex-flooded guard/RPC strings |
 | Coin selection | Not in v1 (no online UTXO gather) |
@@ -135,9 +135,11 @@ Request JSON (no secrets):
 
 Cell layout: Process lock = Process code Type ID (`hash_type=type`, distinct
 `process_lock_args`); type = built-in TYPE_ID from first input + output index;
-data empty. Fee is computed at fee rate **1000** with change back to the funding
-lock. Creation validates Process lock + TYPE_ID off-chain (Process lock Create
-does not run on output-only mint).
+data empty. Fee is `floor(serialized_size_in_block × 1000 / 1000)` after change
+and 65-byte sighash placeholders (not pre-balance molecule length). Creation
+validates Process lock + TYPE_ID off-chain (Process lock Create does not run on
+output-only mint). `send` live-verifies **both** CID and Process code Type ID
+celldeps and fails closed on any dead celldep.
 
 Signed JSON includes `state_outpoint`, `identity_type_id` (TYPE_ID script hash =
 Intention `process_type_hash`), `process_type_script` (for Intention `create`),

@@ -11,7 +11,7 @@ use ckb_cinnabar_calculator::{
         ckb_hash::blake2b_256,
         ckb_jsonrpc_types,
         ckb_types::{
-            core::ScriptHashType,
+            core::{Capacity, ScriptHashType},
             packed::{OutPoint, Script},
             prelude::*,
             H256,
@@ -28,6 +28,10 @@ use ckb_common_intention_dispatcher_calculator::CONTRACT_NAME;
 use serde_json::{json, Value};
 
 use crate::build::CliError;
+use crate::fee::{
+    apply_fee_by_shrinking_change, assert_fee_covers_rate, install_sighash_witness_placeholders,
+    min_fee_for_skeleton,
+};
 use crate::hexutil::{decode_hash32, decode_hex, encode_hex};
 use crate::request::{CreateProcessRequest, NamedDep, ScriptJson};
 
@@ -352,14 +356,12 @@ pub fn create_signed_process_state_bundle(
         ));
     }
 
-    // Fee rate 1000 (FakeRpc min_fee_rate defaults to 0 → additional = CREATE_FEE_RATE).
-    let fee = skeleton
-        .fee(&rpc, CREATE_FEE_RATE)
-        .map_err(|e| CliError::Calculator(e.to_string()))?;
+    // Materialize change first (fee=0), then size with sighash placeholders and
+    // apply FeeRate(1000) on serialized_size_in_block (= molecule + 4).
     skeleton
         .balance(
             &rpc,
-            fee,
+            Capacity::shannons(0),
             funding_lock.clone().into(),
             ChangeReceiver::Script(funding_lock.clone().into()),
         )
@@ -376,6 +378,15 @@ pub fn create_signed_process_state_bundle(
             "funding previous_output changed after balance".into(),
         ));
     }
+    if skeleton.outputs.len() < 2 {
+        return Err(CliError::Calculator(
+            "expected process state + change outputs".into(),
+        ));
+    }
+    let change_index = skeleton.outputs.len() - 1;
+    install_sighash_witness_placeholders(&mut skeleton);
+    let required_fee = min_fee_for_skeleton(&skeleton, CREATE_FEE_RATE);
+    apply_fee_by_shrinking_change(&mut skeleton, change_index, required_fee)?;
 
     let sign = AddSecp256k1SighashSignatures {
         user_lock_scripts: vec![ScriptEx::from(funding_lock.clone())],
@@ -386,11 +397,6 @@ pub fn create_signed_process_state_bundle(
         .apply_skeleton(&rpc, &mut skeleton)
         .map_err(|e| CliError::Calculator(e.to_string()))?;
 
-    if skeleton.outputs.len() < 2 {
-        return Err(CliError::Calculator(
-            "expected process state + change outputs".into(),
-        ));
-    }
     let state_out = &skeleton.outputs[0];
     if state_out.capacity_shannons() != capacity {
         return Err(CliError::Calculator("process capacity mismatch".into()));
@@ -445,19 +451,10 @@ pub fn create_signed_process_state_bundle(
     let identity_type_id = script_hash32(&typ);
     let process_type_script = script_json_from_packed(&typ);
 
-    let total_in: u64 = skeleton
-        .inputs
-        .iter()
-        .map(|i| i.output.capacity_shannons())
-        .sum();
-    let total_out: u64 = skeleton.outputs.iter().map(|o| o.capacity_shannons()).sum();
-    let paid_fee = total_in.saturating_sub(total_out);
-    if paid_fee == 0 {
-        return Err(CliError::Calculator("fee must be > 0".into()));
-    }
     if skeleton.witnesses.is_empty() {
         return Err(CliError::Calculator("missing sighash witness".into()));
     }
+    let (paid_fee, _) = assert_fee_covers_rate(&skeleton, CREATE_FEE_RATE)?;
 
     let view = skeleton.clone().into_transaction_view();
     let tx_hash = view.hash();

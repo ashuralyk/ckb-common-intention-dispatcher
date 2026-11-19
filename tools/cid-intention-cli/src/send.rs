@@ -229,6 +229,9 @@ fn cid_intention_type_id_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, CliErr
     Ok(out)
 }
 
+/// Probe every cell_dep: **fail closed** if any outpoint is not live. Collect
+/// TYPE_ID script hashes from live typed code cells (non-TYPE_ID live cells are
+/// ignored for the hash set — e.g. genesis secp data).
 fn collect_live_type_id_script_hashes(url: &str, tx: &Value) -> Result<Vec<[u8; 32]>, CliError> {
     let cell_deps = tx
         .get("cell_deps")
@@ -242,7 +245,9 @@ fn collect_live_type_id_script_hashes(url: &str, tx: &Value) -> Result<Vec<[u8; 
         let live = rpc_call(url, "get_live_cell", json!([out_point, false]))?;
         let status = live.get("status").and_then(|s| s.as_str()).unwrap_or("");
         if status != "live" {
-            continue;
+            return Err(CliError::NetworkGuard(
+                "cell_dep outpoint is not live; refusing send".into(),
+            ));
         }
         let typ = live
             .get("cell")
@@ -346,11 +351,14 @@ fn process_state_lock_type_id_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, C
     Ok(out)
 }
 
-/// Live-verify Process code Type ID for Process state creates (and any Process
-/// lock + TYPE_ID type outputs). Requires CID + Process code deps to be live.
-fn assert_live_process_code_type_id(url: &str, tx: &Value) -> Result<(), CliError> {
-    let want_hashes = process_state_lock_type_id_code_hashes(tx)?;
-    if want_hashes.is_empty() {
+/// Live-verify Process **and** CID code Type IDs for Process state creates.
+///
+/// Intention lock checks are a no-op on Process create (no CID args outputs), so
+/// this path must explicitly require a live CID TYPE_ID celldep in addition to
+/// the Process code Type ID matching the state lock.
+fn assert_live_process_and_cid_code_type_ids(url: &str, tx: &Value) -> Result<(), CliError> {
+    let want_process = process_state_lock_type_id_code_hashes(tx)?;
+    if want_process.is_empty() {
         return Ok(());
     }
     let cell_deps = tx.get("cell_deps").and_then(|c| c.as_array());
@@ -360,13 +368,22 @@ fn assert_live_process_code_type_id(url: &str, tx: &Value) -> Result<(), CliErro
         ));
     }
     let live_type_ids = collect_live_type_id_script_hashes(url, tx)?;
-    for want in &want_hashes {
+    for want in &want_process {
         if !live_type_ids.iter().any(|got| got == want) {
             return Err(CliError::NetworkGuard(
                 "Process lock Type ID does not match any live celldep TYPE_ID script hash; refusing send"
                     .into(),
             ));
         }
+    }
+    // CID code dep must also be live Type ID and distinct from Process code.
+    let has_cid = live_type_ids
+        .iter()
+        .any(|got| want_process.iter().all(|p| p != got));
+    if !has_cid {
+        return Err(CliError::NetworkGuard(
+            "Process create requires a live CID code Type ID celldep; refusing send".into(),
+        ));
     }
     Ok(())
 }
@@ -393,7 +410,7 @@ pub fn send_signed_transaction(opts: &SendOptions, signed: &Value) -> Result<Str
     }
 
     assert_live_cid_type_id_matches_intention(&opts.rpc_url, &tx)?;
-    assert_live_process_code_type_id(&opts.rpc_url, &tx)?;
+    assert_live_process_and_cid_code_type_ids(&opts.rpc_url, &tx)?;
 
     let result = rpc_call(
         &opts.rpc_url,
