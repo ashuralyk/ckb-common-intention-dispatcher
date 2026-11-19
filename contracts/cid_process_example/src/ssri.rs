@@ -6,7 +6,8 @@ use crate::classify::{
 use crate::host::{self, HostCell};
 use crate::ProcessError;
 use alloc::vec::Vec;
-use cid_protocol::{decode_filter_request, encode_filter_response, CidArgs, FILTER_ACCEPTED};
+use cid_intention_filter::{decode_filter_request, encode_filter_response, FILTER_ACCEPTED};
+use cid_protocol::CidArgs;
 use ckb_cinnabar_verifier::ssri::{SsriArgs, SsriSource};
 use ckb_std::ckb_types::packed::{Byte32, Bytes, CellOutput, RawTransaction, Script, Transaction};
 use ckb_std::ckb_types::prelude::*;
@@ -40,7 +41,7 @@ pub fn batch_handler(
 
 /// SSRI handler for `Process.filter`.
 ///
-/// Stdin: [`cid_protocol::FilterRequest`] bytes (`encode_filter_request`).
+/// Stdin: [`cid_intention_filter::FilterRequest`] bytes (`encode_filter_request`).
 /// Stdout: `count:u32 LE || reason:i8 * count` (request order).
 ///
 /// Per-cell; never aborts the batch because one cell fails. Ownership is a

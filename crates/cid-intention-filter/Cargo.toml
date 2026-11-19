@@ -1,0 +1,12 @@
+[package]
+name = "cid-intention-filter"
+version = "0.1.0"
+edition = "2021"
+
+# Sequencer routing + Process.filter wire format. Kept out of `cid-protocol` so
+# the CID lock binary does not link this code (byte-stable vs deployed CID).
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cid-protocol = { path = "../../protocol" }

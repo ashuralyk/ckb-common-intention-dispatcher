@@ -10,7 +10,7 @@
 //! Single source of truth for CID Intention lock shape and Process identity
 //! extraction. Does not run Process application logic.
 
-use crate::{CidArgs, CodecError, Script, PROCESS_TYPE_HASH_LEN, SCRIPT_HASH_TYPE_TYPE};
+use cid_protocol::{CidArgs, CodecError, Script, PROCESS_TYPE_HASH_LEN, SCRIPT_HASH_TYPE_TYPE};
 
 /// Why an Intention cell cannot be treated as owned CID Intention for a caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,9 +96,9 @@ pub fn intention_belongs_to_process(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Payload, CID_VERSION};
     use alloc::vec;
     use alloc::vec::Vec;
+    use cid_protocol::{Payload, CID_VERSION};
 
     fn cid_args(pth: [u8; 32]) -> Vec<u8> {
         CidArgs::new(
@@ -202,7 +202,7 @@ mod tests {
         let cid_tid = [0xC1; 32];
         let mut args = CidArgs::new([0xAB; 32], Script::default(), Payload::default());
         args.entry.version = CID_VERSION + 1;
-        let bytes = crate::encode_args(&args.process_type_hash, &args.entry).unwrap();
+        let bytes = cid_protocol::encode_args(&args.process_type_hash, &args.entry).unwrap();
         let lock = Script {
             code_hash: cid_tid,
             hash_type: SCRIPT_HASH_TYPE_TYPE,

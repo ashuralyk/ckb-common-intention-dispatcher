@@ -38,6 +38,17 @@ build:
 test:
 	cd tests && cargo test $(CARGO_ARGS) -- --nocapture
 
+# Expected sha256 of `ckb_common_intention_dispatcher` after `make build`.
+# Filter/Sequencer work must not change this binary (CID Type ID redeploy).
+CID_LOCK_SHA256 := 569f44461fb1c135d1c5d8e258c3a06e1a93fa30e6c44d2bd12d7702bec18c3e
+
+check-cid-hash:
+	@test -f build/release/ckb_common_intention_dispatcher || { \
+		echo "missing build/release/ckb_common_intention_dispatcher — run make build first"; \
+		exit 1; \
+	}
+	@echo "$(CID_LOCK_SHA256)  build/release/ckb_common_intention_dispatcher" | sha256sum --check
+
 prepare:
 	rustup target add riscv64imac-unknown-none-elf
 
@@ -45,4 +56,4 @@ clean:
 	rm -rf build
 	cargo clean
 
-.PHONY: build test prepare clean
+.PHONY: build test check-cid-hash prepare clean

@@ -26,12 +26,16 @@ jobs:
         run: cargo build --locked
       - name: Build RISC-V contract
         run: make build CLANG=clang-18 CARGO_ARGS=--locked
+      - name: Guard CID lock binary hash
+        run: make check-cid-hash
       - name: Host default tests
         run: cargo test --locked
       - name: Lint host crates
-        run: cargo clippy --locked -p cid-protocol -p ckb_common_intention_dispatcher-calculator -p cid_process_example-calculator -p cid-process-executor -p ckb_common_intention_dispatcher-tests -p cid-intention-cli --all-targets -- -D warnings
+        run: cargo clippy --locked -p cid-protocol -p cid-intention-filter -p ckb_common_intention_dispatcher-calculator -p cid_process_example-calculator -p cid-process-executor -p ckb_common_intention_dispatcher-tests -p cid-intention-cli --all-targets -- -D warnings
       - name: Protocol tests
         run: cargo test --locked -p cid-protocol
+      - name: Intention filter / route tests
+        run: cargo test --locked -p cid-intention-filter
       - name: Intention CLI tests
         run: cargo test --locked -p cid-intention-cli
       - name: Lint contract

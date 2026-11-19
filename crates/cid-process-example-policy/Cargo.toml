@@ -10,3 +10,4 @@ path = "src/lib.rs"
 
 [dependencies]
 cid-protocol = { path = "../../protocol" }
+cid-intention-filter = { path = "../cid-intention-filter" }
