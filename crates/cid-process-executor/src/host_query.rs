@@ -454,6 +454,23 @@ fn cell_matches(key: &SearchKey, cell: &HostCell) -> bool {
             return false;
         }
     }
+    // ckb-indexer: filter by the *other* script's raw length
+    // (code_hash ‖ hash_type ‖ args); absent secondary script → length 0.
+    // Range is half-open [start, end).
+    if let Some([start, end]) = filter.script_len_range {
+        let script_len = match key.script_type {
+            ScriptType::Lock => cell
+                .output
+                .type_()
+                .to_opt()
+                .map(|script| script_raw_len(&script))
+                .unwrap_or(0),
+            ScriptType::Type => script_raw_len(&cell.output.lock()),
+        };
+        if script_len < start || script_len >= end {
+            return false;
+        }
+    }
     if let Some([start, end]) = filter.output_capacity_range {
         let capacity: u64 = cell.output.capacity().unpack();
         if capacity < start || capacity >= end {
@@ -512,6 +529,11 @@ fn script_matches(mode: SearchMode, query: &Script, cell: &ckb_types::packed::Sc
                     .any(|window| window == query.args)
         }
     }
+}
+
+/// ckb-indexer script length: `code_hash (32) + hash_type (1) + args`.
+fn script_raw_len(script: &ckb_types::packed::Script) -> u64 {
+    (32 + 1 + script.args().raw_data().len()) as u64
 }
 
 #[cfg(test)]
@@ -706,5 +728,86 @@ mod tests {
             HostQuery::get_cells(&host, &key_bytes, 0, 1, &[1, 2, 3]),
             Err(HostQueryError::InvalidArgs)
         );
+    }
+
+    #[test]
+    fn get_cells_applies_script_len_range() {
+        let host = MockHost::new();
+        let lock = PackedScript::new_builder()
+            .code_hash(Byte32::from_slice(&[0x11; 32]).unwrap())
+            .hash_type(0u8.into())
+            .args([0xaa].pack())
+            .build();
+        // Type script raw len = 32 + 1 + 2 = 35
+        let typ = PackedScript::new_builder()
+            .code_hash(Byte32::from_slice(&[0x22; 32]).unwrap())
+            .hash_type(1u8.into())
+            .args([0x10, 0x11].pack())
+            .build();
+        let with_type = sample_out_point(0x30);
+        let without_type = sample_out_point(0x31);
+        host.insert_cell(
+            with_type.clone(),
+            CellOutput::new_builder()
+                .capacity(100u64.pack())
+                .lock(lock.clone())
+                .type_(Some(typ).pack())
+                .build(),
+            vec![],
+        );
+        host.insert_cell(
+            without_type.clone(),
+            CellOutput::new_builder()
+                .capacity(100u64.pack())
+                .lock(lock)
+                .build(),
+            vec![],
+        );
+
+        let base = SearchKey {
+            script: Script {
+                code_hash: [0x11; 32],
+                hash_type: 0,
+                args: vec![0xaa],
+            },
+            script_type: ScriptType::Lock,
+            script_search_mode: Some(SearchMode::Exact),
+            filter: None,
+            with_data: Some(false),
+            group_by_transaction: None,
+        };
+
+        // [0, 1) → only cells with no type script (len 0)
+        let mut no_type = base.clone();
+        no_type.filter = Some(SearchKeyFilter {
+            script_len_range: Some([0, 1]),
+            ..SearchKeyFilter::default()
+        });
+        let bytes = serde_molecule::to_vec(&no_type, false).unwrap();
+        let page: Pagination = serde_molecule::from_slice(
+            &HostQuery::get_cells(&host, &bytes, 0, 10, &[]).unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(page.objects.len(), 1);
+        assert_eq!(
+            page.objects[0].out_point,
+            IndexerOutPoint::from(&without_type)
+        );
+
+        // [35, 36) → only the typed cell (raw len 35)
+        let mut typed = base;
+        typed.filter = Some(SearchKeyFilter {
+            script_len_range: Some([35, 36]),
+            ..SearchKeyFilter::default()
+        });
+        let bytes = serde_molecule::to_vec(&typed, false).unwrap();
+        let page: Pagination = serde_molecule::from_slice(
+            &HostQuery::get_cells(&host, &bytes, 0, 10, &[]).unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(page.objects.len(), 1);
+        assert_eq!(page.objects[0].out_point, IndexerOutPoint::from(&with_type));
     }
 }

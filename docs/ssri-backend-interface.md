@@ -41,10 +41,9 @@ cell_deps / header_deps / witnesses:
   - filled by Process.assemble as needed
 ```
 
-The backend **must not** rewrite the molecule transaction returned by
-`Process.assemble` (except filling unlock witnesses the Process left empty,
-if the Process documents that). Capacity balance and fee are Process
-responsibilities.
+The backend **must not** rewrite or fill anything in the molecule transaction
+returned by `Process.assemble` — including witnesses. Capacity balance and fee
+are Process responsibilities; submit the returned bytes unchanged.
 
 ## SSRI methods
 
