@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need PR base commit available for check-cid-unchanged worktree.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: riscv64imac-unknown-none-elf
@@ -26,7 +29,14 @@ jobs:
         run: cargo build --locked
       - name: Build RISC-V contract
         run: make build CLANG=clang-18 CARGO_ARGS=--locked
-      - name: Guard CID lock binary hash
+      # Absolute pin (CID_LOCK_SHA256) is deploy/agent-env specific; GHA ubuntu
+      # produces a different hash for the same source. On PRs, rebuild the base
+      # ref with the same toolchain and require a byte-identical CID lock.
+      - name: Guard CID lock binary unchanged vs PR base
+        if: github.event_name == 'pull_request'
+        run: make check-cid-unchanged BASE_SHA=${{ github.event.pull_request.base.sha }} CLANG=clang-18 CARGO_ARGS=--locked
+      - name: Guard CID lock binary hash (absolute pin)
+        if: github.event_name != 'pull_request'
         run: make check-cid-hash
       - name: Host default tests
         run: cargo test --locked
