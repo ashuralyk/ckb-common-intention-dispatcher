@@ -40,9 +40,10 @@ test:
 
 # Expected sha256 of `ckb_common_intention_dispatcher` after `make build` in the
 # known deploy / agent environment. Filter/Sequencer work must not change this
-# binary (CID Type ID redeploy). GitHub Actions may produce a different absolute
-# hash for the same source — CI uses `check-cid-unchanged` (same-toolchain
-# compare against the PR base) instead of this absolute pin.
+# binary (CID Type ID redeploy). Local/deploy: `make check-cid-hash`. GitHub
+# Actions must never use this absolute pin (GHA produces a different hash for
+# the same source) — CI always uses `check-cid-unchanged` against the PR base
+# or push `before` SHA instead.
 CID_LOCK_SHA256 := 569f44461fb1c135d1c5d8e258c3a06e1a93fa30e6c44d2bd12d7702bec18c3e
 
 check-cid-hash:
