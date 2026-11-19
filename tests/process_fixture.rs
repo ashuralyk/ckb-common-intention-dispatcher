@@ -15,14 +15,12 @@ fn main() -> i8 {
     if let Ok(data) = load_cell_data(0, Source::GroupOutput) {
         return if data.as_slice() == b"reject" { 42 } else { 0 };
     }
-    // Fallback: any output cell data that is not the reject marker.
-    for i in 0.. {
-        match load_cell_data(i, Source::Output) {
-            Ok(data) if data.as_slice() == b"reject" => return 42,
-            Ok(_) => return 0,
-            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
-            Err(_) => return 42,
-        }
+    // Fallback: first Output cell (GroupOutput unavailable). Same outcomes as
+    // scanning from index 0 — Ok always returns, so a loop never iterates.
+    match load_cell_data(0, Source::Output) {
+        Ok(data) if data.as_slice() == b"reject" => 42,
+        Ok(_) => 0,
+        Err(ckb_std::error::SysError::IndexOutOfBound) => 42,
+        Err(_) => 42,
     }
-    42
 }
