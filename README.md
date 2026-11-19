@@ -359,6 +359,15 @@ built CID binary and its SHA-256 are uploaded together. Configure the repository
 branch rules to require the `verify` job before merge; workflow files alone cannot
 enforce branch protection.
 
+**CID lock binary guard (dual):** Filter / Sequencer work must not change the
+CID lock. Locally (and in the known deploy / agent environment), run
+`make check-cid-hash` against the absolute pin `CID_LOCK_SHA256`
+(`569f4446…8c3e`). GitHub Actions never uses that absolute pin — runners
+produce a different hash for the same source — and instead runs
+`make check-cid-unchanged` with the same toolchain against the PR base SHA (on
+`pull_request`) or `github.event.before` (on `push` to `main`). A missing or
+all-zero `before` SHA fails closed rather than skipping the guard.
+
 Tests include CKB/xUDT delegation without a User Lock input, Process pair
 presence/mismatch checks, a failing executable Process, authorized batch digest,
 CellDep-only theft, xUDT capacity theft on both refund paths, DigestIncompatible
