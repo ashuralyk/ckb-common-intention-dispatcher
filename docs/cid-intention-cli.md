@@ -3,9 +3,10 @@
 Lean host binary in this contract repo that:
 
 1. **`create`** — builds and **offline-signs** a CKB-only CID Intention create tx
-2. **`send`** — **explicitly** broadcasts a previously signed tx JSON to a **testnet** RPC
+2. **`create-process`** — builds and **offline-signs** a Process state cell create tx
+3. **`send`** — **explicitly** broadcasts a previously signed tx JSON to a **testnet** RPC
 
-`create` never broadcasts. `send` never reads a private key.
+`create` / `create-process` never broadcast. `send` never reads a private key.
 
 ## Workspace
 
@@ -98,6 +99,61 @@ raw-transaction send stays usable. The CID check catches a correct live
 outpoint paired with mistyped Type ID args in the offline request (create
 alone cannot see the chain).
 
+## Process state create (`create-process`)
+
+Request JSON (no secrets):
+
+```json
+{
+  "network": "testnet",
+  "process_capacity": 300000000000,
+  "process_lock_args": "0x01",
+  "funding": { "tx_hash": "0x…", "index": 0, "capacity": 500000000000,
+    "lock": { "code_hash": "0x…", "hash_type": "type", "args": "0x…" }, "data": "0x" },
+  "cid_lock_dep": {
+    "name": "ckb_common_intention_dispatcher",
+    "tx_hash": "0x…", "index": 0, "data": "0x…",
+    "type_script": {
+      "code_hash": "0x00000000000000000000000000000000000000000000000000545950455f4944",
+      "hash_type": "type", "args": "0x…"
+    }
+  },
+  "process_code_dep": {
+    "name": "cid_process_example",
+    "tx_hash": "0x…", "index": 0, "data": "0x…",
+    "type_script": {
+      "code_hash": "0x00000000000000000000000000000000000000000000000000545950455f4944",
+      "hash_type": "type", "args": "0x…"
+    }
+  },
+  "sighash_deps": [
+    { "name": "secp256k1_blake160_sighash_all", "tx_hash": "0x…", "index": 1, "data": "0x…" },
+    { "name": "secp256k1_data", "tx_hash": "0x…", "index": 3, "data": "0x…" }
+  ]
+}
+```
+
+Cell layout: Process lock = Process code Type ID (`hash_type=type`, distinct
+`process_lock_args`); type = built-in TYPE_ID from first input + output index;
+data empty. Fee is computed at fee rate **1000** with change back to the funding
+lock. Creation validates Process lock + TYPE_ID off-chain (Process lock Create
+does not run on output-only mint).
+
+Signed JSON includes `state_outpoint`, `identity_type_id` (TYPE_ID script hash =
+Intention `process_type_hash`), `process_type_script` (for Intention `create`),
+and `registry_post` for `POST http://127.0.0.1:9101/v1/processes`:
+
+```json
+{
+  "identity_type_id_args": "0x…",
+  "identity_type_id": "0x…",
+  "code_type_id_args": "0x…",
+  "code_type_id": "0x…"
+}
+```
+
+`send` live-verifies both CID and Process code Type ID celldeps before broadcast.
+
 ## Usage
 
 ```bash
@@ -105,12 +161,19 @@ alone cannot see the chain).
 export CID_INTENTION_PRIVKEY=0x…   # 32-byte hex; never commit
 cargo run -p cid-intention-cli -- create --request req.json --output tx.json
 
+# Offline Process state create (never talks to a node)
+cargo run -p cid-intention-cli -- create-process --request process-req.json --output process-tx.json
+
 # Explicit broadcast (no key). Point rpc-url at YOUR endpoint; CI uses localhost mocks only.
 cargo run -p cid-intention-cli -- send \
   --tx tx.json \
   --rpc-url http://127.0.0.1:8114 \
   --network testnet \
   --genesis-hash 0x…   # must match get_block_hash(0x0)
+
+# Register the new Process with a local backend (after send confirms)
+jq .registry_post process-tx.json | curl -sS -X POST http://127.0.0.1:9101/v1/processes \
+  -H 'Content-Type: application/json' -d @-
 ```
 
 ## Unavailable in v1 / documented gaps

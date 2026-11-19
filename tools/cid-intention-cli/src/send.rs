@@ -38,6 +38,14 @@ fn strip_tx_metadata(mut value: Value) -> Value {
     if let Some(obj) = value.as_object_mut() {
         obj.remove("hash");
         obj.remove("process_type_hash");
+        // Process create metadata (not part of RPC Transaction).
+        obj.remove("state_outpoint");
+        obj.remove("identity_type_id");
+        obj.remove("identity_type_id_args");
+        obj.remove("process_type_script");
+        obj.remove("registry_post");
+        obj.remove("fee_shannons");
+        obj.remove("fee_rate");
     }
     value
 }
@@ -221,32 +229,11 @@ fn cid_intention_type_id_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, CliErr
     Ok(out)
 }
 
-/// Fail-closed: every CID Intention lock (`hash_type=type` + CID args) in `tx`
-/// must match a **live** celldep whose type script is TYPE_ID and whose script
-/// hash equals the lock `code_hash`. Offline `create` only consistency-checks
-/// the request against itself; a mistyped Type ID args with the correct
-/// outpoint would otherwise broadcast a stranded Intention. Non-CID type locks
-/// (e.g. genesis secp) are ignored so raw-transaction send with `dep_group`
-/// remains usable.
-fn assert_live_cid_type_id_matches_intention(url: &str, tx: &Value) -> Result<(), CliError> {
-    let want_hashes = cid_intention_type_id_code_hashes(tx)?;
-    if want_hashes.is_empty() {
-        return Ok(());
-    }
+fn collect_live_type_id_script_hashes(url: &str, tx: &Value) -> Result<Vec<[u8; 32]>, CliError> {
     let cell_deps = tx
         .get("cell_deps")
         .and_then(|c| c.as_array())
-        .ok_or_else(|| {
-            CliError::NetworkGuard(
-                "Type ID Intention lock present but transaction has no cell_deps".into(),
-            )
-        })?;
-    if cell_deps.is_empty() {
-        return Err(CliError::NetworkGuard(
-            "Type ID Intention lock present but cell_deps is empty".into(),
-        ));
-    }
-
+        .ok_or_else(|| CliError::InvalidRequest("transaction missing cell_deps".into()))?;
     let mut live_type_ids = Vec::new();
     for dep in cell_deps {
         let out_point = dep
@@ -277,11 +264,106 @@ fn assert_live_cid_type_id_matches_intention(url: &str, tx: &Value) -> Result<()
         }
         live_type_ids.push(process_type_hash_of(&sj)?);
     }
+    Ok(live_type_ids)
+}
 
+/// Fail-closed: every CID Intention lock (`hash_type=type` + CID args) in `tx`
+/// must match a **live** celldep whose type script is TYPE_ID and whose script
+/// hash equals the lock `code_hash`. Offline `create` only consistency-checks
+/// the request against itself; a mistyped Type ID args with the correct
+/// outpoint would otherwise broadcast a stranded Intention. Non-CID type locks
+/// (e.g. genesis secp) are ignored so raw-transaction send with `dep_group`
+/// remains usable.
+fn assert_live_cid_type_id_matches_intention(url: &str, tx: &Value) -> Result<(), CliError> {
+    let want_hashes = cid_intention_type_id_code_hashes(tx)?;
+    if want_hashes.is_empty() {
+        return Ok(());
+    }
+    let cell_deps = tx.get("cell_deps").and_then(|c| c.as_array());
+    if cell_deps.map(|c| c.is_empty()).unwrap_or(true) {
+        return Err(CliError::NetworkGuard(
+            "Type ID Intention lock present but cell_deps is empty".into(),
+        ));
+    }
+
+    let live_type_ids = collect_live_type_id_script_hashes(url, tx)?;
     for want in &want_hashes {
         if !live_type_ids.iter().any(|got| got == want) {
             return Err(CliError::NetworkGuard(
                 "Intention lock Type ID does not match any live celldep TYPE_ID script hash; refusing send"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Process state outputs: lock is Process code Type ID (`hash_type=type`) and
+/// type is built-in TYPE_ID. Collect those lock `code_hash` values.
+fn process_state_lock_type_id_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, CliError> {
+    let outputs = tx
+        .get("outputs")
+        .and_then(|o| o.as_array())
+        .ok_or_else(|| CliError::InvalidRequest("transaction missing outputs".into()))?;
+    let mut out = Vec::new();
+    for cell in outputs {
+        let typ = cell.get("type").filter(|t| !t.is_null());
+        let Some(typ) = typ else {
+            continue;
+        };
+        let typ_ht = typ.get("hash_type").and_then(|h| h.as_str()).unwrap_or("");
+        if !typ_ht.eq_ignore_ascii_case("type") {
+            continue;
+        }
+        let typ_code = typ.get("code_hash").and_then(|c| c.as_str()).unwrap_or("");
+        let typ_code = decode_hash32(typ_code)?;
+        if typ_code != TYPE_ID_CODE_HASH {
+            continue;
+        }
+        let typ_args = typ.get("args").and_then(|a| a.as_str()).unwrap_or("0x");
+        if decode_hex(typ_args)?.len() != 32 {
+            continue;
+        }
+        let lock = cell
+            .get("lock")
+            .ok_or_else(|| CliError::InvalidRequest("transaction output missing lock".into()))?;
+        let ht = lock.get("hash_type").and_then(|h| h.as_str()).unwrap_or("");
+        if !ht.eq_ignore_ascii_case("type") {
+            continue;
+        }
+        // Skip CID Intention locks (CID args) — those are checked separately.
+        let args_hex = lock.get("args").and_then(|a| a.as_str()).unwrap_or("0x");
+        let args = decode_hex(args_hex)?;
+        if cid_protocol::CidArgs::decode(&args).is_ok() {
+            continue;
+        }
+        let code = lock
+            .get("code_hash")
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| CliError::InvalidRequest("Process lock missing code_hash".into()))?;
+        out.push(decode_hash32(code)?);
+    }
+    Ok(out)
+}
+
+/// Live-verify Process code Type ID for Process state creates (and any Process
+/// lock + TYPE_ID type outputs). Requires CID + Process code deps to be live.
+fn assert_live_process_code_type_id(url: &str, tx: &Value) -> Result<(), CliError> {
+    let want_hashes = process_state_lock_type_id_code_hashes(tx)?;
+    if want_hashes.is_empty() {
+        return Ok(());
+    }
+    let cell_deps = tx.get("cell_deps").and_then(|c| c.as_array());
+    if cell_deps.map(|c| c.is_empty()).unwrap_or(true) {
+        return Err(CliError::NetworkGuard(
+            "Process state Type ID lock present but cell_deps is empty".into(),
+        ));
+    }
+    let live_type_ids = collect_live_type_id_script_hashes(url, tx)?;
+    for want in &want_hashes {
+        if !live_type_ids.iter().any(|got| got == want) {
+            return Err(CliError::NetworkGuard(
+                "Process lock Type ID does not match any live celldep TYPE_ID script hash; refusing send"
                     .into(),
             ));
         }
@@ -311,6 +393,7 @@ pub fn send_signed_transaction(opts: &SendOptions, signed: &Value) -> Result<Str
     }
 
     assert_live_cid_type_id_matches_intention(&opts.rpc_url, &tx)?;
+    assert_live_process_code_type_id(&opts.rpc_url, &tx)?;
 
     let result = rpc_call(
         &opts.rpc_url,

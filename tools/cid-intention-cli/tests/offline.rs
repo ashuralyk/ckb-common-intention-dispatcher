@@ -6,16 +6,18 @@ use std::sync::{Mutex, OnceLock};
 
 use cid_intention_cli::{
     create_signed_intention, create_signed_intention_bundle,
-    create_signed_intention_with_same_lock_decoy, parse_privkey, process_type_hash_of, CliError,
-    CreateRequest, ScriptJson, PRIVKEY_ENV,
+    create_signed_intention_with_same_lock_decoy, create_signed_process_state,
+    create_signed_process_state_bundle, parse_privkey, process_type_hash_of, CliError,
+    CreateProcessRequest, CreateRequest, ScriptJson, PRIVKEY_ENV,
 };
 use ckb_cinnabar_calculator::{
     re_exports::ckb_types::{core::ScriptHashType, packed::Script, prelude::*},
     simulation::TransactionSimulator,
+    TYPE_ID_CODE_HASH,
 };
 use serde_json::json;
 
-use common::{fixture_request, key};
+use common::{fixture_process_request, fixture_request, key};
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -315,6 +317,152 @@ fn funding_outpoint_pinned_despite_alternate_same_lock_cell() {
             .as_str()
             .unwrap(),
         req.funding.tx_hash
+    );
+}
+
+#[test]
+fn create_process_state_shape_type_id_registry_and_no_key_leak() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let tx = create_signed_process_state(&req, &secret).unwrap();
+    let dumped = serde_json::to_string(&tx).unwrap();
+    assert!(!dumped.contains(&hex::encode(secret.secret_bytes())));
+
+    let process_code_type = req.process_code_dep.type_script.as_ref().unwrap();
+    let expected_lock_code = process_type_hash_of(process_code_type).unwrap();
+
+    let inner = tx
+        .get("inner")
+        .or_else(|| tx.get("transaction"))
+        .unwrap_or(&tx);
+    let transaction = if inner.get("inputs").is_some() {
+        inner
+    } else {
+        inner.get("transaction").unwrap_or(inner)
+    };
+    let outputs = transaction["outputs"].as_array().unwrap();
+    assert!(outputs.len() >= 2);
+
+    let lock = &outputs[0]["lock"];
+    assert_eq!(lock["hash_type"].as_str().unwrap(), "type");
+    assert_eq!(
+        lock["code_hash"].as_str().unwrap(),
+        format!("0x{}", hex::encode(expected_lock_code))
+    );
+    assert_eq!(lock["args"].as_str().unwrap(), "0x01");
+
+    let typ = &outputs[0]["type"];
+    assert_eq!(
+        typ["code_hash"].as_str().unwrap(),
+        format!("0x{}", hex::encode(TYPE_ID_CODE_HASH))
+    );
+    assert_eq!(typ["hash_type"].as_str().unwrap(), "type");
+    let typ_args = hex::decode(typ["args"].as_str().unwrap().trim_start_matches("0x")).unwrap();
+    assert_eq!(typ_args.len(), 32);
+
+    let identity = tx["identity_type_id"].as_str().unwrap();
+    assert_eq!(identity.len(), 66);
+    let registry = &tx["registry_post"];
+    assert_eq!(
+        registry["identity_type_id_args"].as_str().unwrap(),
+        typ["args"].as_str().unwrap()
+    );
+    assert_eq!(registry["identity_type_id"].as_str().unwrap(), identity);
+    assert_eq!(
+        registry["code_type_id_args"].as_str().unwrap(),
+        process_code_type.args
+    );
+    assert_eq!(
+        registry["code_type_id"].as_str().unwrap(),
+        format!("0x{}", hex::encode(expected_lock_code))
+    );
+    assert!(tx["state_outpoint"]["tx_hash"].as_str().is_some());
+    assert_eq!(tx["state_outpoint"]["index"].as_u64().unwrap(), 0);
+    assert_eq!(tx["fee_rate"].as_u64().unwrap(), 1000);
+
+    // Intention CLI can target this identity via process_type_script.
+    let pts = &tx["process_type_script"];
+    assert_eq!(
+        pts["code_hash"].as_str().unwrap(),
+        typ["code_hash"].as_str().unwrap()
+    );
+    assert_eq!(pts["args"].as_str().unwrap(), typ["args"].as_str().unwrap());
+    let pth = process_type_hash_of(&serde_json::from_value(pts.clone()).unwrap()).unwrap();
+    assert_eq!(format!("0x{}", hex::encode(pth)), identity);
+}
+
+#[test]
+fn create_process_rejects_empty_lock_args() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    req.process_lock_args = "0x".into();
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    match err {
+        CliError::InvalidRequest(msg) => assert!(msg.contains("non-empty"), "{msg}"),
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_process_rejects_missing_process_code_type_script() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    req.process_code_dep.type_script = None;
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    assert!(matches!(err, CliError::InvalidRequest(_)));
+}
+
+#[test]
+fn create_process_cli_writes_output_without_leaking_key() {
+    let _guard = env_lock().lock().unwrap();
+    let secret = key(0x66);
+    let req = fixture_process_request(&secret);
+    let dir = tempfile::tempdir().unwrap();
+    let req_path = dir.path().join("req.json");
+    let out_path = dir.path().join("tx.json");
+    std::fs::write(&req_path, serde_json::to_vec_pretty(&req).unwrap()).unwrap();
+
+    std::env::set_var(PRIVKEY_ENV, hex::encode(secret.secret_bytes()));
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_cid-intention-cli"))
+        .args([
+            "create-process",
+            "--request",
+            req_path.to_str().unwrap(),
+            "--output",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    std::env::remove_var(PRIVKEY_ENV);
+
+    assert!(
+        status.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let out = std::fs::read_to_string(&out_path).unwrap();
+    let key_hex = hex::encode(secret.secret_bytes());
+    assert!(!out.contains(&key_hex));
+    assert!(out.contains("registry_post"));
+    assert!(out.contains("identity_type_id"));
+    let _ = serde_json::from_str::<CreateProcessRequest>(&serde_json::to_string(&req).unwrap());
+}
+
+#[tokio::test]
+async fn signed_process_passes_sighash_vm_verification() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let bundle = create_signed_process_state_bundle(&req, &secret).unwrap();
+    assert!(!bundle.skeleton.witnesses.is_empty());
+    let ok = TransactionSimulator::default()
+        .skeleton(bundle.skeleton.clone())
+        .link_cell_to_header(bundle.rpc.get_outpoint_to_headers())
+        .async_verify(&bundle.rpc, vec![], 50_000_000)
+        .await
+        .is_ok();
+    assert!(
+        ok,
+        "signed process create tx must pass secp sighash VM verify"
     );
 }
 

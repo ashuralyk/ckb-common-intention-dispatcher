@@ -1,18 +1,19 @@
-//! Offline CKB-only CID Intention creator + explicit testnet send (no auto-broadcast).
+//! Offline CKB-only CID Intention / Process creator + explicit testnet send (no auto-broadcast).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cid_intention_cli::{
-    create_signed_intention, load_privkey_from_env, send_signed_transaction, CliError,
-    CreateRequest, SendOptions, PRIVKEY_ENV,
+    create_signed_intention, create_signed_process_state, load_privkey_from_env,
+    send_signed_transaction, CliError, CreateProcessRequest, CreateRequest, SendOptions,
+    PRIVKEY_ENV,
 };
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "cid-intention-cli",
-    about = "Offline CKB-only CID Intention create + env-key signing; explicit testnet send"
+    about = "Offline CKB-only CID Intention / Process create + env-key signing; explicit testnet send"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -30,9 +31,18 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Build and offline-sign a Process state cell create transaction (never broadcasts).
+    CreateProcess {
+        /// Path to offline request JSON (no secrets).
+        #[arg(long)]
+        request: PathBuf,
+        /// Where to write the signed transaction JSON (includes registry_post).
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Broadcast a previously signed tx JSON to a TESTNET RPC (requires genesis guard).
     Send {
-        /// Signed tx JSON from `create` (no private key required).
+        /// Signed tx JSON from `create` / `create-process` (no private key required).
         #[arg(long)]
         tx: PathBuf,
         /// CKB JSON-RPC URL (use a local mock in CI/dev; do not hit public nets from agents).
@@ -60,6 +70,20 @@ fn run() -> Result<(), CliError> {
             std::fs::write(&output, out)?;
             eprintln!(
                 "wrote signed intention tx to {} (not broadcast; use `send` explicitly; key via {PRIVKEY_ENV} only)",
+                output.display()
+            );
+            Ok(())
+        }
+        Command::CreateProcess { request, output } => {
+            let text = std::fs::read_to_string(&request)?;
+            let req: CreateProcessRequest = serde_json::from_str(&text)?;
+            let key = load_privkey_from_env()?;
+            let tx = create_signed_process_state(&req, &key)?;
+            let _ = key;
+            let out = serde_json::to_vec_pretty(&tx)?;
+            std::fs::write(&output, out)?;
+            eprintln!(
+                "wrote signed process-state tx to {} (not broadcast; use `send` explicitly; key via {PRIVKEY_ENV} only)",
                 output.display()
             );
             Ok(())

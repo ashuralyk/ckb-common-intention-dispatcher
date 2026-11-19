@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 ckb-cinnabar-calculator = { workspace = true }
 ckb_common_intention_dispatcher-calculator = { path = "../../calculator/intention" }
+cid_process_example-calculator = { path = "../../calculator/process" }
 cid-protocol = { path = "../../protocol" }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"

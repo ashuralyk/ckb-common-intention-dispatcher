@@ -8,12 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use cid_intention_cli::{
-    create_signed_intention, send_signed_transaction, CliError, ScriptJson, SendOptions,
+    create_signed_intention, create_signed_process_state, send_signed_transaction, CliError,
+    ScriptJson, SendOptions,
 };
 use ckb_cinnabar_calculator::re_exports::ckb_jsonrpc_types;
 use serde_json::{json, Value};
 
-use common::{fixture_request, key};
+use common::{fixture_process_request, fixture_request, key};
 
 fn live_typed_cell(type_script: &ScriptJson) -> Value {
     json!({
@@ -291,6 +292,109 @@ fn send_allows_secp_type_lock_with_dep_group() {
         !*saw_live.lock().unwrap(),
         "CID Type ID live-cell probe must not run for non-CID type locks"
     );
+}
+
+#[test]
+fn create_process_output_sends_after_stripping_metadata() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let created = create_signed_process_state(&req, &secret).unwrap();
+    assert!(created.get("registry_post").is_some());
+    assert!(created.get("identity_type_id").is_some());
+    assert!(serde_json::from_value::<ckb_jsonrpc_types::Transaction>(created.clone()).is_err());
+
+    let genesis = h256(0xAB);
+    let tx_hash = h256(0xCD);
+    let genesis_c = genesis.clone();
+    let tx_hash_c = tx_hash.clone();
+    let cid_tx = req.cid_lock_dep.tx_hash.clone();
+    let cid_type = req.cid_lock_dep.type_script.clone().unwrap();
+    let process_tx = req.process_code_dep.tx_hash.clone();
+    let process_type = req.process_code_dep.type_script.clone().unwrap();
+    let saw_send = Arc::new(Mutex::new(false));
+    let saw_send_c = Arc::clone(&saw_send);
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, params| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+            "get_block_hash" => json!(genesis_c.clone()),
+            "get_live_cell" => {
+                let op = &params.as_array().unwrap()[0];
+                let txh = op["tx_hash"].as_str().unwrap_or("");
+                if txh.eq_ignore_ascii_case(&cid_tx) {
+                    live_typed_cell(&cid_type)
+                } else if txh.eq_ignore_ascii_case(&process_tx) {
+                    live_typed_cell(&process_type)
+                } else {
+                    live_untyped_cell()
+                }
+            }
+            "send_transaction" => {
+                let tx = &params.as_array().unwrap()[0];
+                assert!(tx.get("registry_post").is_none());
+                assert!(tx.get("identity_type_id").is_none());
+                assert!(tx.get("state_outpoint").is_none());
+                assert!(tx.get("process_type_script").is_none());
+                serde_json::from_value::<ckb_jsonrpc_types::Transaction>(tx.clone())
+                    .expect("process create→send payload must be a Transaction");
+                *saw_send_c.lock().unwrap() = true;
+                json!(tx_hash_c.clone())
+            }
+            _ => json!({"error": {"code": -1, "message": "unknown"}}),
+        },
+    ))));
+
+    let opts = SendOptions {
+        rpc_url: url,
+        network: "testnet".into(),
+        genesis_hash: genesis,
+    };
+    let hash = send_signed_transaction(&opts, &created).unwrap();
+    assert_eq!(hash, tx_hash);
+    assert!(*saw_send.lock().unwrap());
+}
+
+#[test]
+fn send_rejects_process_with_mismatched_code_type_id() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let created = create_signed_process_state(&req, &secret).unwrap();
+    let genesis = h256(0xAB);
+    let genesis_c = genesis.clone();
+    let cid_tx = req.cid_lock_dep.tx_hash.clone();
+    let cid_type = req.cid_lock_dep.type_script.clone().unwrap();
+    // Live Process code cell reports different Type ID args than the offline request.
+    let mut wrong = req.process_code_dep.type_script.clone().unwrap();
+    wrong.args = format!("0x{}", hex::encode([0xEEu8; 32]));
+    let process_tx = req.process_code_dep.tx_hash.clone();
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, params| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+            "get_block_hash" => json!(genesis_c.clone()),
+            "get_live_cell" => {
+                let op = &params.as_array().unwrap()[0];
+                let txh = op["tx_hash"].as_str().unwrap_or("");
+                if txh.eq_ignore_ascii_case(&cid_tx) {
+                    live_typed_cell(&cid_type)
+                } else if txh.eq_ignore_ascii_case(&process_tx) {
+                    live_typed_cell(&wrong)
+                } else {
+                    live_untyped_cell()
+                }
+            }
+            "send_transaction" => json!(h256(0xFF)),
+            _ => json!({"error": {"code": -1, "message": "unknown"}}),
+        },
+    ))));
+    let opts = SendOptions {
+        rpc_url: url,
+        network: "testnet".into(),
+        genesis_hash: genesis,
+    };
+    let err = send_signed_transaction(&opts, &created).unwrap_err();
+    match err {
+        CliError::NetworkGuard(msg) => assert!(msg.contains("Process lock Type ID"), "{msg}"),
+        other => panic!("expected NetworkGuard, got {other:?}"),
+    }
 }
 
 #[test]

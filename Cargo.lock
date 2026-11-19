@@ -327,6 +327,7 @@ name = "cid-intention-cli"
 version = "0.1.0"
 dependencies = [
  "cid-protocol",
+ "cid_process_example-calculator",
  "ckb-cinnabar-calculator",
  "ckb-system-scripts 0.5.4",
  "ckb_common_intention_dispatcher-calculator",
