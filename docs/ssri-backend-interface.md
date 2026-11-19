@@ -149,8 +149,9 @@ let assembled: AssembledTx = executor.assemble(&draft, host)?;
 // Syscalls invoke HostQuery interactively during VM execution.
 ```
 
-`ProcessExecutor::assemble` is generic over `H: HostQuery` (also accepts
-`Box<dyn HostQuery>` / `Arc<…>` via blanket impls). Calculator
+`ProcessExecutor::assemble` is generic over `H: HostQuery + Send + 'static`
+(also accepts `Box<dyn HostQuery + Send>` / `Arc<T: HostQuery>` via blanket
+impls — `Send` is required because ckb-vm `Syscalls` is `Send`). Calculator
 `process_digest_ok_with_extras` seeds a `MockHost`; use
 `process_digest_ok_with_host` to pass a live host.
 

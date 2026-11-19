@@ -632,37 +632,13 @@ mod tests {
                 cell.data.clone(),
             );
         }
-        let host = RecordingHost::wrap(mock);
-        let draft = build_draft_tx(&cells);
-        let assembled = executor
-            .assemble(&draft, host)
-            .expect("assemble with custom HostQuery");
-        assert!(!assembled.outputs.is_empty());
-        // find_cell_by_out_point must have been called during VM syscalls
-        // (RecordingHost was moved; re-check via a second run with Arc).
-    }
-
-    #[test]
-    fn assemble_with_arc_custom_host_records_finds() {
-        let Some(binary) = load_process_binary() else {
-            return;
-        };
-        let executor = ProcessExecutor::new(binary);
-        let cells = make_assemble_cells(1);
-        let mock = MockHost::new();
-        mock.insert_block_hash(0, [0xAB; 32]);
-        for cell in &cells {
-            mock.insert_cell(
-                cell.out_point.clone(),
-                cell.output.clone(),
-                cell.data.clone(),
-            );
-        }
+        // Arc so we can assert recorded finds after assemble moves the host.
         let host = std::sync::Arc::new(RecordingHost::wrap(mock));
         let draft = build_draft_tx(&cells);
-        let _ = executor
+        let assembled = executor
             .assemble(&draft, host.clone())
-            .expect("assemble with Arc<dyn-capable HostQuery>");
+            .expect("assemble with Arc custom HostQuery");
+        assert!(!assembled.outputs.is_empty());
         assert!(
             host.finds.load(std::sync::atomic::Ordering::SeqCst) >= 2,
             "VM must call find_cell_by_out_point interactively on the custom host"
@@ -670,8 +646,11 @@ mod tests {
     }
 
     #[test]
-    fn custom_host_get_cells_accepts_opaque_cursor_and_order() {
-        let host = RecordingHost::wrap(MockHost::new());
+    fn sys_get_cells_passes_opaque_cursor_and_desc_order_via_syscall() {
+        // Drive SYS_GET_CELLS through SsriSyscalls (same path as a live guest),
+        // not only HostQuery::get_cells directly.
+        let host = std::sync::Arc::new(RecordingHost::wrap(MockHost::new()));
+        let opaque = host.opaque_cursor.clone();
         let key = host_query::SearchKey {
             script: host_query::Script {
                 code_hash: [0x11; 32],
@@ -686,24 +665,29 @@ mod tests {
         };
         let key_bytes = serde_molecule::to_vec(&key, false).unwrap();
 
-        // Asc + empty cursor → opaque 12-byte next cursor
-        let page0 = HostQuery::get_cells(&host, &key_bytes, 0, 1, &[]).unwrap();
-        let pag0: host_query::Pagination = serde_molecule::from_slice(&page0, false).unwrap();
-        assert_eq!(pag0.last_cursor.len(), 12);
-        assert_eq!(*host.last_get_cells_order.lock().unwrap(), Some(0));
-        assert_eq!(
-            host.last_get_cells_cursor.lock().unwrap().as_deref(),
-            Some(&[][..])
+        let page = vm::invoke_sys_get_cells_for_test(
+            host.clone(),
+            &key_bytes,
+            /* order Desc */ 1,
+            /* limit */ 1,
+            &opaque,
+        )
+        .expect("SYS_GET_CELLS syscall");
+        let pag: host_query::Pagination =
+            serde_molecule::from_slice(&page, false).expect("pagination");
+        assert!(
+            pag.last_cursor.is_empty(),
+            "second page with opaque cursor should end"
         );
-
-        // Desc + opaque cursor round-trip
-        let page1 = HostQuery::get_cells(&host, &key_bytes, 1, 1, &pag0.last_cursor).unwrap();
-        let pag1: host_query::Pagination = serde_molecule::from_slice(&page1, false).unwrap();
-        assert!(pag1.last_cursor.is_empty());
-        assert_eq!(*host.last_get_cells_order.lock().unwrap(), Some(1));
+        assert_eq!(
+            *host.last_get_cells_order.lock().unwrap(),
+            Some(1),
+            "syscall must pass Desc order through to HostQuery"
+        );
         assert_eq!(
             host.last_get_cells_cursor.lock().unwrap().as_deref(),
-            Some(pag0.last_cursor.as_slice())
+            Some(opaque.as_slice()),
+            "syscall must pass opaque variable-length cursor bytes through"
         );
     }
 

@@ -480,3 +480,90 @@ pub fn call_ssri_method_with_cycles<H: HostQuery + Send + 'static>(
         Err(e) => Err(ExecutorError::VmError(format!("VM error: {:?}", e))),
     }
 }
+
+/// Test-only: invoke `SYS_GET_CELLS` through [`SsriSyscalls`] (same register /
+/// memory layout as a live guest), so opaque cursors and Asc/Desc order are
+/// exercised on the syscall path — not only via direct `HostQuery::get_cells`.
+#[cfg(test)]
+pub fn invoke_sys_get_cells_for_test<H: HostQuery + Send>(
+    host: H,
+    search_key: &[u8],
+    order: u64,
+    limit: u64,
+    last_cursor: &[u8],
+) -> Result<Vec<u8>, ExecutorError> {
+    const BUF_ADDR: u64 = 0x10_0000;
+    const LEN_ADDR: u64 = 0x11_0000;
+    const KEY_ADDR: u64 = 0x12_0000;
+    const CURSOR_ADDR: u64 = 0x13_0000;
+    const RESP_CAP: usize = 64 * 1024;
+
+    let mut syscalls = SsriSyscalls::new(Vec::new(), host);
+    let isa = ISA_IMC | ISA_A | ISA_B | ISA_MOP;
+    let mut machine =
+        DefaultCoreMachine::<u64, SparseMemory<u64>>::new(isa, SSRI_VM_VERSION as u32, MAX_CYCLES);
+
+    // Response buffer + capacity (syscall_load convention).
+    machine
+        .memory_mut()
+        .store_bytes(BUF_ADDR, &vec![0u8; RESP_CAP])
+        .map_err(|e| ExecutorError::VmError(format!("store buf: {e:?}")))?;
+    machine
+        .memory_mut()
+        .store_bytes(LEN_ADDR, &(RESP_CAP as u64).to_le_bytes())
+        .map_err(|e| ExecutorError::VmError(format!("store len: {e:?}")))?;
+
+    // Search key bytes.
+    machine
+        .memory_mut()
+        .store_bytes(KEY_ADDR, search_key)
+        .map_err(|e| ExecutorError::VmError(format!("store key: {e:?}")))?;
+
+    // Cursor: u32 LE length ‖ opaque bytes (ckb-ssri-std native layout).
+    let cursor_len = u32::try_from(last_cursor.len())
+        .map_err(|_| ExecutorError::VmError("cursor too long".into()))?;
+    let mut cursor_blob = Vec::with_capacity(4 + last_cursor.len());
+    cursor_blob.extend_from_slice(&cursor_len.to_le_bytes());
+    cursor_blob.extend_from_slice(last_cursor);
+    machine
+        .memory_mut()
+        .store_bytes(CURSOR_ADDR, &cursor_blob)
+        .map_err(|e| ExecutorError::VmError(format!("store cursor: {e:?}")))?;
+
+    machine.set_register(A0, BUF_ADDR);
+    machine.set_register(A1, LEN_ADDR);
+    machine.set_register(A2, KEY_ADDR);
+    machine.set_register(A3, search_key.len() as u64);
+    machine.set_register(A4, order);
+    machine.set_register(A5, limit);
+    machine.set_register(A6, CURSOR_ADDR);
+    machine.set_register(A7, SYS_GET_CELLS);
+
+    let handled = syscalls
+        .ecall(&mut machine)
+        .map_err(|e| ExecutorError::VmError(format!("ecall: {e:?}")))?;
+    if !handled {
+        return Err(ExecutorError::VmError("SYS_GET_CELLS not handled".into()));
+    }
+    let errno = machine.registers()[A0];
+    if errno != 0 {
+        return Err(ExecutorError::VmError(format!(
+            "SYS_GET_CELLS errno {errno}"
+        )));
+    }
+    let len_bytes = machine
+        .memory_mut()
+        .load_bytes(LEN_ADDR, 8)
+        .map_err(|e| ExecutorError::VmError(format!("load len: {e:?}")))?;
+    let actual = u64::from_le_bytes(len_bytes.as_ref().try_into().unwrap()) as usize;
+    if actual > RESP_CAP {
+        return Err(ExecutorError::VmError(format!(
+            "response len {actual} exceeds capacity"
+        )));
+    }
+    let data = machine
+        .memory_mut()
+        .load_bytes(BUF_ADDR, actual as u64)
+        .map_err(|e| ExecutorError::VmError(format!("load resp: {e:?}")))?;
+    Ok(data.to_vec())
+}
