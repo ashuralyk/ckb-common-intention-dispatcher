@@ -1716,7 +1716,14 @@ async fn process_pair_executes_without_user_and_rejects_invalid_transitions() {
                 "wrong_output" => {
                     let wrong = crate::faker::process_type_script()
                         .as_builder()
-                        .args(b"wrong-process".to_vec().pack())
+                        .args(
+                            {
+                                let mut a = [0u8; 32];
+                                a[..13].copy_from_slice(b"wrong-process");
+                                a.to_vec()
+                            }
+                            .pack(),
+                        )
                         .build();
                     skeleton.outputs[0].output = skeleton.outputs[0]
                         .output

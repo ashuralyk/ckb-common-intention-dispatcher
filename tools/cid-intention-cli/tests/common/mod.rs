@@ -47,10 +47,15 @@ fn bundled(name: &str) -> Vec<u8> {
 
 pub fn fixture_request(secret: &SecretKey) -> CreateRequest {
     let lock = secp_data_lock(secret);
+    // Process Type ID = built-in TYPE_ID type script of the Process state cell
+    // (args must be exactly 32 bytes — creation tools validate this).
+    let mut process_args = [0u8; 32];
+    process_args[0] = 0xaa;
+    process_args[1] = 0xbb;
     let process_type = Script::new_builder()
-        .code_hash([0x11; 32].pack())
-        .hash_type(ScriptHashType::Data1)
-        .args(hex::decode("aabb").unwrap().pack())
+        .code_hash(TYPE_ID_CODE_HASH.pack())
+        .hash_type(ScriptHashType::Type)
+        .args(process_args.to_vec().pack())
         .build();
     let beneficiary = Script::new_builder()
         .code_hash([0x22; 32].pack())

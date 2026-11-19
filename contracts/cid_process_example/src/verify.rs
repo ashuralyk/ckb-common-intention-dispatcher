@@ -4,11 +4,11 @@ use crate::{Context, ProcessError};
 use alloc::vec;
 use alloc::vec::Vec;
 use cid_protocol::{
-    is_standard_xudt, CidArgs, Script as CidScript, PROCESS_TYPE_HASH_LEN, XUDT_AMOUNT_LEN,
+    is_standard_xudt, is_type_id_script, CidArgs, Script as CidScript, PROCESS_TYPE_HASH_LEN,
+    XUDT_AMOUNT_LEN,
 };
 use ckb_cinnabar_verifier::{
-    calc_type_id, this_script_args, this_script_indices, this_script_pattern, Result,
-    ScriptPattern, ScriptPlace, Verification,
+    this_script_indices, this_script_pattern, Result, ScriptPattern, ScriptPlace, Verification,
 };
 use ckb_std::{
     ckb_constants::Source,
@@ -24,7 +24,6 @@ use ckb_std::{
 
 const BATCH_MIN: usize = 1;
 const BATCH_MAX: usize = 4;
-const TYPE_ID_ARGS_LEN: usize = 32;
 
 #[derive(Default)]
 pub struct Root;
@@ -36,51 +35,92 @@ impl Verification<Context> for Root {
     }
 }
 
+/// Process verification runs as the **lock** of the state cell.
+/// State cell **type** is the built-in TYPE_ID script (identity).
 fn verify_process() -> Result<Option<&'static str>> {
-    match this_script_pattern(ScriptPlace::Type)? {
-        ScriptPattern::Create => verify_type_id_create(),
+    match this_script_pattern(ScriptPlace::Lock)? {
+        ScriptPattern::Create => verify_create(),
         ScriptPattern::Transfer => {
-            verify_type_id_pair()?;
+            verify_lock_pair()?;
             verify_intention_batch_and_beneficiaries()?;
             Ok(None)
         }
-        // Process must persist; burning the type-id cell is not a digest path.
+        // Process must persist; burning the state cell is not a digest path.
         ScriptPattern::Burn => Err(ProcessError::ProcessPairInvalid.into()),
     }
 }
 
-/// First Process cell: output-only type group. Args must equal
-/// `calc_type_id(output_index)` (blake2b of the tx's first input + index).
-/// Group membership alone does not prove uniqueness for a custom type script.
-fn verify_type_id_create() -> Result<Option<&'static str>> {
-    let output_indices = this_script_indices(Source::Output, ScriptPlace::Type)?;
+/// First Process state cell: lock-group Create. Type must be built-in TYPE_ID;
+/// uniqueness is enforced by that system script, not by this lock.
+fn verify_create() -> Result<Option<&'static str>> {
+    let output_indices = this_script_indices(Source::Output, ScriptPlace::Lock)?;
     if output_indices.len() != 1 {
         return Err(ProcessError::ProcessPairInvalid.into());
     }
-
-    let args = this_script_args()?;
-    if args.len() != TYPE_ID_ARGS_LEN {
-        return Err(ProcessError::TypeIdInvalid.into());
-    }
-
-    let expected = calc_type_id(output_indices[0])?;
-    if args.as_slice() != expected.as_slice() {
-        return Err(ProcessError::TypeIdInvalid.into());
-    }
-
+    require_type_id_type(output_indices[0], Source::Output)?;
     Ok(None)
 }
 
-/// Transfer: exactly one Process input and one Process output in the type group.
-fn verify_type_id_pair() -> Result<Option<&'static str>> {
-    let input_count = this_script_indices(Source::Input, ScriptPlace::Type)?.len();
-    let output_count = this_script_indices(Source::Output, ScriptPlace::Type)?.len();
+/// Transfer: exactly one Process lock input and one Process lock output.
+///
+/// Identity continuity: input and output must carry the **same** TYPE_ID type
+/// script hash. The TYPE_ID must not appear on any non-Process-lock output
+/// (prevents CID DigestOk matching via an attacker cell while the Process
+/// cell migrates to a new Type ID).
+///
+/// Note: Process lock **args** should be distinct per live instance. Empty or
+/// shared args merge cells into one lock group (1→1 becomes N→N and fails
+/// `ProcessPairInvalid`).
+fn verify_lock_pair() -> Result<Option<&'static str>> {
+    let input_indices = this_script_indices(Source::Input, ScriptPlace::Lock)?;
+    let output_indices = this_script_indices(Source::Output, ScriptPlace::Lock)?;
 
-    if input_count != 1 || output_count != 1 {
+    if input_indices.len() != 1 || output_indices.len() != 1 {
         return Err(ProcessError::ProcessPairInvalid.into());
     }
-
+    let in_hash = require_type_id_type(input_indices[0], Source::Input)?;
+    let out_hash = require_type_id_type(output_indices[0], Source::Output)?;
+    if in_hash != out_hash {
+        return Err(ProcessError::TypeIdInvalid.into());
+    }
+    forbid_type_id_on_non_process_outputs(&in_hash)?;
     Ok(None)
+}
+
+fn require_type_id_type(index: usize, source: Source) -> Result<[u8; 32]> {
+    let typ = load_cell_type(index, source).map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let Some(typ) = typ else {
+        return Err(ProcessError::TypeIdInvalid.into());
+    };
+    let code_hash: [u8; 32] = typ.code_hash().unpack();
+    let hash_type: u8 = typ.hash_type().into();
+    if !is_type_id_script(&code_hash, hash_type) {
+        return Err(ProcessError::TypeIdInvalid.into());
+    }
+    Ok(typ.calc_script_hash().unpack())
+}
+
+/// Our Process Type ID must only sit on Process-lock cells (the recreate).
+fn forbid_type_id_on_non_process_outputs(our_type_hash: &[u8; 32]) -> Result<()> {
+    let process_script = load_script().map_err(|_| ProcessError::ProcessPairInvalid)?;
+    for i in 0.. {
+        match load_cell_type(i, Source::Output) {
+            Ok(Some(typ)) => {
+                let hash: [u8; 32] = typ.calc_script_hash().unpack();
+                if &hash == our_type_hash {
+                    let lock = load_cell_lock(i, Source::Output)
+                        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                    if !is_example_process_lock(&lock, &process_script) {
+                        return Err(ProcessError::TypeIdInvalid.into());
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
+            Err(_) => return Err(ProcessError::ProcessPairInvalid.into()),
+        }
+    }
+    Ok(())
 }
 
 /// One uniquely owned output: a DigestOk payload payment or a DigestIncompatible
@@ -107,13 +147,9 @@ fn verify_intention_batch_and_beneficiaries() -> Result<Option<&'static str>> {
 
 fn collect_output_obligations(
 ) -> core::result::Result<(Vec<OutputObligation>, Vec<OutputObligation>), ProcessError> {
-    let our_type_hash: [u8; 32] = load_script()
-        .map_err(|_| ProcessError::ProcessPairInvalid)?
-        .calc_script_hash()
-        .unpack();
-    // CID DigestOk: committed Process type hash is present in both I/O.
-    // Not filtered by this binary's code_hash/hash_type, so Data1/Data2/Type
-    // deployments of the same example are obligations of one claimed set.
+    // Intention `process_type_hash` is the TYPE_ID type-script hash of this
+    // Process state cell — not the Process lock script hash.
+    let our_type_hash = our_process_type_id()?;
     let digest_ok_hashes = type_hashes_in_both_io()?;
 
     let mut ours = Vec::new();
@@ -159,6 +195,17 @@ fn collect_output_obligations(
     }
 
     Ok((ours, obligations))
+}
+
+/// TYPE_ID type-script hash of this Process state cell (lock group).
+fn our_process_type_id() -> core::result::Result<[u8; 32], ProcessError> {
+    let typ = load_cell_type(0, Source::GroupInput)
+        .or_else(|_| load_cell_type(0, Source::GroupOutput))
+        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let Some(typ) = typ else {
+        return Err(ProcessError::TypeIdInvalid);
+    };
+    Ok(typ.calc_script_hash().unpack())
 }
 
 fn type_hashes_in_both_io() -> core::result::Result<Vec<[u8; 32]>, ProcessError> {
@@ -266,7 +313,8 @@ fn claim_output(
             load_cell_lock(i, Source::Output).map_err(|_| ProcessError::ProcessPairInvalid)?;
         let type_script =
             load_cell_type(i, Source::Output).map_err(|_| ProcessError::ProcessPairInvalid)?;
-        if is_example_process_cell(&type_script, process_script) {
+        // Skip Process recreate cells (this binary as lock, any hash_type alias).
+        if is_example_process_lock(&lock, process_script) {
             continue;
         }
         if lock != obligation.lock {
@@ -295,10 +343,8 @@ fn claim_output(
 }
 
 /// Skip Process recreate cells of this binary (any hash_type alias).
-fn is_example_process_cell(type_script: &Option<Script>, ours: &Script) -> bool {
-    type_script
-        .as_ref()
-        .is_some_and(|t| t.code_hash() == ours.code_hash())
+fn is_example_process_lock(lock: &Script, ours: &Script) -> bool {
+    lock.code_hash() == ours.code_hash()
 }
 
 fn packed_script(script: &CidScript) -> core::result::Result<Script, ProcessError> {

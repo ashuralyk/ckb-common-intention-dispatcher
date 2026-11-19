@@ -20,7 +20,7 @@ Lean host binary in this contract repo that:
 |---------|--------|
 | Asset | CKB only (no xUDT) |
 | Inputs | Explicit funding outpoint + deps in offline request JSON (pinned by outpoint; not address scan) |
-| Process identity | Full Process **state type script** `{code_hash,hash_type,args}` → `calc_script_hash`; never assume code-cell Type-ID hash equals state identity |
+| Process identity | Process state cell’s built-in **TYPE_ID type script** `{TYPE_ID, type, args}` → `calc_script_hash` (= Intention `process_type_hash`); Process contract is the state-cell **lock** |
 | CID lock identity | Intention lock always references the CID code cell by **Type ID**: `lock.code_hash = hash(cid_lock_dep.type_script)`, `lock.hash_type = type`. Data-hash (`data1`) referencing is rejected. |
 | Payload | Required beneficiary lock → `Payload::from_script` (Process example semantics) |
 | User lock | Funding lock (= payer) |
@@ -59,8 +59,8 @@ Lean host binary in this contract repo that:
     { "name": "secp256k1_data", "tx_hash": "0x…", "index": 3, "data": "0x…" }
   ],
   "process_type_script": {
-    "code_hash": "0x…",
-    "hash_type": "data1",
+    "code_hash": "0x00000000000000000000000000000000000000000000000000545950455f4944",
+    "hash_type": "type",
     "args": "0x…"
   },
   "beneficiary_lock": {
@@ -71,8 +71,8 @@ Lean host binary in this contract repo that:
 }
 ```
 
-`process_type_script` must describe the **live Process cell's type script**, not
-the code cell alone.
+`process_type_script` must describe the **live Process state cell's TYPE_ID type
+script** (Process Type ID), not the Process code cell and not the Process lock.
 
 `cid_lock_dep` must point at the **current live** CID code cell outpoint
 (`dep_type` code) and include:

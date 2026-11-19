@@ -16,7 +16,9 @@ pub struct CreateRequest {
     pub cid_lock_dep: NamedDep,
     /// Genesis secp code + data cell deps (with binary `data` for offline signing).
     pub sighash_deps: Vec<NamedDep>,
-    /// Full Process **state** type script (not the code cell alone).
+    /// Process Type ID: the built-in TYPE_ID **type** script of the live Process
+    /// state cell (`code_hash = TYPE_ID`, `hash_type = type`, unique args).
+    /// Intention args commit `calc_script_hash` of this script.
     pub process_type_script: ScriptJson,
     /// Beneficiary lock encoded into `CidEntry.payload` via `Payload::from_script`.
     pub beneficiary_lock: ScriptJson,

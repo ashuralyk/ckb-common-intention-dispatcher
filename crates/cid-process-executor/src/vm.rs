@@ -1,7 +1,8 @@
+use crate::host_query::{HostQuery, HostQueryError, MockHost};
 use crate::{ExecutorError, CUSTOM_ERROR_START};
 use ckb_hash::blake2b_256;
 use ckb_vm::cost_model::estimate_cycles;
-use ckb_vm::registers::{A0, A1, A2, A7};
+use ckb_vm::registers::{A0, A1, A2, A3, A4, A5, A6, A7};
 use ckb_vm::{
     Bytes, CoreMachine, DefaultCoreMachine, DefaultMachineBuilder, Error as VmError, Memory,
     Register, SparseMemory, SupportMachine, Syscalls, ISA_A, ISA_B, ISA_IMC, ISA_MOP,
@@ -31,29 +32,45 @@ const SYS_CKB_READ: u64 = 2606;
 const SYS_INHERITED_FDS: u64 = 2607;
 const SYS_CLOSE: u64 = 2608;
 
+/// ckb-ssri-std host-query catalog (native injection) — full set of 7.
+const SYS_FIND_CELL_BY_OUT_POINT: u64 = 2287;
+const SYS_FIND_CELL_DATA_BY_OUT_POINT: u64 = 2297;
+const SYS_GET_LIVE_CELL: u64 = 2317;
+const SYS_GET_HEADER: u64 = 2327;
+const SYS_GET_HEADER_BY_NUMBER: u64 = 2337;
+const SYS_GET_BLOCK_HASH: u64 = 2347;
+const SYS_GET_CELLS: u64 = 2367;
+
+/// CKB syscall errno for syscall_load results.
+const ERRNO_OK: u64 = 0;
+const ERRNO_INDEX_OUT_OF_BOUND: u64 = 1;
+const ERRNO_ITEM_MISSING: u64 = 2;
+
 /// Pipe pair (read_fd, write_fd)
 #[derive(Clone, Debug)]
 struct Pipe {
     buffer: Vec<u8>,
 }
 
-/// SSRI stdio syscalls
-struct SsriSyscalls {
+/// SSRI stdio syscalls + interactive [`HostQuery`] (MockHost or live RPC host).
+struct SsriSyscalls<H: HostQuery> {
     input: Arc<Mutex<Vec<u8>>>,
     output: Arc<Mutex<Vec<u8>>>,
     exit_code: Arc<Mutex<Option<i8>>>,
     pipes: Arc<Mutex<HashMap<u64, Pipe>>>,
     next_fd: Arc<Mutex<u64>>,
+    host: H,
 }
 
-impl SsriSyscalls {
-    fn new(input: Vec<u8>) -> Self {
+impl<H: HostQuery> SsriSyscalls<H> {
+    fn new(input: Vec<u8>, host: H) -> Self {
         Self {
             input: Arc::new(Mutex::new(input)),
             output: Arc::new(Mutex::new(Vec::new())),
             exit_code: Arc::new(Mutex::new(None)),
             pipes: Arc::new(Mutex::new(HashMap::new())),
             next_fd: Arc::new(Mutex::new(3)), // Start at fd 3 (0=stdin, 1=stdout, 2=stderr)
+            host,
         }
     }
 }
@@ -82,7 +99,45 @@ fn load_guest_bytes<Mac: SupportMachine>(
     machine.memory_mut().load_bytes(addr, len)
 }
 
-impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
+/// syscall_load convention: a0=buf, a1=*len (capacity in / actual out), return errno in a0.
+fn serve_load<Mac: SupportMachine>(machine: &mut Mac, data: Option<&[u8]>) -> Result<(), VmError> {
+    let buf_addr = machine.registers()[A0].to_u64();
+    let len_ptr = machine.registers()[A1].to_u64();
+    let len_bytes = machine.memory_mut().load_bytes(len_ptr, 8)?;
+    let capacity = usize::from_le_bytes(len_bytes.as_ref().try_into().unwrap());
+
+    let Some(data) = data else {
+        machine.set_register(A0, Mac::REG::from_u64(ERRNO_ITEM_MISSING));
+        return Ok(());
+    };
+
+    machine
+        .memory_mut()
+        .store_bytes(len_ptr, &(data.len() as u64).to_le_bytes())?;
+
+    if data.len() > capacity {
+        // LengthNotEnough path: errno 0 with actual > capacity, or we mirror
+        // ckb-ssri-std which checks actual_data_len > load_len after errno 0.
+        machine.set_register(A0, Mac::REG::from_u64(ERRNO_OK));
+        return Ok(());
+    }
+
+    machine.memory_mut().store_bytes(buf_addr, data)?;
+    machine.set_register(A0, Mac::REG::from_u64(ERRNO_OK));
+    Ok(())
+}
+
+fn read_out_point_arg<Mac: SupportMachine>(machine: &mut Mac) -> Result<Vec<u8>, VmError> {
+    let ptr = machine.registers()[A2].to_u64();
+    // OutPoint molecule TOTAL_SIZE is 36.
+    const OUT_POINT_SIZE: u64 = 36;
+    Ok(machine
+        .memory_mut()
+        .load_bytes(ptr, OUT_POINT_SIZE)?
+        .to_vec())
+}
+
+impl<Mac: SupportMachine, H: HostQuery + Send> Syscalls<Mac> for SsriSyscalls<H> {
     fn initialize(&mut self, _machine: &mut Mac) -> Result<(), VmError> {
         Ok(())
     }
@@ -231,6 +286,79 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 machine.set_register(A0, Mac::REG::from_u64(SSRI_VM_VERSION));
                 Ok(true)
             }
+            SYS_FIND_CELL_BY_OUT_POINT => {
+                let out_point = read_out_point_arg(machine)?;
+                let data = self.host.find_cell_by_out_point(&out_point);
+                serve_load(machine, data.as_deref())?;
+                Ok(true)
+            }
+            SYS_FIND_CELL_DATA_BY_OUT_POINT => {
+                let out_point = read_out_point_arg(machine)?;
+                let data = self.host.find_cell_data_by_out_point(&out_point);
+                serve_load(machine, data.as_deref())?;
+                Ok(true)
+            }
+            SYS_GET_LIVE_CELL => {
+                let out_point = read_out_point_arg(machine)?;
+                let with_data = machine.registers()[A3].to_u64() != 0;
+                match self.host.get_live_cell(&out_point, with_data) {
+                    Ok(bytes) => {
+                        serve_load(machine, Some(&bytes))?;
+                    }
+                    Err(HostQueryError::InvalidArgs | HostQueryError::Encoding) => {
+                        machine.set_register(A0, Mac::REG::from_u64(ERRNO_INDEX_OUT_OF_BOUND));
+                    }
+                }
+                Ok(true)
+            }
+            SYS_GET_HEADER => {
+                let ptr = machine.registers()[A2].to_u64();
+                let len = machine.registers()[A3].to_u64();
+                if len != 32 {
+                    machine.set_register(A0, Mac::REG::from_u64(ERRNO_INDEX_OUT_OF_BOUND));
+                    return Ok(true);
+                }
+                let hash = machine.memory_mut().load_bytes(ptr, len)?.to_vec();
+                let data = self.host.get_header(&hash);
+                serve_load(machine, data.as_deref())?;
+                Ok(true)
+            }
+            SYS_GET_HEADER_BY_NUMBER => {
+                let number = machine.registers()[A3].to_u64();
+                let data = self.host.get_header_by_number(number);
+                serve_load(machine, data.as_deref())?;
+                Ok(true)
+            }
+            SYS_GET_BLOCK_HASH => {
+                let number = machine.registers()[A3].to_u64();
+                let hash = HostQuery::get_block_hash(&self.host, number);
+                let data = hash.as_ref().map(|h| h.as_slice());
+                serve_load(machine, data)?;
+                Ok(true)
+            }
+            SYS_GET_CELLS => {
+                let sk_ptr = machine.registers()[A2].to_u64();
+                let sk_len = machine.registers()[A3].to_u64();
+                let order = machine.registers()[A4].to_u64();
+                let limit = machine.registers()[A5].to_u64();
+                let cursor_ptr = machine.registers()[A6].to_u64();
+                let search_key = load_guest_bytes(machine, sk_ptr, sk_len)?.to_vec();
+                let cursor_len_bytes = machine.memory_mut().load_bytes(cursor_ptr, 4)?;
+                let cursor_len =
+                    u32::from_le_bytes(cursor_len_bytes.as_ref().try_into().unwrap()) as u64;
+                let last_cursor = if cursor_len == 0 {
+                    Vec::new()
+                } else {
+                    load_guest_bytes(machine, cursor_ptr + 4, cursor_len)?.to_vec()
+                };
+                match self.host.get_cells(&search_key, order, limit, &last_cursor) {
+                    Ok(bytes) => serve_load(machine, Some(&bytes))?,
+                    Err(HostQueryError::InvalidArgs | HostQueryError::Encoding) => {
+                        machine.set_register(A0, Mac::REG::from_u64(ERRNO_INDEX_OUT_OF_BOUND));
+                    }
+                }
+                Ok(true)
+            }
             // Stub implementations for syscalls we don't need for SSRI but might be called
             SYS_SPAWN => {
                 // Spawn not supported in offline mode
@@ -258,7 +386,9 @@ impl<Mac: SupportMachine> Syscalls<Mac> for SsriSyscalls {
                 Ok(true)
             }
             _ if (2041..=3000).contains(&syscall_num) => {
-                // CKB syscall range - return error for unsupported ones
+                // CKB / SSRI syscall range - return error for unsupported ones
+                // Prefer ItemMissing-style for load-shaped calls.
+                let _ = ERRNO_INDEX_OUT_OF_BOUND;
                 machine.set_register(A0, Mac::REG::from_u64(1)); // error
                 Ok(true)
             }
@@ -280,16 +410,26 @@ pub fn call_ssri_method(
     method_path: &str,
     input: &[u8],
 ) -> Result<Vec<u8>, ExecutorError> {
-    call_ssri_method_with_cycles(binary, method_path, input, MAX_CYCLES)
+    call_ssri_method_with_host(binary, method_path, input, MockHost::new())
 }
 
-pub fn call_ssri_method_with_cycles(
+pub fn call_ssri_method_with_host<H: HostQuery + Send + 'static>(
     binary: &[u8],
     method_path: &str,
     input: &[u8],
+    host: H,
+) -> Result<Vec<u8>, ExecutorError> {
+    call_ssri_method_with_cycles(binary, method_path, input, host, MAX_CYCLES)
+}
+
+pub fn call_ssri_method_with_cycles<H: HostQuery + Send + 'static>(
+    binary: &[u8],
+    method_path: &str,
+    input: &[u8],
+    host: H,
     max_cycles: u64,
 ) -> Result<Vec<u8>, ExecutorError> {
-    let syscalls = SsriSyscalls::new(input.to_vec());
+    let syscalls = SsriSyscalls::new(input.to_vec(), host);
     let output_handle = syscalls.output.clone();
     let exit_handle = syscalls.exit_code.clone();
 
@@ -339,4 +479,91 @@ pub fn call_ssri_method_with_cycles(
         }
         Err(e) => Err(ExecutorError::VmError(format!("VM error: {:?}", e))),
     }
+}
+
+/// Test-only: invoke `SYS_GET_CELLS` through [`SsriSyscalls`] (same register /
+/// memory layout as a live guest), so opaque cursors and Asc/Desc order are
+/// exercised on the syscall path — not only via direct `HostQuery::get_cells`.
+#[cfg(test)]
+pub fn invoke_sys_get_cells_for_test<H: HostQuery + Send>(
+    host: H,
+    search_key: &[u8],
+    order: u64,
+    limit: u64,
+    last_cursor: &[u8],
+) -> Result<Vec<u8>, ExecutorError> {
+    const BUF_ADDR: u64 = 0x10_0000;
+    const LEN_ADDR: u64 = 0x11_0000;
+    const KEY_ADDR: u64 = 0x12_0000;
+    const CURSOR_ADDR: u64 = 0x13_0000;
+    const RESP_CAP: usize = 64 * 1024;
+
+    let mut syscalls = SsriSyscalls::new(Vec::new(), host);
+    let isa = ISA_IMC | ISA_A | ISA_B | ISA_MOP;
+    let mut machine =
+        DefaultCoreMachine::<u64, SparseMemory<u64>>::new(isa, SSRI_VM_VERSION as u32, MAX_CYCLES);
+
+    // Response buffer + capacity (syscall_load convention).
+    machine
+        .memory_mut()
+        .store_bytes(BUF_ADDR, &vec![0u8; RESP_CAP])
+        .map_err(|e| ExecutorError::VmError(format!("store buf: {e:?}")))?;
+    machine
+        .memory_mut()
+        .store_bytes(LEN_ADDR, &(RESP_CAP as u64).to_le_bytes())
+        .map_err(|e| ExecutorError::VmError(format!("store len: {e:?}")))?;
+
+    // Search key bytes.
+    machine
+        .memory_mut()
+        .store_bytes(KEY_ADDR, search_key)
+        .map_err(|e| ExecutorError::VmError(format!("store key: {e:?}")))?;
+
+    // Cursor: u32 LE length ‖ opaque bytes (ckb-ssri-std native layout).
+    let cursor_len = u32::try_from(last_cursor.len())
+        .map_err(|_| ExecutorError::VmError("cursor too long".into()))?;
+    let mut cursor_blob = Vec::with_capacity(4 + last_cursor.len());
+    cursor_blob.extend_from_slice(&cursor_len.to_le_bytes());
+    cursor_blob.extend_from_slice(last_cursor);
+    machine
+        .memory_mut()
+        .store_bytes(CURSOR_ADDR, &cursor_blob)
+        .map_err(|e| ExecutorError::VmError(format!("store cursor: {e:?}")))?;
+
+    machine.set_register(A0, BUF_ADDR);
+    machine.set_register(A1, LEN_ADDR);
+    machine.set_register(A2, KEY_ADDR);
+    machine.set_register(A3, search_key.len() as u64);
+    machine.set_register(A4, order);
+    machine.set_register(A5, limit);
+    machine.set_register(A6, CURSOR_ADDR);
+    machine.set_register(A7, SYS_GET_CELLS);
+
+    let handled = syscalls
+        .ecall(&mut machine)
+        .map_err(|e| ExecutorError::VmError(format!("ecall: {e:?}")))?;
+    if !handled {
+        return Err(ExecutorError::VmError("SYS_GET_CELLS not handled".into()));
+    }
+    let errno = machine.registers()[A0];
+    if errno != 0 {
+        return Err(ExecutorError::VmError(format!(
+            "SYS_GET_CELLS errno {errno}"
+        )));
+    }
+    let len_bytes = machine
+        .memory_mut()
+        .load_bytes(LEN_ADDR, 8)
+        .map_err(|e| ExecutorError::VmError(format!("load len: {e:?}")))?;
+    let actual = u64::from_le_bytes(len_bytes.as_ref().try_into().unwrap()) as usize;
+    if actual > RESP_CAP {
+        return Err(ExecutorError::VmError(format!(
+            "response len {actual} exceeds capacity"
+        )));
+    }
+    let data = machine
+        .memory_mut()
+        .load_bytes(BUF_ADDR, actual as u64)
+        .map_err(|e| ExecutorError::VmError(format!("load resp: {e:?}")))?;
+    Ok(data.to_vec())
 }

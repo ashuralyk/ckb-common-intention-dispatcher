@@ -70,7 +70,11 @@ pub fn has_shared_refund_user(user_lock_hash: &[u8; 32]) -> Result<bool> {
     Ok(false)
 }
 
-/// Match the committed Process identity on actual cells, never dependencies.
+/// Match the committed Process Type ID on actual cells, never dependencies.
+///
+/// `process_type_hash` is the script hash of the Process state cell's **type**
+/// script (built-in TYPE_ID). Presence of that type hash in `source` is enough;
+/// CID does not inspect the Process lock.
 pub fn has_matching_process(process_type_hash: &[u8; 32], source: Source) -> bool {
     QueryIter::new(load_cell_type, source)
         .any(|script| script.is_some_and(|script| &script_hash_bytes(&script) == process_type_hash))

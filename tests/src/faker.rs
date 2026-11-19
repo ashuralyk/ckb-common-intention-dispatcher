@@ -5,11 +5,14 @@ use ckb_cinnabar_calculator::{
     address::{Address, AddressPayload},
     instruction::Instruction,
     operation::udt::XUDT_FAKENET_TX_HASH,
-    re_exports::ckb_types::{
-        core::ScriptHashType,
-        packed::{OutPoint, Script},
-        prelude::{Builder, Entity, Pack, Unpack},
-        H256,
+    re_exports::{
+        ckb_hash::blake2b_256,
+        ckb_types::{
+            core::ScriptHashType,
+            packed::{OutPoint, Script},
+            prelude::{Builder, Entity, Pack, Unpack},
+            H256,
+        },
     },
     rpc::Network,
     simulation::{
@@ -18,7 +21,7 @@ use ckb_cinnabar_calculator::{
     },
     skeleton::{CellOutputEx, ScriptEx, TransactionSkeleton},
     types::{h256_to_hash, Hash256},
-    TransactionCalculator,
+    TransactionCalculator, TYPE_ID_CODE_HASH,
 };
 use ckb_common_intention_dispatcher_calculator::{
     cid_lock, encode_cid_args, CidScript, Payload, XUDT_CODE_HASH,
@@ -68,19 +71,35 @@ pub fn user_lock() -> ScriptEx {
     user_script().into()
 }
 
-pub fn process_type_script() -> Script {
+/// Process contract as the state-cell **lock** (fixture binary, Data1).
+pub fn process_lock_script() -> Script {
     Script::new_builder()
         .code_hash(
-            ckb_cinnabar_calculator::re_exports::ckb_hash::blake2b_256(
-                std::fs::read(format!("{CONTRACT_BIN}/cid_process_fixture")).unwrap(),
-            )
-            .pack(),
+            blake2b_256(std::fs::read(format!("{CONTRACT_BIN}/cid_process_fixture")).unwrap())
+                .pack(),
         )
         .hash_type(ScriptHashType::Data1)
-        .args(b"cid-process-v0".to_vec().pack())
+        .args(Vec::<u8>::new().pack())
         .build()
 }
 
+/// Built-in TYPE_ID type script of the Process state cell (Process Type ID).
+fn type_id_args(tag: &[u8]) -> Vec<u8> {
+    let mut args = [0u8; 32];
+    let n = tag.len().min(32);
+    args[..n].copy_from_slice(&tag[..n]);
+    args.to_vec()
+}
+
+pub fn process_type_script() -> Script {
+    Script::new_builder()
+        .code_hash(TYPE_ID_CODE_HASH.pack())
+        .hash_type(ScriptHashType::Type)
+        .args(type_id_args(b"cid-process-v0").pack())
+        .build()
+}
+
+/// Intention `process_type_hash` = script hash of the state cell's TYPE_ID type.
 pub fn process_type_hash() -> [u8; 32] {
     let mut hash = [0u8; 32];
     hash.copy_from_slice(process_type_script().calc_script_hash().as_slice());
@@ -156,7 +175,7 @@ pub fn seed_user_cell(rpc: &mut FakeRpcClient, capacity: u64) {
 
 pub fn seed_process_cell(rpc: &mut FakeRpcClient) -> OutPoint {
     let cell = CellOutputEx::new_from_scripts(
-        dest_script(),
+        process_lock_script(),
         Some(process_type_script()),
         vec![],
         Some(CKB_CAPACITY),
@@ -170,11 +189,15 @@ pub fn seed_process_cell(rpc: &mut FakeRpcClient) -> OutPoint {
 pub fn seed_typed_dummy_cell(rpc: &mut FakeRpcClient) -> OutPoint {
     let dummy_type = process_type_script()
         .as_builder()
-        .args(b"not-process".to_vec().pack())
+        .args(type_id_args(b"not-process").pack())
         .build();
-    let cell =
-        CellOutputEx::new_from_scripts(dest_script(), Some(dummy_type), vec![], Some(CKB_CAPACITY))
-            .expect("dummy typed cell");
+    let cell = CellOutputEx::new_from_scripts(
+        process_lock_script(),
+        Some(dummy_type),
+        vec![],
+        Some(CKB_CAPACITY),
+    )
+    .expect("dummy typed cell");
     let out = fake_outpoint();
     rpc.insert_fake_cell(out.clone(), cell, Some(fake_header_view(3, 3, 3)));
     out

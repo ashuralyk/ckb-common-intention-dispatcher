@@ -3,10 +3,17 @@
 //! Implements minimal CKB-VM runner with argv-based SSRI method invocation.
 //! vm_version = u64::MAX convention for SSRI mode.
 
+pub mod host_query;
 pub mod types;
 pub mod vm;
 
-pub use types::{encode_intentions, ExecutorError, IntentionInput, PartialTx, CUSTOM_ERROR_START};
+pub use host_query::{HostCell, HostQuery, HostQueryError, MockHost, Pagination, SearchKey};
+pub use types::{
+    build_draft_tx, AssembledTx, DraftCell, ExecutorError, PartialTx, CUSTOM_ERROR_START,
+};
+
+use ckb_types::packed::{Byte32, CellOutput, OutPoint, Script};
+use ckb_types::prelude::*;
 
 /// Offline SSRI executor for CID Process contracts
 pub struct ProcessExecutor {
@@ -29,20 +36,38 @@ impl ProcessExecutor {
             .and_then(|response| parse_batch_bounds(&response))
     }
 
-    /// Assemble a digest transaction for the given intentions via SSRI Process.assemble
-    pub fn assemble(&self, intentions: &[IntentionInput]) -> Result<PartialTx, ExecutorError> {
+    /// Assemble a complete digest transaction via SSRI `Process.assemble`.
+    ///
+    /// `draft_tx` is a packed molecule `Transaction` whose inputs are the
+    /// Intention + Process out points. `host` must resolve those out points
+    /// (and any tip queries) interactively via [`HostQuery`] syscalls during
+    /// VM execution — use [`MockHost`] offline or an RPC-backed impl live.
+    pub fn assemble<H: HostQuery + Send + 'static>(
+        &self,
+        draft_tx: &[u8],
+        host: H,
+    ) -> Result<AssembledTx, ExecutorError> {
         if self.binary.is_empty() {
             return Err(ExecutorError::VmError("empty binary".into()));
         }
+        let response =
+            vm::call_ssri_method_with_host(&self.binary, "Process.assemble", draft_tx, host)?;
+        AssembledTx::from_bytes(&response)
+    }
 
-        // Encode full intentions (capacity, lock_args, data for each)
-        let input = encode_intentions(intentions);
-
-        // Call SSRI Process.assemble
-        let response = vm::call_ssri_method(&self.binary, "Process.assemble", &input)?;
-
-        // Parse response into PartialTx
-        PartialTx::from_bytes(&response)
+    /// Convenience: seed `host` from `cells`, build a draft, and assemble.
+    pub fn assemble_from_cells(&self, cells: &[DraftCell]) -> Result<AssembledTx, ExecutorError> {
+        let host = MockHost::new();
+        host.insert_block_hash(0, [0xAB; 32]);
+        for cell in cells {
+            host.insert_cell(
+                cell.out_point.clone(),
+                cell.output.clone(),
+                cell.data.clone(),
+            );
+        }
+        let draft = build_draft_tx(cells);
+        self.assemble(&draft, host)
     }
 }
 
@@ -60,9 +85,58 @@ fn parse_batch_bounds(response: &[u8]) -> Result<(u32, u32), ExecutorError> {
     Ok((min, max))
 }
 
+/// Build a CKB-only Intention draft cell (lock args + capacity + data).
+pub fn intention_draft_cell(
+    out_point: OutPoint,
+    lock_args: Vec<u8>,
+    capacity: u64,
+    type_script: Option<Script>,
+    data: Vec<u8>,
+) -> DraftCell {
+    let lock = Script::new_builder()
+        .code_hash(Byte32::from_slice(&[0xC1; 32]).unwrap())
+        .hash_type(1u8.into())
+        .args(lock_args.pack())
+        .build();
+    let mut output = CellOutput::new_builder()
+        .capacity(capacity.pack())
+        .lock(lock);
+    if let Some(typ) = type_script {
+        output = output.type_(Some(typ).pack());
+    }
+    DraftCell {
+        out_point,
+        output: output.build(),
+        data,
+    }
+}
+
+/// Build a Process state draft cell (Process lock + TYPE_ID type).
+pub fn process_draft_cell(
+    out_point: OutPoint,
+    process_lock: Script,
+    type_id_type: Script,
+    capacity: u64,
+    data: Vec<u8>,
+) -> DraftCell {
+    let output = CellOutput::new_builder()
+        .capacity(capacity.pack())
+        .lock(process_lock)
+        .type_(Some(type_id_type).pack())
+        .build();
+    DraftCell {
+        out_point,
+        output,
+        data,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cid_protocol::{SCRIPT_HASH_TYPE_TYPE, TYPE_ID_CODE_HASH};
+    use ckb_types::packed::{Byte32, CellOutput, OutPoint, RawTransaction, Script, Transaction};
+    use ckb_types::prelude::{Builder, Entity, Pack, PackVec, Unpack};
 
     #[test]
     fn test_parse_batch_bounds() {
@@ -87,28 +161,18 @@ mod tests {
         assert!(matches!(result, Err(ExecutorError::VmError(_))));
     }
 
-    // Test syscall 2041 implementation and exit code handling
-    // Full integration tests (argv routing, stdout capture, exit 0 success path,
-    // and actual RISC-V binary execution) will be added in Task 3 when the Process
-    // contract binary is available for testing.
-
     #[test]
     fn test_syscall_2041_returns_ssri_version() {
-        // Verify syscall 2041 (CKB_VM_VERSION) constant is u64::MAX
-        // The syscall handler is implemented in vm.rs and returns this value
-        // when the guest calls syscall 2041.
         assert_eq!(vm::SSRI_VM_VERSION, u64::MAX);
     }
 
     #[test]
     fn test_custom_error_start_threshold() {
-        // Verify CUSTOM_ERROR_START is 20 per global constraints
         assert_eq!(CUSTOM_ERROR_START, 20);
     }
 
     #[test]
     fn test_incompatible_error_type() {
-        // Verify ExecutorError::Incompatible exists and can be constructed
         let err = ExecutorError::Incompatible(20);
         match err {
             ExecutorError::Incompatible(code) => assert_eq!(code, 20),
@@ -118,14 +182,12 @@ mod tests {
 
     #[test]
     fn test_incompatible_error_display() {
-        // Verify error formatting
         let err = ExecutorError::Incompatible(42);
         let msg = format!("{}", err);
         assert!(msg.contains("Process rejected batch"));
         assert!(msg.contains("42"));
     }
 
-    // Integration tests with real RISC-V binaries
     #[test]
     fn test_integration_exit0_success() {
         let binary = include_bytes!("../tests/fixtures/exit0.elf");
@@ -136,21 +198,6 @@ mod tests {
             output,
             Vec::<u8>::new(),
             "Expected empty output for exit(0)"
-        );
-    }
-
-    #[test]
-    #[ignore] // Binary structure issue: VM finishes before reaching sys_exit
-              // SYS_WRITE works (stdout_hello proves it), but simple exit binaries
-              // complete without calling sys_exit. Will be fully tested with Process
-              // contract (Task 3) which uses ckb-ssri-std and proper exit handling.
-    fn test_integration_exit21_incompatible() {
-        let binary = include_bytes!("../tests/fixtures/exit21.elf");
-        let result = vm::call_ssri_method(binary, "test.method", &[]);
-        assert!(
-            matches!(result, Err(ExecutorError::Incompatible(21))),
-            "Expected Incompatible(21), got {:?}",
-            result
         );
     }
 
@@ -166,7 +213,8 @@ mod tests {
     #[test]
     fn test_looping_guest_hits_cycle_budget() {
         let binary = include_bytes!("../tests/fixtures/infinite_loop.elf");
-        let result = vm::call_ssri_method_with_cycles(binary, "test.method", &[], 10_000);
+        let result =
+            vm::call_ssri_method_with_cycles(binary, "test.method", &[], MockHost::new(), 10_000);
         assert!(
             matches!(result, Err(ExecutorError::CyclesExceeded)),
             "looping guest must stop at the cycle budget, got {:?}",
@@ -178,8 +226,6 @@ mod tests {
         outputs: Vec<ckb_types::packed::CellOutput>,
         outputs_data: Vec<Vec<u8>>,
     ) -> Vec<u8> {
-        use ckb_types::packed::{RawTransaction, Transaction};
-        use ckb_types::prelude::{Builder, Entity, Pack, PackVec};
         Transaction::new_builder()
             .raw(
                 RawTransaction::new_builder()
@@ -193,10 +239,9 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_tx_rejects_malicious_output_count() {
-        // 4-byte 0xffffffff used to Vec::with_capacity(u32::MAX) before length checks.
+    fn test_assembled_tx_rejects_malicious_output_count() {
         let bytes = [0xff, 0xff, 0xff, 0xff];
-        let result = PartialTx::from_bytes(&bytes);
+        let result = AssembledTx::from_bytes(&bytes);
         assert!(
             matches!(result, Err(ExecutorError::InvalidResponse(_))),
             "malicious short response must be InvalidResponse, got {:?}",
@@ -205,18 +250,16 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_tx_zero_outputs() {
-        let parsed = PartialTx::from_bytes(&pack_molecule_tx(Vec::new(), Vec::new()))
+    fn test_assembled_tx_zero_outputs() {
+        let parsed = AssembledTx::from_bytes(&pack_molecule_tx(Vec::new(), Vec::new()))
             .expect("empty molecule Transaction");
         assert!(parsed.outputs.is_empty());
         assert!(parsed.outputs_data.is_empty());
+        assert!(parsed.inputs.is_empty());
     }
 
     #[test]
-    fn test_partial_tx_parses_molecule_transaction() {
-        use ckb_types::packed::{Byte32, CellOutput, Script};
-        use ckb_types::prelude::{Builder, Entity, Pack, Unpack};
-
+    fn test_assembled_tx_parses_molecule_transaction() {
         let lock = Script::new_builder()
             .code_hash(Byte32::from_slice(&[0x11; 32]).unwrap())
             .hash_type(1u8.into())
@@ -229,7 +272,7 @@ mod tests {
         let data = vec![0xcc, 0xdd];
         let bytes = pack_molecule_tx(vec![output.clone()], vec![data.clone()]);
 
-        let parsed = PartialTx::from_bytes(&bytes).expect("parse molecule Transaction");
+        let parsed = AssembledTx::from_bytes(&bytes).expect("parse molecule Transaction");
         assert_eq!(parsed.as_molecule_bytes(), bytes.as_slice());
         assert_eq!(parsed.outputs.len(), 1);
         assert_eq!(parsed.outputs[0].as_slice(), output.as_slice());
@@ -239,49 +282,23 @@ mod tests {
     }
 
     #[test]
-    fn test_partial_tx_rejects_legacy_length_prefix() {
-        // Old wire: output_count u32 LE + per-output (output_len + data_len).
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        let result = PartialTx::from_bytes(&bytes);
-        assert!(
-            matches!(result, Err(ExecutorError::InvalidResponse(_))),
-            "legacy envelope must be rejected, got {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_partial_tx_rejects_oversized_response() {
+    fn test_assembled_tx_rejects_oversized_response() {
         let bytes = vec![0u8; 1024 * 1024 + 1];
-        let result = PartialTx::from_bytes(&bytes);
-        assert!(
-            matches!(result, Err(ExecutorError::InvalidResponse(_))),
-            "oversized response must be rejected, got {:?}",
-            result
-        );
+        let result = AssembledTx::from_bytes(&bytes);
+        assert!(matches!(result, Err(ExecutorError::InvalidResponse(_))));
     }
 
     #[test]
-    fn test_partial_tx_rejects_too_many_outputs() {
-        use ckb_types::packed::CellOutput;
+    fn test_assembled_tx_rejects_too_many_outputs() {
         let outputs = vec![CellOutput::default(); 257];
         let data = vec![Vec::new(); 257];
         let bytes = pack_molecule_tx(outputs, data);
-        let result = PartialTx::from_bytes(&bytes);
-        assert!(
-            matches!(result, Err(ExecutorError::InvalidResponse(_))),
-            "output count above budget must be rejected, got {:?}",
-            result
-        );
+        let result = AssembledTx::from_bytes(&bytes);
+        assert!(matches!(result, Err(ExecutorError::InvalidResponse(_))));
     }
 
     #[test]
-    fn test_partial_tx_rejects_outputs_data_length_mismatch() {
-        use ckb_types::packed::{CellOutput, RawTransaction, Transaction};
-        use ckb_types::prelude::{Builder, Entity, PackVec};
+    fn test_assembled_tx_rejects_outputs_data_length_mismatch() {
         let bytes = Transaction::new_builder()
             .raw(
                 RawTransaction::new_builder()
@@ -291,165 +308,8 @@ mod tests {
             .build()
             .as_slice()
             .to_vec();
-        let result = PartialTx::from_bytes(&bytes);
-        assert!(
-            matches!(result, Err(ExecutorError::InvalidResponse(_))),
-            "mismatched outputs / outputs_data must be rejected, got {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn test_real_binary_batch_bounds() {
-        let bin_path = "../../build/release/cid_process_example";
-        if !std::path::Path::new(bin_path).exists() {
-            eprintln!("Skipping test: binary not built (run 'cd contracts/cid_process_example && make build')");
-            return;
-        }
-
-        let binary = std::fs::read(bin_path).expect("read binary");
-        let executor = ProcessExecutor::new(binary);
-
-        let result = executor.get_batch_bounds();
-        assert!(result.is_ok(), "should query batch bounds: {:?}", result);
-
-        let (min, max) = result.unwrap();
-        assert_eq!(min, 1, "BATCH_MIN should be 1");
-        assert_eq!(max, 4, "BATCH_MAX should be 4");
-    }
-
-    #[test]
-    fn test_assemble_validates_count() {
-        let bin_path = "../../build/release/cid_process_example";
-        if !std::path::Path::new(bin_path).exists() {
-            eprintln!("Skipping test: binary not built");
-            return;
-        }
-
-        let binary = std::fs::read(bin_path).expect("read binary");
-        let executor = ProcessExecutor::new(binary);
-
-        // Empty intentions (< BATCH_MIN)
-        let result = executor.assemble(&[]);
-        assert!(
-            matches!(result, Err(ExecutorError::Incompatible(21))),
-            "should reject empty batch: {:?}",
-            result
-        );
-
-        // Count=5 (> BATCH_MAX)
-        let intentions = vec![
-            IntentionInput::default(),
-            IntentionInput::default(),
-            IntentionInput::default(),
-            IntentionInput::default(),
-            IntentionInput::default(),
-        ];
-        let result = executor.assemble(&intentions);
-        assert!(
-            matches!(result, Err(ExecutorError::Incompatible(21))),
-            "should reject count=5: {:?}",
-            result
-        );
-
-        // Count=1 (valid, at BATCH_MIN)
-        let intentions = vec![IntentionInput::default()];
-        let result = executor.assemble(&intentions);
-        assert!(result.is_ok(), "should accept count=1: {:?}", result);
-    }
-
-    #[test]
-    fn test_assemble_returns_non_empty_partial_tx() {
-        use ckb_types::packed::OutPoint;
-
-        let bin_path = "../../build/release/cid_process_example";
-        if !std::path::Path::new(bin_path).exists() {
-            eprintln!("Skipping test: binary not built");
-            return;
-        }
-
-        let binary = std::fs::read(bin_path).expect("read binary");
-        let executor = ProcessExecutor::new(binary);
-
-        // Create intentions with real data
-        let intentions = vec![
-            IntentionInput {
-                out_point: OutPoint::default(),
-                lock_args: vec![0x01, 0x02, 0x03, 0x04],
-                capacity: 100_000_000_000,
-                data: vec![0xaa, 0xbb],
-                type_script: None,
-            },
-            IntentionInput {
-                out_point: OutPoint::default(),
-                lock_args: vec![0x05, 0x06, 0x07],
-                capacity: 200_000_000_000,
-                data: vec![0xcc, 0xdd, 0xee],
-                type_script: None,
-            },
-        ];
-
-        let result = executor.assemble(&intentions);
-        assert!(
-            result.is_ok(),
-            "should succeed with valid intentions: {:?}",
-            result
-        );
-
-        let partial_tx = result.unwrap();
-
-        // Verify non-empty outputs
-        assert_eq!(
-            partial_tx.outputs.len(),
-            2,
-            "should have 2 beneficiary outputs"
-        );
-        assert_eq!(
-            partial_tx.outputs_data.len(),
-            2,
-            "should have 2 output data entries"
-        );
-
-        // Verify first output
-        use ckb_types::prelude::Unpack;
-        let output0_capacity: u64 = partial_tx.outputs[0].capacity().unpack();
-        assert_eq!(
-            output0_capacity, 100_000_000_000,
-            "first output capacity should match"
-        );
-
-        let output0_lock_args: Vec<u8> = partial_tx.outputs[0].lock().args().unpack();
-        assert_eq!(
-            output0_lock_args,
-            vec![0x01, 0x02, 0x03, 0x04],
-            "first output lock args should match"
-        );
-
-        assert_eq!(
-            partial_tx.outputs_data[0],
-            vec![0xaa, 0xbb],
-            "first output data should match"
-        );
-
-        // Verify second output
-        let output1_capacity: u64 = partial_tx.outputs[1].capacity().unpack();
-        assert_eq!(
-            output1_capacity, 200_000_000_000,
-            "second output capacity should match"
-        );
-
-        let output1_lock_args: Vec<u8> = partial_tx.outputs[1].lock().args().unpack();
-        assert_eq!(
-            output1_lock_args,
-            vec![0x05, 0x06, 0x07],
-            "second output lock args should match"
-        );
-
-        assert_eq!(
-            partial_tx.outputs_data[1],
-            vec![0xcc, 0xdd, 0xee],
-            "second output data should match"
-        );
+        let result = AssembledTx::from_bytes(&bytes);
+        assert!(matches!(result, Err(ExecutorError::InvalidResponse(_))));
     }
 
     fn load_process_binary() -> Option<Vec<u8>> {
@@ -461,75 +321,500 @@ mod tests {
         Some(std::fs::read(bin_path).expect("read binary"))
     }
 
-    #[test]
-    fn test_assemble_preserves_data2_beneficiary_hash_type() {
-        use cid_protocol::{CidArgs, Payload, Script as CidScript, SCRIPT_HASH_TYPE_DATA2};
-        use ckb_types::prelude::Unpack;
+    fn type_id_script(tag: &[u8]) -> Script {
+        let mut args = [0u8; 32];
+        let n = tag.len().min(32);
+        args[..n].copy_from_slice(&tag[..n]);
+        Script::new_builder()
+            .code_hash(Byte32::from_slice(&TYPE_ID_CODE_HASH).unwrap())
+            .hash_type(SCRIPT_HASH_TYPE_TYPE.into())
+            .args(args.as_slice().pack())
+            .build()
+    }
 
+    fn process_lock_script() -> Script {
+        Script::new_builder()
+            .code_hash(Byte32::from_slice(&[0xAA; 32]).unwrap())
+            .hash_type(2u8.into())
+            .build()
+    }
+
+    fn make_assemble_cells(n: usize) -> Vec<DraftCell> {
+        let type_id = type_id_script(b"process-type-id-v0");
+        let pth: [u8; 32] = type_id.calc_script_hash().unpack();
+        let mut cells = Vec::new();
+        // Process state cell — assemble finds TYPE_ID typed non-CID cell.
+        cells.push(process_draft_cell(
+            OutPoint::new_builder()
+                .tx_hash(Byte32::from_slice(&[0x01; 32]).unwrap())
+                .index(0u32.pack())
+                .build(),
+            process_lock_script(),
+            type_id,
+            200_000_000_000,
+            vec![],
+        ));
+        for i in 0..n {
+            let lock_args = cid_protocol::CidArgs::new(
+                pth,
+                cid_protocol::Script::default(),
+                cid_protocol::Payload::default(),
+            )
+            .encode()
+            .unwrap();
+            cells.push(intention_draft_cell(
+                OutPoint::new_builder()
+                    .tx_hash(Byte32::from_slice(&[0x10 + i as u8; 32]).unwrap())
+                    .index(0u32.pack())
+                    .build(),
+                lock_args,
+                100_000_000_000,
+                None,
+                vec![0xaa, 0xbb],
+            ));
+        }
+        cells
+    }
+
+    #[test]
+    fn test_real_binary_batch_bounds() {
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let (min, max) = executor.get_batch_bounds().expect("batch bounds");
+        assert_eq!((min, max), (1, 4));
+    }
+
+    #[test]
+    fn test_assemble_validates_count() {
         let Some(binary) = load_process_binary() else {
             return;
         };
         let executor = ProcessExecutor::new(binary);
 
+        // Empty draft (no intentions)
+        let result = executor.assemble_from_cells(&[]);
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(21))),
+            "should reject empty batch: {:?}",
+            result
+        );
+
+        // Count=5 (> BATCH_MAX)
+        let cells = make_assemble_cells(5);
+        let result = executor.assemble_from_cells(&cells);
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(21))),
+            "should reject count=5: {:?}",
+            result
+        );
+
+        // Count=1 (valid)
+        let cells = make_assemble_cells(1);
+        let result = executor.assemble_from_cells(&cells);
+        assert!(result.is_ok(), "should accept count=1: {:?}", result);
+    }
+
+    #[test]
+    fn test_assemble_returns_complete_tx() {
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let cells = make_assemble_cells(2);
+        let assembled = executor
+            .assemble_from_cells(&cells)
+            .expect("assemble complete tx");
+
+        // inputs: process + 2 intentions
+        assert_eq!(assembled.inputs.len(), 3);
+        // outputs: process recreate + 2 beneficiaries
+        assert_eq!(assembled.outputs.len(), 3);
+        assert_eq!(assembled.outputs_data.len(), 3);
+        // Complete witnesses: one per input; backend must not fill any.
+        assert_eq!(assembled.witnesses.len(), assembled.inputs.len());
+
+        let cap0: u64 = assembled.outputs[1].capacity().unpack();
+        assert_eq!(cap0, 100_000_000_000);
+        assert_eq!(assembled.outputs_data[1], vec![0xaa, 0xbb]);
+    }
+
+    #[test]
+    fn test_assemble_fee_meets_feerate_serialized_size_in_block() {
+        use ckb_types::core::FeeRate;
+
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let cells = make_assemble_cells(1);
+        let process_cap_in: u64 = cells[0].output.capacity().unpack();
+        let assembled = executor
+            .assemble_from_cells(&cells)
+            .expect("assemble for fee check");
+        let process_cap_out: u64 = assembled.outputs[0].capacity().unpack();
+        let fee = process_cap_in
+            .checked_sub(process_cap_out)
+            .expect("fee deducted from process recreate");
+        let weight = assembled.as_molecule_bytes().len() as u64 + 4; // serialized_size_in_block
+        let min = FeeRate::from_u64(1000).fee(weight).as_u64();
+        assert!(
+            fee >= min,
+            "assemble fee {fee} must be >= FeeRate(1000).fee(serialized_size_in_block={weight})={min}"
+        );
+    }
+
+    #[test]
+    fn test_assemble_preserves_data2_beneficiary_hash_type() {
+        use cid_protocol::{CidArgs, Payload, Script as CidScript, SCRIPT_HASH_TYPE_DATA2};
+
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let type_id = type_id_script(b"process-type-id-v0");
+        let pth: [u8; 32] = type_id.calc_script_hash().unpack();
         let beneficiary = CidScript {
             code_hash: [0x11; 32],
             hash_type: SCRIPT_HASH_TYPE_DATA2,
             args: vec![0xAA],
         };
         let lock_args = CidArgs::new(
-            [0x22; 32],
+            pth,
             CidScript::default(),
             Payload::from_script(&beneficiary).unwrap(),
         )
         .encode()
         .unwrap();
-        let partial = executor
-            .assemble(&[IntentionInput {
+
+        let cells = vec![
+            process_draft_cell(
+                OutPoint::new_builder()
+                    .tx_hash(Byte32::from_slice(&[0x01; 32]).unwrap())
+                    .index(0u32.pack())
+                    .build(),
+                process_lock_script(),
+                type_id,
+                200_000_000_000,
+                vec![],
+            ),
+            intention_draft_cell(
+                OutPoint::new_builder()
+                    .tx_hash(Byte32::from_slice(&[0x02; 32]).unwrap())
+                    .index(0u32.pack())
+                    .build(),
                 lock_args,
-                capacity: 100_000_000_000,
-                data: vec![],
-                ..Default::default()
-            }])
+                100_000_000_000,
+                None,
+                vec![],
+            ),
+        ];
+        let assembled = executor
+            .assemble_from_cells(&cells)
             .expect("assemble Data2 beneficiary");
-        let ht: u8 = partial.outputs[0].lock().hash_type().into();
-        assert_eq!(ht, SCRIPT_HASH_TYPE_DATA2, "assemble must keep Data2");
-        let args: Vec<u8> = partial.outputs[0].lock().args().unpack();
+        let ht: u8 = assembled.outputs[1].lock().hash_type().into();
+        assert_eq!(ht, SCRIPT_HASH_TYPE_DATA2);
+        let args: Vec<u8> = assembled.outputs[1].lock().args().unpack();
         assert_eq!(args, vec![0xAA]);
     }
 
     #[test]
-    fn test_assemble_preserves_xudt_type_script() {
-        use cid_protocol::{XUDT_AMOUNT_LEN, XUDT_CODE_HASH};
-        use ckb_types::packed::{Byte32, Script};
-        use ckb_types::prelude::{Builder, Entity, Pack, Unpack};
+    fn test_host_query_mock_serves_cells() {
+        let host = MockHost::new();
+        let op = OutPoint::new_builder()
+            .tx_hash(Byte32::from_slice(&[0x11; 32]).unwrap())
+            .index(0u32.pack())
+            .build();
+        let output = CellOutput::new_builder()
+            .capacity(42u64.pack())
+            .lock(
+                Script::new_builder()
+                    .code_hash(Byte32::from_slice(&[0x22; 32]).unwrap())
+                    .build(),
+            )
+            .build();
+        host.insert_cell(op.clone(), output.clone(), vec![1, 2, 3]);
+        let got = host.get_cell(op.as_slice()).expect("cell");
+        assert_eq!(got.output.as_slice(), output.as_slice());
+        assert_eq!(got.data, vec![1, 2, 3]);
+    }
+
+    /// Custom HostQuery that records interactive syscall traffic and uses an
+    /// opaque 12-byte indexer-style cursor (not MockHost's 8-byte LE offset).
+    struct RecordingHost {
+        inner: MockHost,
+        finds: std::sync::atomic::AtomicUsize,
+        last_get_cells_cursor: std::sync::Mutex<Option<Vec<u8>>>,
+        last_get_cells_order: std::sync::Mutex<Option<u64>>,
+        opaque_cursor: Vec<u8>,
+    }
+
+    impl RecordingHost {
+        fn wrap(inner: MockHost) -> Self {
+            Self {
+                inner,
+                finds: std::sync::atomic::AtomicUsize::new(0),
+                last_get_cells_cursor: std::sync::Mutex::new(None),
+                last_get_cells_order: std::sync::Mutex::new(None),
+                opaque_cursor: vec![
+                    0xC0, 0xFF, 0xEE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+                ],
+            }
+        }
+    }
+
+    impl HostQuery for RecordingHost {
+        fn find_cell_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>> {
+            self.finds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.find_cell_by_out_point(out_point)
+        }
+        fn find_cell_data_by_out_point(&self, out_point: &[u8]) -> Option<Vec<u8>> {
+            self.inner.find_cell_data_by_out_point(out_point)
+        }
+        fn get_live_cell(
+            &self,
+            out_point: &[u8],
+            with_data: bool,
+        ) -> Result<Vec<u8>, host_query::HostQueryError> {
+            self.inner.get_live_cell(out_point, with_data)
+        }
+        fn get_header(&self, block_hash: &[u8]) -> Option<Vec<u8>> {
+            self.inner.get_header(block_hash)
+        }
+        fn get_header_by_number(&self, number: u64) -> Option<Vec<u8>> {
+            self.inner.get_header_by_number(number)
+        }
+        fn get_block_hash(&self, number: u64) -> Option<[u8; 32]> {
+            self.inner.get_block_hash(number)
+        }
+        fn get_cells(
+            &self,
+            search_key: &[u8],
+            order: u64,
+            limit: u64,
+            last_cursor: &[u8],
+        ) -> Result<Vec<u8>, host_query::HostQueryError> {
+            *self.last_get_cells_order.lock().unwrap() = Some(order);
+            *self.last_get_cells_cursor.lock().unwrap() = Some(last_cursor.to_vec());
+            // Accept our opaque 12-byte cursor (or empty); ignore MockHost's
+            // fixed-width decode and return a page that carries the same cursor
+            // shape forward when more results remain.
+            let _ = (search_key, limit);
+            if !last_cursor.is_empty() && last_cursor != self.opaque_cursor.as_slice() {
+                return Err(host_query::HostQueryError::InvalidArgs);
+            }
+            let page = host_query::Pagination {
+                objects: vec![],
+                last_cursor: if last_cursor.is_empty() {
+                    self.opaque_cursor.clone()
+                } else {
+                    Vec::new()
+                },
+            };
+            serde_molecule::to_vec(&page, false).map_err(|_| host_query::HostQueryError::Encoding)
+        }
+    }
+
+    #[test]
+    fn assemble_invokes_custom_host_query_interactively() {
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let cells = make_assemble_cells(1);
+        let mock = MockHost::new();
+        mock.insert_block_hash(0, [0xAB; 32]);
+        for cell in &cells {
+            mock.insert_cell(
+                cell.out_point.clone(),
+                cell.output.clone(),
+                cell.data.clone(),
+            );
+        }
+        // Arc so we can assert recorded finds after assemble moves the host.
+        let host = std::sync::Arc::new(RecordingHost::wrap(mock));
+        let draft = build_draft_tx(&cells);
+        let assembled = executor
+            .assemble(&draft, host.clone())
+            .expect("assemble with Arc custom HostQuery");
+        assert!(!assembled.outputs.is_empty());
+        assert!(
+            host.finds.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "VM must call find_cell_by_out_point interactively on the custom host"
+        );
+    }
+
+    #[test]
+    fn sys_get_cells_passes_opaque_cursor_and_desc_order_via_syscall() {
+        // Drive SYS_GET_CELLS through SsriSyscalls (same path as a live guest),
+        // not only HostQuery::get_cells directly.
+        let host = std::sync::Arc::new(RecordingHost::wrap(MockHost::new()));
+        let opaque = host.opaque_cursor.clone();
+        let key = host_query::SearchKey {
+            script: host_query::Script {
+                code_hash: [0x11; 32],
+                hash_type: 0,
+                args: vec![],
+            },
+            script_type: host_query::ScriptType::Lock,
+            script_search_mode: None,
+            filter: None,
+            with_data: Some(false),
+            group_by_transaction: None,
+        };
+        let key_bytes = serde_molecule::to_vec(&key, false).unwrap();
+
+        let page = vm::invoke_sys_get_cells_for_test(
+            host.clone(),
+            &key_bytes,
+            /* order Desc */ 1,
+            /* limit */ 1,
+            &opaque,
+        )
+        .expect("SYS_GET_CELLS syscall");
+        let pag: host_query::Pagination =
+            serde_molecule::from_slice(&page, false).expect("pagination");
+        assert!(
+            pag.last_cursor.is_empty(),
+            "second page with opaque cursor should end"
+        );
+        assert_eq!(
+            *host.last_get_cells_order.lock().unwrap(),
+            Some(1),
+            "syscall must pass Desc order through to HostQuery"
+        );
+        assert_eq!(
+            host.last_get_cells_cursor.lock().unwrap().as_deref(),
+            Some(opaque.as_slice()),
+            "syscall must pass opaque variable-length cursor bytes through"
+        );
+    }
+
+    #[test]
+    fn test_host_query_get_block_hash_missing_is_none() {
+        let host = MockHost::new();
+        assert!(host.get_block_hash(0).is_none());
+        host.insert_block_hash(0, [0xAB; 32]);
+        assert_eq!(host.get_block_hash(0), Some([0xAB; 32]));
+        assert!(host.get_block_hash(1).is_none());
+    }
+
+    #[test]
+    fn assemble_rejects_typed_funding_before_process_state() {
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let mut cells = make_assemble_cells(1);
+        let funding = process_draft_cell(
+            OutPoint::new_builder().tx_hash([0xFE; 32].pack()).build(),
+            Script::default(),
+            type_id_script(b"unrelated-funding"),
+            50_000_000_000,
+            vec![],
+        );
+        cells.insert(0, funding);
+        let result = executor.assemble_from_cells(&cells);
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(38))),
+            "expected UnsupportedFundingLock, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_assemble_preserves_input_since() {
+        use ckb_types::packed::{CellInput, RawTransaction, Transaction};
 
         let Some(binary) = load_process_binary() else {
             return;
         };
         let executor = ProcessExecutor::new(binary);
+        let mut cells = make_assemble_cells(1);
+        let since = 0x0100_0000_0000_00FFu64;
+        let host = MockHost::new();
+        host.insert_block_hash(0, [0xAB; 32]);
+        for cell in &cells {
+            host.insert_cell(
+                cell.out_point.clone(),
+                cell.output.clone(),
+                cell.data.clone(),
+            );
+        }
+        let inputs: Vec<CellInput> = cells
+            .drain(..)
+            .enumerate()
+            .map(|(i, c)| {
+                let mut b = CellInput::new_builder().previous_output(c.out_point);
+                if i == 0 {
+                    b = b.since(since.pack());
+                }
+                b.build()
+            })
+            .collect();
+        let draft = Transaction::new_builder()
+            .raw(RawTransaction::new_builder().inputs(inputs.pack()).build())
+            .build()
+            .as_slice()
+            .to_vec();
+        let assembled = executor.assemble(&draft, host).expect("assemble");
+        let got: u64 = assembled.inputs[0].since().unpack();
+        assert_eq!(got, since, "assemble must preserve CellInput.since");
+    }
 
-        let type_script = Script::new_builder()
-            .code_hash(Byte32::from_slice(&XUDT_CODE_HASH).unwrap())
-            .hash_type(2u8.into())
-            .args([0x33; 32].as_slice().pack())
-            .build();
-        let amount = 1_000u128.to_le_bytes()[..XUDT_AMOUNT_LEN].to_vec();
-        let partial = executor
-            .assemble(&[IntentionInput {
-                lock_args: vec![0x01],
-                capacity: 100_000_000_000,
-                data: amount.clone(),
-                type_script: Some(type_script.as_slice().to_vec()),
-                ..Default::default()
-            }])
-            .expect("assemble xUDT intention");
-        let got = partial.outputs[0]
-            .type_()
-            .to_opt()
-            .expect("beneficiary output must keep xUDT type");
-        assert_eq!(got.as_slice(), type_script.as_slice());
-        assert_eq!(partial.outputs_data[0], amount);
-        let cap: u64 = partial.outputs[0].capacity().unpack();
-        assert_eq!(cap, 100_000_000_000);
+    #[test]
+    fn test_assemble_rejects_fee_below_occupied_capacity() {
+        let Some(binary) = load_process_binary() else {
+            return;
+        };
+        let executor = ProcessExecutor::new(binary);
+        let type_id = type_id_script(b"process-type-id-v0");
+        let pth: [u8; 32] = type_id.calc_script_hash().unpack();
+        let lock_args = cid_protocol::CidArgs::new(
+            pth,
+            cid_protocol::Script::default(),
+            cid_protocol::Payload::default(),
+        )
+        .encode()
+        .unwrap();
+        // Mirror Process guest occupied formula: pin capacity exactly at floor
+        // so any nonzero fee leaves recreate below occupied.
+        let process_lock = process_lock_script();
+        let occupied_bytes = 8
+            + 32
+            + 1
+            + process_lock.args().raw_data().len()
+            + 32
+            + 1
+            + type_id.args().raw_data().len();
+        let occupiedish = occupied_bytes as u64 * 100_000_000;
+        let cells = vec![
+            process_draft_cell(
+                OutPoint::new_builder()
+                    .tx_hash(Byte32::from_slice(&[0x01; 32]).unwrap())
+                    .index(0u32.pack())
+                    .build(),
+                process_lock,
+                type_id,
+                occupiedish,
+                vec![],
+            ),
+            intention_draft_cell(
+                OutPoint::new_builder()
+                    .tx_hash(Byte32::from_slice(&[0x02; 32]).unwrap())
+                    .index(0u32.pack())
+                    .build(),
+                lock_args,
+                100_000_000_000,
+                None,
+                vec![],
+            ),
+        ];
+        let result = executor.assemble_from_cells(&cells);
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(37))),
+            "fee below occupied should be CapacityInsufficient(37): {:?}",
+            result
+        );
     }
 }

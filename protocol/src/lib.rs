@@ -9,6 +9,10 @@
 
 extern crate alloc;
 
+mod host_query;
+
+pub use host_query::{is_type_id_script, SCRIPT_HASH_TYPE_TYPE, TYPE_ID_CODE_HASH};
+
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
