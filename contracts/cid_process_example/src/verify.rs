@@ -1,11 +1,13 @@
 extern crate alloc;
 
+use crate::classify::{classify_live_intention, filter_reason_to_process_error};
 use crate::{Context, ProcessError};
 use alloc::vec;
 use alloc::vec::Vec;
+use cid_intention_filter::FILTER_ACCEPTED;
 use cid_protocol::{
     is_standard_xudt, is_type_id_script, CidArgs, Script as CidScript, PROCESS_TYPE_HASH_LEN,
-    XUDT_AMOUNT_LEN,
+    SCRIPT_HASH_TYPE_TYPE, XUDT_AMOUNT_LEN,
 };
 use ckb_cinnabar_verifier::{
     this_script_indices, this_script_pattern, Result, ScriptPattern, ScriptPlace, Verification,
@@ -151,6 +153,8 @@ fn collect_output_obligations(
     // Process state cell — not the Process lock script hash.
     let our_type_hash = our_process_type_id()?;
     let digest_ok_hashes = type_hashes_in_both_io()?;
+    // Single expected CID Type ID for this batch (same SoT as filter/assemble).
+    let cid_tid = resolve_expected_cid_type_id(&our_type_hash)?;
 
     let mut ours = Vec::new();
     let mut obligations = Vec::new();
@@ -168,30 +172,42 @@ fn collect_output_obligations(
         let Ok(cid) = CidArgs::decode(&args) else {
             continue;
         };
-        let ours_prefix = cid.process_type_hash == our_type_hash;
         let digest_ok = digest_ok_hashes.iter().any(|h| h == &cid.process_type_hash);
 
         if digest_ok {
-            let transfer = match parse_payment(i, &cid) {
-                Ok(Some(t)) => t,
-                Ok(None) if ours_prefix => return Err(ProcessError::BeneficiaryMissing),
-                Ok(None) => continue,
-                Err(e) => return Err(e),
-            };
-            // Deposit floor is Process-local: only this Process's Intentions.
-            // Deposit minimum is Process-local (`ours_prefix`), same rule as filter.
-            if ours_prefix
-                && !crate::deposit::ckb_deposit_capacity_ok(
-                    transfer.capacity,
-                    transfer.type_script.is_some(),
-                )
-            {
-                return Err(ProcessError::DepositBelowMinimum);
-            }
-            if ours_prefix {
+            if cid.process_type_hash == our_type_hash {
+                // Ours: shared classify_intention (ownership + deposit + asset + digest).
+                let capacity = load_cell_capacity(i, Source::Input)
+                    .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let data = load_cell_data(i, Source::Input)
+                    .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let type_script = load_cell_type(i, Source::Input)
+                    .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let reason = classify_live_intention(
+                    &our_type_hash,
+                    &cid_tid,
+                    &lock,
+                    capacity,
+                    type_script.as_ref(),
+                    &data,
+                );
+                if reason != FILTER_ACCEPTED {
+                    return Err(filter_reason_to_process_error(reason)
+                        .unwrap_or(ProcessError::IncompatibleBatch));
+                }
+                let transfer = match parse_payment(i, &cid)? {
+                    Some(t) => t,
+                    None => return Err(ProcessError::BeneficiaryMissing),
+                };
                 ours.push(transfer.clone());
+                obligations.push(transfer);
+            } else {
+                // Other Process's DigestOk Intention: keep prior obligation collection.
+                match parse_payment(i, &cid)? {
+                    Some(t) => obligations.push(t),
+                    None => continue,
+                }
             }
-            obligations.push(transfer);
         } else {
             // Refund branch (DigestIncompatible and TimeoutBurn): unique-assign
             // the user_lock output, never the payload. TimeoutBurn still requires
@@ -205,6 +221,45 @@ fn collect_output_obligations(
     }
 
     Ok((ours, obligations))
+}
+
+/// Expected CID lock code Type ID for this Process's Intentions.
+///
+/// Among Type-hash Intention locks whose `process_type_hash` matches this
+/// Process, all `code_hash` values must agree; that common value is the
+/// batch's CID Type ID (same single-source check assemble gets from the
+/// Sequencer prefix). Mixed Type IDs in one batch are rejected. When no
+/// Type-hash ours Intention is present, returns `[0; 32]` so classify fails
+/// closed on WrongCodeHash / WrongHashType.
+fn resolve_expected_cid_type_id(
+    our_type_hash: &[u8; 32],
+) -> core::result::Result<[u8; 32], ProcessError> {
+    let mut expected: Option<[u8; 32]> = None;
+    for i in 0.. {
+        let lock = match load_cell_lock(i, Source::Input) {
+            Ok(lock) => lock,
+            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
+            Err(_) => return Err(ProcessError::ProcessPairInvalid),
+        };
+        let hash_type: u8 = lock.hash_type().into();
+        if hash_type != SCRIPT_HASH_TYPE_TYPE {
+            continue;
+        }
+        let args = lock.args().raw_data();
+        let Ok(cid) = CidArgs::decode(&args) else {
+            continue;
+        };
+        if &cid.process_type_hash != our_type_hash {
+            continue;
+        }
+        let code: [u8; 32] = lock.code_hash().unpack();
+        match expected {
+            None => expected = Some(code),
+            Some(prev) if prev != code => return Err(ProcessError::IncompatibleBatch),
+            Some(_) => {}
+        }
+    }
+    Ok(expected.unwrap_or([0u8; 32]))
 }
 
 /// TYPE_ID type-script hash of this Process state cell (lock group).

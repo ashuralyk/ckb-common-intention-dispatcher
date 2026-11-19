@@ -150,7 +150,10 @@ pub fn decode_filter_response(bytes: &[u8]) -> Result<Vec<i8>, CodecError> {
         return Err(CodecError::Decode);
     }
     let end = off.checked_add(count).ok_or(CodecError::TooShort)?;
-    if bytes.len() != end {
+    if bytes.len() < end {
+        return Err(CodecError::TooShort);
+    }
+    if bytes.len() > end {
         return Err(CodecError::Decode);
     }
     Ok(bytes[off..end].iter().map(|b| *b as i8).collect())
@@ -160,6 +163,7 @@ pub fn decode_filter_response(bytes: &[u8]) -> Result<Vec<i8>, CodecError> {
 mod tests {
     use super::*;
     use alloc::vec;
+    use cid_protocol::CodecError;
 
     #[test]
     fn request_roundtrip_empty() {
@@ -197,5 +201,77 @@ mod tests {
         let reasons = vec![FILTER_ACCEPTED, FILTER_PROCESS_MISMATCH];
         let resp = encode_filter_response(&reasons).unwrap();
         assert_eq!(decode_filter_response(&resp).unwrap(), reasons);
+    }
+
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        let req = FilterRequest {
+            process_type_hash: [0x11; 32],
+            cid_code_type_id_hash: [0x22; 32],
+            cells: vec![],
+        };
+        let mut bytes = encode_filter_request(&req).unwrap();
+        bytes.push(0xFF);
+        assert_eq!(decode_filter_request(&bytes), Err(CodecError::Decode));
+    }
+
+    #[test]
+    fn decode_rejects_oversize_count() {
+        let mut bytes = vec![0u8; 64];
+        bytes.extend_from_slice(&(FILTER_MAX_CELLS + 1).to_le_bytes());
+        assert_eq!(decode_filter_request(&bytes), Err(CodecError::Decode));
+    }
+
+    #[test]
+    fn decode_rejects_truncated_after_count() {
+        let mut bytes = vec![0u8; 64];
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        // count=1 but no cell payloads
+        assert_eq!(decode_filter_request(&bytes), Err(CodecError::TooShort));
+    }
+
+    #[test]
+    fn decode_rejects_truncated_length_prefix() {
+        let mut bytes = vec![0u8; 64];
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2]); // claims 4 bytes, only 2 follow
+        assert_eq!(decode_filter_request(&bytes), Err(CodecError::TooShort));
+    }
+
+    #[test]
+    fn decode_rejects_short_header() {
+        assert_eq!(decode_filter_request(&[0u8; 63]), Err(CodecError::TooShort));
+    }
+
+    #[test]
+    fn decode_rejects_length_overflow_on_offset() {
+        let mut bytes = vec![0u8; 64];
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        // out_point length = u32::MAX → checked_add fails
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(decode_filter_request(&bytes), Err(CodecError::TooShort));
+    }
+
+    #[test]
+    fn decode_response_rejects_trailing_bytes() {
+        let mut resp = encode_filter_response(&[FILTER_ACCEPTED]).unwrap();
+        resp.push(0);
+        assert_eq!(decode_filter_response(&resp), Err(CodecError::Decode));
+    }
+
+    #[test]
+    fn decode_response_rejects_truncated() {
+        assert_eq!(
+            decode_filter_response(&[1, 0, 0, 0]), // count=1, no reason byte
+            Err(CodecError::TooShort)
+        );
+    }
+
+    #[test]
+    fn decode_response_rejects_oversize_count() {
+        let mut bytes = (FILTER_MAX_CELLS + 1).to_le_bytes().to_vec();
+        bytes.extend(core::iter::repeat_n(0u8, (FILTER_MAX_CELLS + 1) as usize));
+        assert_eq!(decode_filter_response(&bytes), Err(CodecError::Decode));
     }
 }

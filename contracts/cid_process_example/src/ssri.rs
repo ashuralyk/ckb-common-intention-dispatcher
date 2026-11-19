@@ -6,7 +6,10 @@ use crate::classify::{
 use crate::host::{self, HostCell};
 use crate::ProcessError;
 use alloc::vec::Vec;
-use cid_intention_filter::{decode_filter_request, encode_filter_response, FILTER_ACCEPTED};
+use cid_intention_filter::{
+    decode_filter_request, encode_filter_response, read_capped_from, FILTER_ACCEPTED,
+    FILTER_STDIN_MAX,
+};
 use cid_protocol::CidArgs;
 use ckb_cinnabar_verifier::ssri::{SsriArgs, SsriSource};
 use ckb_std::ckb_types::packed::{Byte32, Bytes, CellOutput, RawTransaction, Script, Transaction};
@@ -14,8 +17,8 @@ use ckb_std::ckb_types::prelude::*;
 
 const BATCH_MIN: u32 = 1;
 const BATCH_MAX: u32 = 4;
-/// Stdin budget for `Process.filter` (larger than assemble tip drafts).
-const FILTER_STDIN_MAX: usize = 64 * 1024;
+/// Assemble stdin prefix: expected CID lock code Type ID script hash.
+const ASSEMBLE_CID_TID_LEN: usize = 32;
 
 /// Process-owned fee rate (shannons per kB), matching testnet `min_fee_rate`.
 const FEE_RATE: u64 = 1000;
@@ -82,16 +85,25 @@ struct IntentionView {
 
 /// SSRI handler for Process.assemble
 ///
-/// Stdin: packed molecule `Transaction` draft (Intention + Process state inputs;
-/// caller supplies cell_deps the Process documents — CID, Process, and any xUDT
-/// code). Guest resolves inputs via host queries and returns a complete
-/// molecule `Transaction` the backend submits unchanged.
+/// Stdin: `cid_code_type_id_hash[32] ||` packed molecule `Transaction` draft
+/// (Intention + Process state inputs; caller supplies cell_deps the Process
+/// documents — CID, Process, and any xUDT code). The 32-byte prefix is the same
+/// expected CID Type ID the Sequencer passes to `Process.filter` — every
+/// Intention is classified against that single value (not each cell's own
+/// `lock.code_hash`). Guest resolves inputs via host queries and returns a
+/// complete molecule `Transaction` the backend submits unchanged.
 pub fn assemble_handler(
     _src: &SsriSource,
     _args: SsriArgs,
 ) -> core::result::Result<Vec<u8>, ProcessError> {
-    let draft_bytes = read_stdin()?;
-    let draft = Transaction::from_slice(&draft_bytes).map_err(|_| ProcessError::ReadFailed)?;
+    let raw_stdin = read_stdin()?;
+    if raw_stdin.len() < ASSEMBLE_CID_TID_LEN {
+        return Err(ProcessError::ReadFailed);
+    }
+    let mut cid_tid = [0u8; 32];
+    cid_tid.copy_from_slice(&raw_stdin[..ASSEMBLE_CID_TID_LEN]);
+    let draft = Transaction::from_slice(&raw_stdin[ASSEMBLE_CID_TID_LEN..])
+        .map_err(|_| ProcessError::ReadFailed)?;
     let raw = draft.raw();
 
     let mut loaded = Vec::new();
@@ -140,12 +152,12 @@ pub fn assemble_handler(
         .ok_or(ProcessError::ReadFailed)?;
     let process_type_hash: [u8; 32] = typ.calc_script_hash().unpack();
 
-    // Same classification as Process.filter (ownership + deposit + asset + digest).
+    // Same classification as Process.filter: one expected CID Type ID for the
+    // whole batch (Sequencer-supplied prefix), ownership + deposit + asset + digest.
     let mut intentions = Vec::with_capacity(intention_idxs.len());
     for &idx in &intention_idxs {
         let item = &loaded[idx];
         let lock = item.cell.output.lock();
-        let cid_tid: [u8; 32] = lock.code_hash().unpack();
         let capacity: u64 = item.cell.output.capacity().unpack();
         let type_script = item.cell.output.type_().to_opt();
         let reason = classify_live_intention(
@@ -275,21 +287,11 @@ fn read_stdin() -> Result<Vec<u8>, ProcessError> {
 }
 
 fn read_stdin_capped(max: usize) -> Result<Vec<u8>, ProcessError> {
-    let mut input_buf = alloc::vec![0u8; max];
-    let mut total_read = 0;
-    loop {
-        let read_result = ckb_std::syscalls::read(0, &mut input_buf[total_read..])
-            .map_err(|_| ProcessError::ReadFailed)?;
-        if read_result == 0 {
-            break;
-        }
-        total_read += read_result;
-        if total_read >= input_buf.len() {
-            return Err(ProcessError::ReadFailed);
-        }
-    }
-    input_buf.truncate(total_read);
-    Ok(input_buf)
+    // Accept exactly `max` bytes; reject only payloads larger than `max`.
+    read_capped_from(max, |dst| {
+        ckb_std::syscalls::read(0, dst).map_err(|_| cid_intention_filter::CappedReadError::Read)
+    })
+    .map_err(|_| ProcessError::ReadFailed)
 }
 
 fn beneficiary_lock(lock_args: Vec<u8>) -> Script {
