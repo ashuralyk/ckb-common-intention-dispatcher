@@ -133,13 +133,18 @@ Request JSON (no secrets):
 }
 ```
 
-Cell layout: Process lock = Process code Type ID (`hash_type=type`, distinct
-`process_lock_args`); type = built-in TYPE_ID from first input + output index;
-data empty. Fee is `floor(serialized_size_in_block × 1000 / 1000)` after change
-and 65-byte sighash placeholders (not pre-balance molecule length). Creation
-validates Process lock + TYPE_ID off-chain (Process lock Create does not run on
-output-only mint). `send` live-verifies **both** CID and Process code Type ID
-celldeps and fails closed on any dead celldep.
+Cell layout: Process lock = Process code Type ID (`hash_type=type`) with
+non-empty `process_lock_args` distinct per instance. The args must not use
+the CID Intention encoding. The state uses a built-in TYPE_ID derived from
+the first input and output index, with empty data. Both calculator entry
+points check the Process code dep and state capacity before adding the input.
+The state must reserve at least 1,000 shannons plus one shannon per lock-arg
+byte above occupied capacity for future digest fees. Reserve more for larger
+digest transactions.
+
+The mint fee is calculated from `serialized_size_in_block` at rate 1000
+after change and the 65-byte sighash placeholder are present. Funding must
+cover the state, occupied change, and the measured fee.
 
 Signed JSON includes `state_outpoint`, `identity_type_id` (TYPE_ID script hash =
 Intention `process_type_hash`), `process_type_script` (for Intention `create`),
@@ -154,9 +159,12 @@ and `registry_post` for `POST http://127.0.0.1:9101/v1/processes`:
 }
 ```
 
-`send` live-verifies the Process lock Type ID and the exact `cid_code_type_id`
-recorded in create-process metadata (not any other live TYPE_ID) before
-broadcast, and fails closed on dead celldeps.
+Keep the Process creation metadata when passing the artifact to `send`.
+The CLI checks the CID and Process code Type IDs against the first and
+second signed `cell_deps` outpoints, respectively, and rejects dead
+dependencies. It strips CLI metadata before submitting. Ordinary raw
+transactions continue to use the generic send path, including other
+TYPE_ID mints with a secp256k1 `dep_group`.
 
 ## Usage
 

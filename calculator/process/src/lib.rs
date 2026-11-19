@@ -7,14 +7,17 @@ use cid_protocol::{CidArgs, TYPE_ID_CODE_HASH};
 use ckb_cinnabar_calculator::{
     address::Address,
     instruction::Instruction,
-    operation::basic::{AddInputCellByAddress, AddInputCellByOutPoint, AddOutputCell},
+    operation::{
+        basic::{AddInputCellByAddress, AddInputCellByOutPoint, AddOutputCell},
+        Log, Operation,
+    },
     re_exports::ckb_types::{
-        core::ScriptHashType,
+        core::{DepType, ScriptHashType},
         packed::{CellDep, CellInput, CellOutput, OutPoint, RawTransaction, Script, Transaction},
-        prelude::{Builder, Entity, Pack, PackVec},
+        prelude::{Builder, Entity, Pack, PackVec, Unpack},
     },
     rpc::RPC,
-    skeleton::{CellDepEx, CellInputEx, ScriptEx, TransactionSkeleton, WitnessEx},
+    skeleton::{CellDepEx, CellInputEx, CellOutputEx, ScriptEx, TransactionSkeleton, WitnessEx},
     types::Hash256,
     CalculatorError, Result,
 };
@@ -39,17 +42,53 @@ pub fn process_lock(args: Vec<u8>) -> ScriptEx {
 /// Layout: Process code Type ID lock (`hash_type=type`) + built-in TYPE_ID type
 /// (args = blake2b(first_input ‖ le64(out_index))), empty data.
 ///
-/// Process lock Create does **not** run on-chain for output-only mints; callers
-/// must validate lock + TYPE_ID off-chain (CLI/`create_process_state_by_outpoint`).
+/// The instruction validates the Process code dependency and state lock before
+/// adding funding inputs. The Process lock does not run on-chain for output-only mints.
 pub fn create_process_state<T: RPC>(
     payer: Address,
     lock_args: Vec<u8>,
     capacity: u64,
 ) -> Instruction<T> {
-    Instruction::new(vec![
+    create_process_state_instruction(
         Box::new(AddInputCellByAddress { address: payer }),
+        lock_args,
+        capacity,
+    )
+}
+
+/// Create a Process state cell funded by an explicit outpoint (CLI / offline).
+///
+/// Uses the same layout and off-chain checks as the address-scanned entry.
+pub fn create_process_state_by_outpoint<T: RPC>(
+    funding: (Hash256, u32),
+    lock_args: Vec<u8>,
+    capacity: u64,
+) -> Instruction<T> {
+    create_process_state_instruction(
+        Box::new(AddInputCellByOutPoint {
+            tx_hash: funding.0,
+            index: funding.1,
+            since: None,
+        }),
+        lock_args,
+        capacity,
+    )
+}
+
+fn create_process_state_instruction<T: RPC>(
+    funding_input: Box<dyn Operation<T>>,
+    lock_args: Vec<u8>,
+    capacity: u64,
+) -> Instruction<T> {
+    let lock_script = process_lock(lock_args);
+    Instruction::new(vec![
+        Box::new(ValidateProcessCreate {
+            lock_script: lock_script.clone(),
+            capacity,
+        }),
+        funding_input,
         Box::new(AddOutputCell {
-            lock_script: process_lock(lock_args),
+            lock_script,
             type_script: None,
             data: Vec::new(),
             capacity,
@@ -59,31 +98,60 @@ pub fn create_process_state<T: RPC>(
     ])
 }
 
-/// Create a Process state cell funded by an explicit outpoint (CLI / offline).
-///
-/// Same cell layout as [`create_process_state`]. Caller must already have added
-/// the Process (and CID) code celldeps so `ScriptEx::Reference` resolves to a
-/// Type ID lock.
-pub fn create_process_state_by_outpoint<T: RPC>(
-    funding: (Hash256, u32),
-    lock_args: Vec<u8>,
+struct ValidateProcessCreate {
+    lock_script: ScriptEx,
     capacity: u64,
-) -> Instruction<T> {
-    Instruction::new(vec![
-        Box::new(AddInputCellByOutPoint {
-            tx_hash: funding.0,
-            index: funding.1,
-            since: None,
-        }),
-        Box::new(AddOutputCell {
-            lock_script: process_lock(lock_args),
-            type_script: None,
-            data: Vec::new(),
-            capacity,
-            absolute_capacity: true,
-            type_id: true,
-        }),
-    ])
+}
+
+impl<T: RPC> Operation<T> for ValidateProcessCreate {
+    fn run(
+        self: Box<Self>,
+        _rpc: &T,
+        skeleton: &mut TransactionSkeleton,
+        _log: &mut Log,
+    ) -> Result<()> {
+        let args = self.lock_script.args();
+        if args.is_empty() || CidArgs::decode(&args).is_ok() {
+            return Err(CalculatorError::Other(
+                "Process lock args must be non-empty and distinct from CID Intention encoding"
+                    .into(),
+            ));
+        }
+
+        let (_, dep) = skeleton
+            .find_celldep_by_script(&self.lock_script)
+            .ok_or_else(|| {
+                CalculatorError::CellDepNotFound("Process code cell dep is required".into())
+            })?;
+        let dep_type: u8 = dep.celldep.dep_type().into();
+        let type_script = dep.output.type_script().filter(|script| {
+            let hash_type: u8 = script.hash_type().into();
+            let code_hash: [u8; 32] = script.code_hash().unpack();
+            hash_type == ScriptHashType::Type as u8
+                && code_hash == TYPE_ID_CODE_HASH
+                && script.args().raw_data().len() == 32
+        });
+        let Some(type_script) = type_script.filter(|_| dep_type == DepType::Code as u8) else {
+            return Err(CalculatorError::Other(
+                "Process code dep must be a direct code cell with a built-in TYPE_ID script".into(),
+            ));
+        };
+
+        // The state TYPE_ID has the same occupied length as this code-cell TYPE_ID.
+        let lock = self.lock_script.clone().to_script(skeleton)?;
+        let occupied = CellOutputEx::new_from_scripts(lock, Some(type_script), vec![], None)?
+            .occupied_capacity()
+            .as_u64();
+        // At rate 1000, reserve a baseline of 1000 shannons plus one shannon per
+        // state lock arg byte. Larger future digest transactions can cost more.
+        let fee_reserve = CREATE_FEE_RATE + args.len() as u64;
+        if self.capacity.saturating_sub(occupied) < fee_reserve {
+            return Err(CalculatorError::InsufficientCapacity(format!(
+                "Process state needs at least {fee_reserve} shannons above occupied capacity for digest fees"
+            )));
+        }
+        Ok(())
+    }
 }
 
 type KnownCells = HashMap<Vec<u8>, (CellOutput, Vec<u8>)>;
@@ -675,6 +743,58 @@ mod tests {
             a
         };
         assert_eq!(got_args, expected_args);
+    }
+
+    #[test]
+    fn calculator_rejects_untyped_process_code() {
+        let funding_tx = [0x11u8; 32];
+        let process_code_tx = [0x22u8; 32];
+        let lock_args = b"instance-1".to_vec();
+
+        let mut rpc = FakeRpcClient::default();
+        let funding_lock = always_success_script(vec![0x01]);
+        let funding_cell =
+            CellOutputEx::new_from_scripts(funding_lock, None, vec![], Some(500_0000_0000u64))
+                .unwrap();
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(funding_tx).pack(), 0),
+            funding_cell,
+            None,
+        );
+        let code_cell =
+            CellOutputEx::new_from_scripts(Script::default(), None, vec![0xCAu8, 0xFE], None)
+                .unwrap();
+        rpc.insert_fake_cell(
+            OutPoint::new(H256(process_code_tx).pack(), 0),
+            code_cell,
+            None,
+        );
+
+        let mut skeleton = TransactionSkeleton::default();
+        let add_dep = Instruction::new(vec![Box::new(AddCellDep {
+            name: PROCESS_CONTRACT_NAME.into(),
+            tx_hash: h256_to_hash(&H256(process_code_tx)),
+            index: 0,
+            dep_type: CalcDepType::Code,
+            with_data: true,
+        })]);
+        TransactionCalculator::default()
+            .instruction(add_dep)
+            .apply_skeleton(&rpc, &mut skeleton)
+            .expect("add process code dep");
+
+        let create = create_process_state_by_outpoint(
+            (h256_to_hash(&H256(funding_tx)), 0),
+            lock_args.clone(),
+            DEFAULT_PROCESS_STATE_CAPACITY,
+        );
+        let result = TransactionCalculator::default()
+            .instruction(create)
+            .apply_skeleton(&rpc, &mut skeleton);
+        if result.is_ok() {
+            let hash_type: u8 = skeleton.outputs[0].lock_script().hash_type().into();
+            panic!("untyped code produced Process output with hash_type={hash_type}");
+        }
     }
 
     #[test]

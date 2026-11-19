@@ -575,3 +575,50 @@ async fn signed_intention_passes_sighash_vm_verification() {
         .is_ok();
     assert!(!bad_ok, "tampered tx must fail sighash VM verify");
 }
+
+#[test]
+fn process_lock_args_cannot_use_intention_format() {
+    let secret = key(0x42);
+    let mut process = fixture_process_request(&secret);
+    let intention = create_signed_intention(&fixture_request(&secret), &secret).unwrap();
+    process.process_lock_args = intention["outputs"][0]["lock"]["args"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(create_signed_process_state(&process, &secret).is_err());
+}
+
+#[test]
+fn process_funding_accepts_measured_fee_and_minimum_change() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    let normal = create_signed_process_state(&req, &secret).unwrap();
+    let fee = normal["fee_shannons"].as_u64().unwrap();
+    req.funding.capacity = req.process_capacity + 61_0000_0000 + fee;
+    let exact = create_signed_process_state_bundle(&req, &secret)
+        .expect("measured fee and 61 CKB change fit");
+    assert_eq!(exact.tx_json["fee_shannons"], fee);
+    assert_eq!(exact.skeleton.outputs[1].capacity_shannons(), 61_0000_0000);
+}
+
+#[test]
+fn process_requires_capacity_above_occupied_floor_for_guest_fee() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    let template = create_signed_process_state_bundle(&req, &secret).unwrap();
+    req.process_capacity = template.skeleton.outputs[0].occupied_capacity().as_u64();
+    assert!(
+        create_signed_process_state(&req, &secret).is_err(),
+        "process minted at its occupied floor: {} shannons",
+        req.process_capacity
+    );
+}
+
+#[test]
+fn create_process_rejects_duplicate_code_type_ids() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    req.cid_lock_dep.type_script = req.process_code_dep.type_script.clone();
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    assert!(matches!(err, CliError::InvalidRequest(msg) if msg.contains("distinct Type IDs")));
+}

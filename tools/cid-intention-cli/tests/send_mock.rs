@@ -350,9 +350,54 @@ fn create_process_output_sends_after_stripping_metadata() {
         network: "testnet".into(),
         genesis_hash: genesis,
     };
-    let hash = send_signed_transaction(&opts, &created).unwrap();
-    assert_eq!(hash, tx_hash);
+    for signed in [
+        created.clone(),
+        json!({"transaction": created.clone()}),
+        json!({"inner": {"transaction": created.clone()}}),
+    ] {
+        let hash = send_signed_transaction(&opts, &signed).unwrap();
+        assert_eq!(hash, tx_hash);
+    }
     assert!(*saw_send.lock().unwrap());
+    *saw_send.lock().unwrap() = false;
+
+    for field in [
+        "state_outpoint",
+        "identity_type_id",
+        "identity_type_id_args",
+        "process_type_script",
+        "registry_post",
+        "cid_code_type_id",
+        "cid_code_type_id_args",
+    ] {
+        let mut incomplete = created.clone();
+        incomplete.as_object_mut().unwrap().remove(field);
+        let err = send_signed_transaction(&opts, &incomplete).unwrap_err();
+        assert!(matches!(err, CliError::NetworkGuard(_)), "{field}: {err}");
+    }
+
+    for fields in [
+        ["state_outpoint", "tx_hash"],
+        ["process_type_script", "args"],
+        ["registry_post", "identity_type_id"],
+        ["registry_post", "identity_type_id_args"],
+        ["registry_post", "code_type_id"],
+        ["registry_post", "code_type_id_args"],
+    ] {
+        let mut inconsistent = created.clone();
+        inconsistent[fields[0]][fields[1]] = json!(h256(0xFE));
+        let err = send_signed_transaction(&opts, &inconsistent).unwrap_err();
+        assert!(
+            matches!(err, CliError::NetworkGuard(_)),
+            "{fields:?}: {err}"
+        );
+    }
+
+    let mut duplicate = created.clone();
+    duplicate["cell_deps"][1]["out_point"] = duplicate["cell_deps"][0]["out_point"].clone();
+    let err = send_signed_transaction(&opts, &duplicate).unwrap_err();
+    assert!(matches!(err, CliError::NetworkGuard(msg) if msg.contains("distinct outpoints")));
+    assert!(!*saw_send.lock().unwrap());
 }
 
 #[test]
@@ -793,4 +838,112 @@ fn cli_send_genesis_mismatch_prints_hashes_not_credentials() {
         !stderr.contains("details omitted"),
         "process path must not blank genesis diagnostics: {stderr}"
     );
+}
+
+#[test]
+fn raw_type_id_asset_with_secp_dep_group_sends() {
+    let genesis = h256(0xAB);
+    let tx_hash = h256(0xCD);
+    let genesis_c = genesis.clone();
+    let tx_hash_c = tx_hash.clone();
+    let saw_send = Arc::new(Mutex::new(false));
+    let saw_send_c = Arc::clone(&saw_send);
+    let saw_live = Arc::new(Mutex::new(false));
+    let saw_live_c = Arc::clone(&saw_live);
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, _params| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+            "get_block_hash" => json!(genesis_c.clone()),
+            "get_live_cell" => {
+                *saw_live_c.lock().unwrap() = true;
+                // Group cell itself has no TYPE_ID matching the secp type hash.
+                live_untyped_cell()
+            }
+            "send_transaction" => {
+                *saw_send_c.lock().unwrap() = true;
+                json!(tx_hash_c.clone())
+            }
+            _ => json!({"error": {"code": -1, "message": "unknown"}}),
+        },
+    ))));
+
+    let opts = SendOptions {
+        rpc_url: url,
+        network: "testnet".into(),
+        genesis_hash: genesis,
+    };
+    let mut tx = secp_type_dep_group_tx();
+    tx["outputs"][0]["capacity"] = json!("0x4a817c800");
+    use ckb_cinnabar_calculator::re_exports::{
+        ckb_hash::new_blake2b,
+        ckb_types::{packed::Transaction, prelude::*},
+    };
+    let packed: Transaction = serde_json::from_value::<ckb_jsonrpc_types::Transaction>(tx.clone())
+        .unwrap()
+        .into();
+    let mut hasher = new_blake2b();
+    hasher.update(packed.raw().inputs().get(0).unwrap().as_slice());
+    hasher.update(&0u64.to_le_bytes());
+    let mut args = [0u8; 32];
+    hasher.finalize(&mut args);
+    tx["outputs"][0]["type"] = json!({
+        "code_hash": "0x00000000000000000000000000000000000000000000000000545950455f4944",
+        "hash_type": "type",
+        "args": format!("0x{}", hex::encode(args)),
+    });
+    let hash = send_signed_transaction(&opts, &tx).unwrap();
+    assert_eq!(hash, tx_hash);
+    assert!(*saw_send.lock().unwrap(), "send_transaction must run");
+    assert!(
+        !*saw_live.lock().unwrap(),
+        "CID Type ID live-cell probe must not run for non-CID type locks"
+    );
+}
+
+#[test]
+fn process_create_rejects_cid_type_id_at_wrong_dep() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let created = create_signed_process_state(&req, &secret).unwrap();
+    let genesis = h256(0xAB);
+    let genesis_c = genesis.clone();
+    let unrelated_dep = req.sighash_deps[0].clone();
+    let cid_type = req.cid_lock_dep.type_script.clone().unwrap();
+    let process_tx = req.process_code_dep.tx_hash.clone();
+    let process_type = req.process_code_dep.type_script.clone().unwrap();
+    // The designated CID dep is untyped. Only another dep carries its expected Type ID.
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, params| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+            "get_block_hash" => json!(genesis_c.clone()),
+            "get_live_cell" => {
+                let op = &params.as_array().unwrap()[0];
+                let txh = op["tx_hash"].as_str().unwrap_or("");
+                if txh.eq_ignore_ascii_case(&process_tx) {
+                    live_typed_cell(&process_type)
+                } else if txh == unrelated_dep.tx_hash
+                    && op["index"] == format!("0x{:x}", unrelated_dep.index)
+                {
+                    live_typed_cell(&cid_type)
+                } else {
+                    live_untyped_cell()
+                }
+            }
+            "send_transaction" => json!(h256(0xFF)),
+            _ => json!({"error": {"code": -1, "message": "unknown"}}),
+        },
+    ))));
+    let opts = SendOptions {
+        rpc_url: url,
+        network: "testnet".into(),
+        genesis_hash: genesis,
+    };
+    let err = send_signed_transaction(&opts, &created).unwrap_err();
+    match err {
+        CliError::NetworkGuard(msg) => assert!(
+            msg.contains("CID code Type ID") || msg.contains("cid_code_type_id"),
+            "{msg}"
+        ),
+        other => panic!("expected NetworkGuard, got {other:?}"),
+    }
 }

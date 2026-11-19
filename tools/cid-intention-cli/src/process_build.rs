@@ -35,6 +35,11 @@ use crate::fee::{
 use crate::hexutil::{decode_hash32, decode_hex, encode_hex};
 use crate::request::{CreateProcessRequest, NamedDep, ScriptJson};
 
+// Positions in the signed transaction produced by create-process.
+pub(crate) const CID_CODE_DEP_INDEX: usize = 0;
+pub(crate) const PROCESS_CODE_DEP_INDEX: usize = 1;
+pub(crate) const PROCESS_STATE_OUTPUT_INDEX: usize = 0;
+
 fn network_of(s: &str) -> Result<Network, CliError> {
     match s.to_ascii_lowercase().as_str() {
         "testnet" => Ok(Network::Testnet),
@@ -236,6 +241,11 @@ pub fn create_signed_process_state_bundle(
     };
     let process_code_type = require_code_type_id_script(&req.process_code_dep, "process_code_dep")?;
     let process_code_type_hash = script_hash32(&process_code_type);
+    if cid_code_type_id == process_code_type_hash {
+        return Err(CliError::InvalidRequest(
+            "CID and Process code deps must have distinct Type IDs".into(),
+        ));
+    }
     let process_code_type_id_args = {
         let raw = process_code_type.args().raw_data();
         let mut a = [0u8; 32];
@@ -254,17 +264,10 @@ pub fn create_signed_process_state_bundle(
     } else {
         req.process_capacity
     };
-    if capacity < DEFAULT_PROCESS_STATE_CAPACITY / 10 {
-        // Fail closed on absurd dust; 30 CKB still covers occupied + fee headroom.
-        return Err(CliError::InvalidRequest(
-            "process_capacity too small for a live Process state cell".into(),
-        ));
-    }
-
     let lock_args = decode_hex(&req.process_lock_args)?;
-    if lock_args.is_empty() {
+    if lock_args.is_empty() || cid_protocol::CidArgs::decode(&lock_args).is_ok() {
         return Err(CliError::InvalidRequest(
-            "process_lock_args must be non-empty (distinct per Process instance)".into(),
+            "process_lock_args must be non-empty and distinct from CID Intention encoding".into(),
         ));
     }
 
@@ -276,12 +279,10 @@ pub fn create_signed_process_state_bundle(
         return Err(CliError::LockKeyMismatch);
     }
 
-    // Change needs a realistic minimum; require funding covers state + fee headroom + 61 CKB dust.
+    // The exact fee is calculated after installing the sighash placeholder.
     const MIN_CHANGE: u64 = 61_0000_0000;
-    const FEE_HEADROOM: u64 = 1_000_000; // 0.01 CKB covers >1KB at rate 1000
     let need = capacity
-        .checked_add(FEE_HEADROOM)
-        .and_then(|v| v.checked_add(MIN_CHANGE))
+        .checked_add(MIN_CHANGE)
         .ok_or(CliError::InsufficientFunds)?;
     if req.funding.capacity < need {
         return Err(CliError::InsufficientFunds);
@@ -404,7 +405,7 @@ pub fn create_signed_process_state_bundle(
         .apply_skeleton(&rpc, &mut skeleton)
         .map_err(|e| CliError::Calculator(e.to_string()))?;
 
-    let state_out = &skeleton.outputs[0];
+    let state_out = &skeleton.outputs[PROCESS_STATE_OUTPUT_INDEX];
     if state_out.capacity_shannons() != capacity {
         return Err(CliError::Calculator("process capacity mismatch".into()));
     }
@@ -446,7 +447,7 @@ pub fn create_signed_process_state_bundle(
         ));
     }
     let expected_type_id_args = skeleton
-        .calc_type_id(0)
+        .calc_type_id(PROCESS_STATE_OUTPUT_INDEX)
         .map_err(|e| CliError::Calculator(e.to_string()))?;
     let mut identity_type_id_args = [0u8; 32];
     identity_type_id_args.copy_from_slice(&typ.args().raw_data());
@@ -463,6 +464,19 @@ pub fn create_signed_process_state_bundle(
     }
     let (paid_fee, _) = assert_fee_covers_rate(&skeleton, CREATE_FEE_RATE)?;
 
+    for (index, dep) in [
+        (CID_CODE_DEP_INDEX, &req.cid_lock_dep),
+        (PROCESS_CODE_DEP_INDEX, &req.process_code_dep),
+    ] {
+        let expected = outpoint(&dep.tx_hash, dep.index)?;
+        if skeleton.celldeps.get(index).map(|d| d.celldep.out_point()) != Some(expected) {
+            return Err(CliError::Calculator(format!(
+                "unexpected {} position in Process create cell_deps",
+                dep.name
+            )));
+        }
+    }
+
     let view = skeleton.clone().into_transaction_view();
     let tx_hash = view.hash();
     let json_tx = ckb_jsonrpc_types::TransactionView::from(view);
@@ -470,7 +484,7 @@ pub fn create_signed_process_state_bundle(
 
     let state_outpoint = json!({
         "tx_hash": encode_hex(tx_hash.as_slice()),
-        "index": 0u32,
+        "index": PROCESS_STATE_OUTPUT_INDEX as u32,
     });
     let registry_post = json!({
         "identity_type_id_args": encode_hex(&identity_type_id_args),
