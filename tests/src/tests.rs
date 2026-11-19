@@ -23,11 +23,10 @@ use ckb_cinnabar_calculator::{
 };
 use ckb_common_intention_dispatcher_calculator::{
     cid_lock, create_intention, digest_incompatible, digest_ok, encode_cid_args, timeout_burn,
-    Payload, DEFAULT_MIN_INTENTION_CAPACITY, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING,
-    ERROR_MIXED_CID_LOCK, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH,
-    ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED,
-    ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET, MAX_REFUND_FEE, TIMEOUT_BLOCKS,
-    XUDT_CODE_HASH,
+    Payload, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING, ERROR_MIXED_CID_LOCK, ERROR_PARTIAL_DIGEST,
+    ERROR_PROCESS_MISMATCH, ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING,
+    ERROR_TIMEOUT_NOT_REACHED, ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET,
+    MAX_REFUND_FEE, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
 };
 
 use crate::faker::{
@@ -103,12 +102,8 @@ async fn create_ckb_intention_skeleton() {
     seed_user_cell(&mut rpc, CKB_CAPACITY);
     let mut skeleton = prepared_skeleton(&rpc);
     let args = cid_args(process_type_hash(), b"hello");
-    let ix = create_intention::<FakeRpcClient>(
-        user_address(),
-        args.clone(),
-        DEFAULT_MIN_INTENTION_CAPACITY - 1,
-        None,
-    );
+    // Request below occupied: create bumps to occupied only (no protocol floor).
+    let ix = create_intention::<FakeRpcClient>(user_address(), args.clone(), 1, None);
     TransactionCalculator::default()
         .instruction(ix)
         .apply_skeleton(&rpc, &mut skeleton)
@@ -118,7 +113,12 @@ async fn create_ckb_intention_skeleton() {
     let out = &skeleton.outputs[0];
     assert!(out.data.is_empty(), "CKB Intention data is empty");
     assert!(out.type_script().is_none(), "CKB Intention has no type");
-    assert_eq!(out.capacity_shannons(), DEFAULT_MIN_INTENTION_CAPACITY);
+    let occupied = out
+        .output
+        .occupied_capacity(Capacity::bytes(out.data.len()).unwrap())
+        .unwrap()
+        .as_u64();
+    assert_eq!(out.capacity_shannons(), occupied);
     let expected = cid_lock(args).to_script(&skeleton).expect("cid lock");
     assert_eq!(out.lock_script().as_slice(), expected.as_slice());
 
@@ -150,7 +150,7 @@ async fn create_xudt_intention_skeleton() {
     let ix = create_intention::<FakeRpcClient>(
         user_address(),
         args,
-        DEFAULT_MIN_INTENTION_CAPACITY,
+        1, // below occupied; create bumps to occupied only
         Some((xudt.clone(), XUDT_AMOUNT)),
     );
     TransactionCalculator::default()
@@ -166,7 +166,7 @@ async fn create_xudt_intention_skeleton() {
         .occupied_capacity(Capacity::bytes(out.data.len()).unwrap())
         .unwrap()
         .as_u64();
-    assert!(occupied > DEFAULT_MIN_INTENTION_CAPACITY);
+    assert!(occupied > 1);
     assert_eq!(out.capacity_shannons(), occupied);
     let typ = out.type_script().expect("xUDT type");
     assert_eq!(typ.code_hash().as_slice(), XUDT_CODE_HASH.as_slice());

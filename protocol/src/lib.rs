@@ -42,61 +42,6 @@ pub const TIMEOUT_BLOCKS: u64 = 10800;
 /// avoids a v0.1 encoding/version break.
 pub const MAX_REFUND_FEE: u64 = 1_000_000;
 
-/// Default minimum Intention cell capacity (shannons): **500 CKB**.
-///
-/// Policy floor for Intention creates and for Process CKB-deposit minima
-/// (`min_deposit > DEFAULT_MIN_INTENTION_CAPACITY`). Off-chain create paths
-/// size each Intention to `max(requested, this floor, occupied)` so the cell
-/// is always createable even when lock args / xUDT push occupied above the
-/// floor (e.g. multisig×multisig ≈ 338 CKB, blake160+xUDT ≈ 329 CKB,
-/// blake160 with 256-byte beneficiary args ≈ 484 CKB). Shapes whose occupied
-/// capacity exceeds this floor still work via the occupied bump; the floor
-/// remains the value deposit policies compare against.
-///
-/// Dual-written: CLI / calculator create sizing, and Process deposit-policy
-/// validation. Intention Create does **not** run on-chain CID Verify.
-pub const DEFAULT_MIN_INTENTION_CAPACITY: u64 = 500_0000_0000;
-
-/// Example Process (`cid_process_example`) CKB deposit minimum: **600 CKB**.
-///
-/// Single source of truth for on-chain Verify/assemble and the host calculator.
-/// Strictly greater than [`DEFAULT_MIN_INTENTION_CAPACITY`]. Creation may raise
-/// the effective capacity further to cover the cell's occupied capacity.
-pub const EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY: u64 = 600_0000_0000;
-
-const _: () = assert!(EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY > DEFAULT_MIN_INTENTION_CAPACITY);
-
-/// True when a Process CKB-deposit minimum is **strictly greater** than
-/// [`DEFAULT_MIN_INTENTION_CAPACITY`].
-///
-/// Process authors: for every CKB deposit action fulfilled by consuming an
-/// Intention's capacity, declare a `min_deposit` above the create floor.
-/// The concrete cell's occupied capacity can still require a larger deposit.
-pub const fn deposit_min_satisfies_intention_floor(min_deposit: u64) -> bool {
-    min_deposit > DEFAULT_MIN_INTENTION_CAPACITY
-}
-
-/// Process-author contract for CKB deposits funded by consuming an Intention.
-///
-/// Set [`CkbDepositPolicy::MIN_DEPOSIT_CAPACITY`] above the Intention floor.
-/// Reference [`CkbDepositPolicy::ASSERT_ABOVE_INTENTION_FLOOR`] (or call
-/// [`assert_ckb_deposit_policy`]) so the check is evaluated at compile time.
-pub trait CkbDepositPolicy {
-    /// Minimum CKB capacity (shannons) accepted for a deposit Intention.
-    const MIN_DEPOSIT_CAPACITY: u64;
-
-    /// Compile-time guard: `MIN_DEPOSIT_CAPACITY > DEFAULT_MIN_INTENTION_CAPACITY`.
-    /// Force evaluation with `const _: () = Self::ASSERT_ABOVE_INTENTION_FLOOR;`.
-    const ASSERT_ABOVE_INTENTION_FLOOR: () = assert!(deposit_min_satisfies_intention_floor(
-        Self::MIN_DEPOSIT_CAPACITY
-    ));
-}
-
-/// Evaluate [`CkbDepositPolicy::ASSERT_ABOVE_INTENTION_FLOOR`] for `P`.
-pub const fn assert_ckb_deposit_policy<P: CkbDepositPolicy>() {
-    let () = P::ASSERT_ABOVE_INTENTION_FLOOR;
-}
-
 /// True when a DigestIncompatible refund output's CKB capacity is within the
 /// per-Intention fee ceiling (token amount/type checked separately):
 /// - `got <= want` (no capacity inflation on the refund cell)
@@ -308,30 +253,6 @@ mod tests {
         };
         let payload = Payload::from_script(&script).unwrap();
         assert_eq!(payload.to_script().unwrap(), script);
-    }
-
-    #[test]
-    fn deposit_min_must_exceed_intention_floor() {
-        assert!(!deposit_min_satisfies_intention_floor(
-            DEFAULT_MIN_INTENTION_CAPACITY
-        ));
-        assert!(!deposit_min_satisfies_intention_floor(
-            DEFAULT_MIN_INTENTION_CAPACITY.saturating_sub(1)
-        ));
-        assert!(deposit_min_satisfies_intention_floor(
-            DEFAULT_MIN_INTENTION_CAPACITY + 1
-        ));
-        assert!(deposit_min_satisfies_intention_floor(
-            EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY
-        ));
-        const _: () = assert!(DEFAULT_MIN_INTENTION_CAPACITY == 500_0000_0000);
-        const _: () = assert!(EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY == 600_0000_0000);
-        const _: () = assert_ckb_deposit_policy::<ExamplePolicyProbe>();
-    }
-
-    struct ExamplePolicyProbe;
-    impl CkbDepositPolicy for ExamplePolicyProbe {
-        const MIN_DEPOSIT_CAPACITY: u64 = EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY;
     }
 
     #[test]

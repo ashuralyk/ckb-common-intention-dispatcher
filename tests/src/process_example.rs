@@ -5,7 +5,7 @@ use std::path::Path;
 use cid_process_example_calculator::{
     assembled_tx_round_trip_bytes, process_digest_ok, process_digest_ok_with_extras,
     process_digest_ok_with_process, AssembleExtras, DraftCellDep, IntentionCell, ProcessStateCell,
-    DEFAULT_MIN_INTENTION_CAPACITY, MIN_DEPOSIT_CAPACITY, PROCESS_CONTRACT_NAME,
+    MIN_DEPOSIT_CAPACITY, PROCESS_CONTRACT_NAME,
 };
 use ckb_cinnabar_calculator::{
     address::{Address, AddressPayload},
@@ -529,7 +529,6 @@ async fn transfer_matching_beneficiary_succeeds() {
 #[tokio::test]
 async fn deposit_fulfilled_by_consuming_intention() {
     require_binaries();
-    const _: () = assert!(MIN_DEPOSIT_CAPACITY > DEFAULT_MIN_INTENTION_CAPACITY);
     let mut rpc = FakeRpcClient::default();
     let skeleton = apply_transfer(&mut rpc, dest_lock(), MIN_DEPOSIT_CAPACITY, vec![]);
     assert_eq!(
@@ -547,10 +546,10 @@ async fn deposit_fulfilled_by_consuming_intention() {
         .expect("deposit via Intention consume must pass on-chain");
 }
 
-/// Rejection: Intention capacity at the protocol Intention floor but below the
-/// Process deposit minimum cannot DigestOk.
+/// Rejection: createable Intention capacity below the Process deposit minimum
+/// cannot DigestOk.
 #[tokio::test]
-async fn reject_deposit_at_or_below_intention_capacity_floor() {
+async fn reject_deposit_below_process_minimum() {
     require_binaries();
     let mut rpc = FakeRpcClient::default();
     let mut skeleton = prepared_process_skeleton(&rpc);
@@ -558,16 +557,9 @@ async fn reject_deposit_at_or_below_intention_capacity_floor() {
     let process_hash = process_example_type_hash(&type_script);
     let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
     let args = beneficiary_args(process_hash, &dest_script());
-    // Exactly DEFAULT_MIN_INTENTION_CAPACITY: createable Intention, but below
-    // Process MIN_DEPOSIT_CAPACITY.
-    let intention = seed_intention(
-        &mut rpc,
-        &skeleton,
-        args,
-        DEFAULT_MIN_INTENTION_CAPACITY,
-        None,
-        PACK_BLOCK,
-    );
+    // Well above typical occupied capacity, but below Process MIN_DEPOSIT.
+    let below_min = MIN_DEPOSIT_CAPACITY / 2;
+    let intention = seed_intention(&mut rpc, &skeleton, args, below_min, None, PACK_BLOCK);
 
     let ix = digest_ok::<FakeRpcClient>(
         outpoint_ids(&intention),
@@ -576,7 +568,7 @@ async fn reject_deposit_at_or_below_intention_capacity_floor() {
             lock_script: dest_lock(),
             type_script: None,
             data: vec![],
-            capacity: DEFAULT_MIN_INTENTION_CAPACITY,
+            capacity: below_min,
             absolute_capacity: true,
             type_id: false,
         }),
@@ -587,7 +579,7 @@ async fn reject_deposit_at_or_below_intention_capacity_floor() {
         .unwrap();
     let err = verify(&rpc, skeleton, vec![])
         .await
-        .expect_err("deposit at Intention floor must fail Process min");
+        .expect_err("deposit below Process min must fail");
     assert_eq!(exit(err), ERROR_DEPOSIT_BELOW_MINIMUM);
 }
 
@@ -596,7 +588,6 @@ async fn reject_deposit_at_or_below_intention_capacity_floor() {
 async fn reject_deposit_one_below_minimum() {
     require_binaries();
     let below = MIN_DEPOSIT_CAPACITY - 1;
-    assert!(below >= DEFAULT_MIN_INTENTION_CAPACITY);
     let mut rpc = FakeRpcClient::default();
     let mut skeleton = prepared_process_skeleton(&rpc);
     let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
@@ -701,8 +692,8 @@ async fn xudt_intention_exempt_from_ckb_deposit_minimum() {
     let process_hash = process_example_type_hash(&type_script);
     let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
     let args = beneficiary_args(process_hash, &dest_script());
-    // Below Process CKB deposit min but above Intention floor / xUDT occupied.
-    let cap = DEFAULT_MIN_INTENTION_CAPACITY;
+    // Below Process CKB deposit min but above typical xUDT occupied capacity.
+    let cap = MIN_DEPOSIT_CAPACITY / 2;
     assert!(cap < MIN_DEPOSIT_CAPACITY);
     let intention = seed_intention(
         &mut rpc,
@@ -807,7 +798,7 @@ async fn digest_ok_accepts_subminimum_deposit_for_another_process() {
         always_success_script(vec![0xB2]),
         other_type,
         other_dest,
-        DEFAULT_MIN_INTENTION_CAPACITY,
+        MIN_DEPOSIT_CAPACITY / 2,
     );
 
     for (process_lock, type_script, beneficiary, capacity) in [example_digest, other_digest] {

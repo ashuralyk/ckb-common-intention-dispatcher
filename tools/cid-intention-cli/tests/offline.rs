@@ -379,10 +379,9 @@ fn create_intention_fee_covers_rate_1000_serialized_size_in_block() {
 fn create_rejects_intention_below_example_deposit_minimum() {
     let secret = key(0x42);
     let mut req = fixture_request(&secret);
-    let floor = ckb_common_intention_dispatcher_calculator::DEFAULT_MIN_INTENTION_CAPACITY;
     let minimum = cid_process_example_calculator::MIN_DEPOSIT_CAPACITY;
 
-    for capacity in [floor - 1, minimum - 1] {
+    for capacity in [minimum / 2, minimum - 1] {
         req.intention_capacity = capacity;
         let err = create_signed_intention(&req, &secret).unwrap_err();
         assert!(

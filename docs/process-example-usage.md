@@ -77,25 +77,21 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 
 ## CKB deposit minimum (Intention consume)
 
-Intention creates size capacity to
-`max(requested, DEFAULT_MIN_INTENTION_CAPACITY, occupied)`. The shared protocol
-constant `DEFAULT_MIN_INTENTION_CAPACITY` (= **500 CKB**) is the **policy floor**
-deposit minima compare against; occupied bumps still apply for larger lock
-args / xUDT.
+Intention creates size capacity to `max(requested, occupied)`. Protocol / CID
+impose **no** Intention or deposit capacity floor — each Process owns its own
+minima (if any).
 
 This example Process treats DigestOk **CKB** Intentions **for its own**
 `process_type_hash` as deposits fulfilled by consuming the Intention into the
-beneficiary. Process authors must declare a deposit minimum **strictly greater**
-than that floor (`CkbDepositPolicy` / `assert_ckb_deposit_policy`):
+beneficiary, and rejects capacities below its Process-local minimum:
 
 | Constant | Value | Where |
 |----------|-------|--------|
-| `DEFAULT_MIN_INTENTION_CAPACITY` | 500 CKB | `cid-protocol` |
-| `EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY` | 600 CKB | `cid-protocol` (single source; on-chain + calculator alias as `MIN_DEPOSIT_CAPACITY`) |
+| `MIN_DEPOSIT_CAPACITY` | 600 CKB | Dual-written: `contracts/cid_process_example/src/deposit.rs` + `calculator/process` |
 
 Enforced in Process lock Verify (own DigestOk only), `Process.assemble`, and the
 calculator draft path. xUDT Intentions are not subject to this CKB deposit
-floor (token amount rules are separate).
+minimum (token amount rules are separate).
 
 ### Upgrading an existing Process deployment
 

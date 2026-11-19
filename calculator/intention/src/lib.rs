@@ -4,7 +4,6 @@
 
 use cid_protocol::XUDT_AMOUNT_LEN;
 
-pub use cid_protocol::DEFAULT_MIN_INTENTION_CAPACITY;
 use ckb_cinnabar_calculator::{
     address::Address,
     indexer::{CellQueryOptions, GetCellsIter, SearchMode},
@@ -158,10 +157,9 @@ impl<T: RPC> Operation<T> for AddInputAssetDeps {
 
 /// Create an Intention cell. Lock Create does **not** run CID Verify.
 ///
-/// Effective capacity is `max(requested, DEFAULT_MIN_INTENTION_CAPACITY,
-/// occupied)` so the cell always covers the policy floor and the concrete
-/// occupied capacity for the resolved lock args / type / data (the
-/// "build_with_capacity" sizing rule).
+/// Effective capacity is `max(requested, occupied)`. Protocol / CID impose no
+/// Intention capacity floor; Process deposit minima (if any) are enforced at
+/// deposit time, not here.
 ///
 /// `xudt`: when set, attach the official xUDT type + 16-byte amount and the
 /// xUDT celldep. CKB-only path uses empty data and `type_script = None`.
@@ -195,7 +193,7 @@ pub fn create_intention<T: RPC>(
     Instruction::new(ops)
 }
 
-/// Size Intention capacity to `max(requested, policy floor, occupied)`.
+/// Size Intention capacity to `max(requested, occupied)`.
 struct AddIntentionOutput {
     lock_script: ScriptEx,
     type_script: Option<ScriptEx>,
@@ -220,10 +218,7 @@ impl<T: RPC> Operation<T> for AddIntentionOutput {
             .type_(typ.pack())
             .build();
         let occupied = occupied_capacity_shannons(&draft, self.data.len());
-        let cap = self
-            .capacity
-            .max(DEFAULT_MIN_INTENTION_CAPACITY)
-            .max(occupied);
+        let cap = self.capacity.max(occupied);
         let output = draft.as_builder().capacity(cap).build();
         skeleton.output(CellOutputEx::new(output, self.data));
         Ok(())
@@ -359,11 +354,10 @@ fn refund_burn<T: RPC>(
 }
 
 pub use cid_protocol::{
-    assert_ckb_deposit_policy, deposit_min_satisfies_intention_floor, fee_covers_shortfalls,
-    refund_capacity_allowed, CidArgs, CidEntry, CkbDepositPolicy, Payload, Script as CidScript,
-    CID_VERSION, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING, ERROR_MIXED_CID_LOCK,
-    ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH, ERROR_REFUND_ASSET_MISMATCH,
-    ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED, ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE,
-    ERROR_ZERO_ASSET, EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY, HOP_DIGEST_INCOMPATIBLE, HOP_DIGEST_OK,
-    HOP_TIMEOUT_BURN, MAX_REFUND_FEE, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
+    fee_covers_shortfalls, refund_capacity_allowed, CidArgs, CidEntry, Payload,
+    Script as CidScript, CID_VERSION, ERROR_ARGS_INVALID, ERROR_HEADER_MISSING,
+    ERROR_MIXED_CID_LOCK, ERROR_PARTIAL_DIGEST, ERROR_PROCESS_MISMATCH,
+    ERROR_REFUND_ASSET_MISMATCH, ERROR_REFUND_MISSING, ERROR_TIMEOUT_NOT_REACHED,
+    ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET, HOP_DIGEST_INCOMPATIBLE,
+    HOP_DIGEST_OK, HOP_TIMEOUT_BURN, MAX_REFUND_FEE, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
 };

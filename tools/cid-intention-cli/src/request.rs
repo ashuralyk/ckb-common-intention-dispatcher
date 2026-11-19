@@ -56,7 +56,7 @@ fn default_process_capacity() -> u64 {
 }
 
 fn default_intention_capacity() -> u64 {
-    // Example Process deposit min (600 CKB) ≥ protocol Intention floor (500 CKB).
+    // Example Process deposit min (600 CKB). Protocol has no Intention floor.
     cid_process_example_calculator::MIN_DEPOSIT_CAPACITY
 }
 

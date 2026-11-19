@@ -25,7 +25,7 @@ use ckb_cinnabar_calculator::{
     TransactionCalculator, TYPE_ID_CODE_HASH,
 };
 use ckb_common_intention_dispatcher_calculator::{
-    cid_lock, encode_cid_args, Payload, CONTRACT_NAME, DEFAULT_MIN_INTENTION_CAPACITY,
+    cid_lock, encode_cid_args, Payload, CONTRACT_NAME,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -428,17 +428,14 @@ fn create_signed_intention_bundle_inner(
         add_named_dep(&rpc, &mut skeleton, dep)?;
     }
 
-    // Size Intention to max(requested, policy floor, occupied) once the CID
-    // Type ID lock can be resolved against seeded deps.
+    // Size Intention to max(requested, occupied) once the CID Type ID lock can
+    // be resolved against seeded deps. Protocol has no Intention floor.
     let intention_lock = cid_lock(args.clone())
         .to_script(&skeleton)
         .map_err(|e| CliError::Calculator(e.to_string()))?;
     let draft = CellOutput::new_builder().lock(intention_lock).build();
     let occupied = occupied_capacity_shannons(&draft, 0);
-    let intention_capacity = req
-        .intention_capacity
-        .max(DEFAULT_MIN_INTENTION_CAPACITY)
-        .max(occupied);
+    let intention_capacity = req.intention_capacity.max(occupied);
     if intention_capacity < MIN_DEPOSIT_CAPACITY {
         return Err(CliError::InvalidRequest(format!(
             "effective intention_capacity {intention_capacity} is below the example Process minimum of {MIN_DEPOSIT_CAPACITY} shannons"

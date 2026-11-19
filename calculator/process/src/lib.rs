@@ -27,26 +27,11 @@ pub const PROCESS_CONTRACT_NAME: &str = "cid_process_example";
 /// Default Process state cell capacity: 300 CKB.
 pub const DEFAULT_PROCESS_STATE_CAPACITY: u64 = 300_0000_0000;
 
-/// Intention floor + example Process deposit min (single source: `cid-protocol`).
-pub use cid_protocol::{
-    assert_ckb_deposit_policy, deposit_min_satisfies_intention_floor, CkbDepositPolicy,
-    DEFAULT_MIN_INTENTION_CAPACITY, EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY,
-};
-
-/// Example Process minimum CKB deposit (shannons).
+/// Example Process minimum CKB deposit (shannons): **600 CKB**.
 ///
-/// Alias of [`EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY`] — same constant the
-/// on-chain Process binary uses (no dual-written literal).
-pub const MIN_DEPOSIT_CAPACITY: u64 = EXAMPLE_PROCESS_MIN_DEPOSIT_CAPACITY;
-
-/// Example Process [`CkbDepositPolicy`] (host-side mirror of the on-chain policy).
-pub struct ExampleDepositPolicy;
-
-impl CkbDepositPolicy for ExampleDepositPolicy {
-    const MIN_DEPOSIT_CAPACITY: u64 = MIN_DEPOSIT_CAPACITY;
-}
-
-const _: () = assert_ckb_deposit_policy::<ExampleDepositPolicy>();
+/// Process-local (not protocol). Dual-written with
+/// `contracts/cid_process_example/src/deposit.rs` — keep both literals identical.
+pub const MIN_DEPOSIT_CAPACITY: u64 = 600_0000_0000;
 
 /// True when a CKB-only Intention capacity meets the example deposit minimum.
 #[inline]
@@ -292,9 +277,8 @@ fn build_draft_and_known(
         let has_type = intention.type_script.is_some();
         if !ckb_deposit_capacity_ok(intention.capacity, has_type) {
             return Err(CalculatorError::Other(format!(
-                "CKB deposit Intention capacity {} is below Process MIN_DEPOSIT_CAPACITY {} \
-                 (must be > DEFAULT_MIN_INTENTION_CAPACITY {})",
-                intention.capacity, MIN_DEPOSIT_CAPACITY, DEFAULT_MIN_INTENTION_CAPACITY
+                "CKB deposit Intention capacity {} is below Process MIN_DEPOSIT_CAPACITY {}",
+                intention.capacity, MIN_DEPOSIT_CAPACITY
             )));
         }
     }
@@ -978,19 +962,10 @@ mod tests {
     }
 
     #[test]
-    fn test_deposit_policy_rejects_min_at_or_below_intention_floor() {
-        assert!(!deposit_min_satisfies_intention_floor(
-            DEFAULT_MIN_INTENTION_CAPACITY
-        ));
-        assert!(!deposit_min_satisfies_intention_floor(0));
-        assert!(deposit_min_satisfies_intention_floor(MIN_DEPOSIT_CAPACITY));
+    fn test_ckb_deposit_capacity_ok() {
         assert!(ckb_deposit_capacity_ok(MIN_DEPOSIT_CAPACITY, false));
         assert!(!ckb_deposit_capacity_ok(MIN_DEPOSIT_CAPACITY - 1, false));
-        assert!(!ckb_deposit_capacity_ok(
-            DEFAULT_MIN_INTENTION_CAPACITY,
-            false
-        ));
-        // xUDT Intentions are not CKB deposits; capacity floor is not applied here.
+        // xUDT Intentions are not CKB deposits; Process CKB min is not applied.
         assert!(ckb_deposit_capacity_ok(1, true));
     }
 
@@ -1004,8 +979,8 @@ mod tests {
         }
         let rpc = FakeRpcClient::default();
         let (process, mut intentions) = sample_process_and_intention();
-        // At the Intention occupied floor but below Process MIN_DEPOSIT.
-        intentions[0].capacity = DEFAULT_MIN_INTENTION_CAPACITY;
+        // Createable Intention capacity, but below Process MIN_DEPOSIT.
+        intentions[0].capacity = MIN_DEPOSIT_CAPACITY / 2;
         let err = process_digest_ok_with_extras(
             &rpc,
             intentions,
@@ -1017,7 +992,7 @@ mod tests {
             bin_dir,
         )
         .err()
-        .expect("deposit at DEFAULT_MIN_INTENTION_CAPACITY must fail Process min");
+        .expect("deposit below Process MIN_DEPOSIT must fail");
         let msg = format!("{err}");
         assert!(
             msg.contains("MIN_DEPOSIT_CAPACITY") || msg.contains("DepositBelowMinimum"),
