@@ -1357,8 +1357,10 @@ async fn reject_process_debit_diverted_to_peer_process_lock_group() {
     let mut skeleton = prepared_process_skeleton(&rpc);
     let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
     let type_b = process_example_type_script(b"process-type-id-v1".to_vec());
-    let lock_a = process_example_lock_script_with(ScriptHashType::Data1, vec![0xA1]);
-    let lock_b = process_example_lock_script_with(ScriptHashType::Data1, vec![0xB2]);
+    let args_a = default_process_lock_args(0xA1);
+    let args_b = default_process_lock_args(0xB2);
+    let lock_a = process_example_lock_script_with(ScriptHashType::Data1, args_a.clone());
+    let lock_b = process_example_lock_script_with(ScriptHashType::Data1, args_b.clone());
     let process_a = seed_process_example_cell(&mut rpc, lock_a, type_a.clone());
     let process_b = seed_process_example_cell(&mut rpc, lock_b, type_b.clone());
     let dest_a = dest_script();
@@ -1410,14 +1412,14 @@ async fn reject_process_debit_diverted_to_peer_process_lock_group() {
         .apply_skeleton(&rpc, &mut skeleton)
         .unwrap();
 
-    // Locate Process recreate outputs by lock args (A=0xA1, B=0xB2).
+    // Locate Process recreate outputs by full ProcessLockArgs (salt 0xA1 / 0xB2).
     let mut idx_a = None;
     let mut idx_b = None;
     for (i, out) in skeleton.outputs.iter().enumerate() {
         let args = out.lock_script().args().raw_data();
-        if args.as_ref() == [0xA1] {
+        if args.as_ref() == args_a.as_slice() {
             idx_a = Some(i);
-        } else if args.as_ref() == [0xB2] {
+        } else if args.as_ref() == args_b.as_slice() {
             idx_b = Some(i);
         }
     }
