@@ -13,5 +13,50 @@
     "type_id": "0xf3f8a56c2594030f99f05b09ff1b6a1b07e6e07ed04309c1c4e246561faad326",
     "type_id_args": "0xdfe0a1416c7373e8aaae5257445e940b6ff08e9cbc62ebca8541d28997370f25",
     "__comment": "STALE: see deployment/README.md for the expected post-rebuild data_hash (fee-binding + TimeoutBurn exact). Rebuild, redeploy, and replace data_hash / tx_hash before creating new Intentions. Not a live code hash until updated post-redeploy."
+  },
+  {
+    "name": "ckb_common_intention_dispatcher",
+    "date": "2026-11-19T01:00:43.171356+00:00",
+    "operation": "migrate",
+    "version": "v0.1.2",
+    "tx_hash": "0x5d9e44fca3beb712c9efe848c24f83fb8dba3ff35cfb23353a89631322a155fc",
+    "out_index": 0,
+    "data_hash": "0x110f6f793b0a22ccc3942791573933206c5d6b24a8f5ddfe9749ff04f8646dca",
+    "occupied_capacity": 8835000000000,
+    "payer_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
+    "contract_owner_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
+    "type_id": "0xf3f8a56c2594030f99f05b09ff1b6a1b07e6e07ed04309c1c4e246561faad326",
+    "type_id_args": "0xdfe0a1416c7373e8aaae5257445e940b6ff08e9cbc62ebca8541d28997370f25",
+    "__comment": null
+  },
+  {
+    "name": "ckb_common_intention_dispatcher",
+    "date": "2026-11-19T09:43:13.109724+00:00",
+    "operation": "migrate",
+    "version": "v0.1.3",
+    "tx_hash": "0xdc4e10ee039b2a4bd0144d8db1f23f58a455491153f03afe86f993458a4c4f22",
+    "out_index": 0,
+    "data_hash": "0x816d279f64d00533c61a5c851ed5ce5c6285c5dcc8b3253505432d05aa11e2a4",
+    "occupied_capacity": 8835000000000,
+    "payer_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
+    "contract_owner_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
+    "type_id": "0xf3f8a56c2594030f99f05b09ff1b6a1b07e6e07ed04309c1c4e246561faad326",
+    "type_id_args": "0xdfe0a1416c7373e8aaae5257445e940b6ff08e9cbc62ebca8541d28997370f25",
+    "__comment": null
+  },
+  {
+    "name": "ckb_common_intention_dispatcher",
+    "date": "2026-11-20T08:21:19.531939+00:00",
+    "operation": "migrate",
+    "version": "v0.1.4",
+    "tx_hash": "0x48ee645be85d43c1b531b43c857c2792ea275c471df58a51066e0adddf7a9e73",
+    "out_index": 0,
+    "data_hash": "0x816d279f64d00533c61a5c851ed5ce5c6285c5dcc8b3253505432d05aa11e2a4",
+    "occupied_capacity": 8835000000000,
+    "payer_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
+    "contract_owner_address": "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqv5puz2ee96nuh9nmc6rtm0n8v7agju4rgdmxlnk",
+    "type_id": "0xf3f8a56c2594030f99f05b09ff1b6a1b07e6e07ed04309c1c4e246561faad326",
+    "type_id_args": "0xdfe0a1416c7373e8aaae5257445e940b6ff08e9cbc62ebca8541d28997370f25",
+    "__comment": null
   }
 ]
