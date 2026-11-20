@@ -1262,8 +1262,7 @@ mod tests {
         }
 
         let rpc = FakeRpcClient::default();
-        let (process, mut intentions) = sample_process_and_intention();
-        intentions[0].data = vec![0xaa, 0xbb];
+        let (process, intentions) = sample_process_and_intention();
         let (skeleton, assembled, _) = process_digest_ok_with_extras(
             &rpc,
             intentions,
@@ -1494,16 +1493,37 @@ mod tests {
                 .hash_type(ScriptHashType::Data1)
                 .args([0u8; 32])
                 .build();
-            filter_intention_cell(pth, cid_tid, 1, Some(typ), vec![0u8; 16], None)
+            filter_intention_cell(
+                pth,
+                cid_tid,
+                1,
+                Some(typ),
+                1u128.to_le_bytes().to_vec(),
+                None,
+            )
         };
-        let batch = vec![valid, foreign_pth, below, malformed, xudt];
+        let invalid_ckb =
+            filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY, None, vec![1], None);
+        let mut zero_xudt = xudt.clone();
+        zero_xudt.data = vec![0; 16];
+        let batch = vec![
+            valid,
+            foreign_pth,
+            below,
+            malformed,
+            xudt,
+            invalid_ckb,
+            zero_xudt,
+        ];
         let reasons = process_filter(&batch, bin_dir).expect("filter");
-        assert_eq!(reasons.len(), 5);
+        assert_eq!(reasons.len(), 7);
         assert_eq!(reasons[0], FILTER_ACCEPTED);
         assert_eq!(reasons[1], FILTER_ACCEPTED); // ownership not checked in filter
         assert_eq!(reasons[2], FILTER_DEPOSIT_BELOW_MINIMUM);
         assert_eq!(reasons[3], FILTER_MALFORMED_DIGEST);
         assert_eq!(reasons[4], FILTER_ACCEPTED);
+        assert_eq!(reasons[5], cid_intention_filter::FILTER_UNSUPPORTED_ASSET);
+        assert_eq!(reasons[6], cid_intention_filter::FILTER_UNSUPPORTED_ASSET);
     }
 
     #[test]
@@ -1630,7 +1650,14 @@ mod tests {
                 .hash_type(ScriptHashType::Data1)
                 .args([0u8; 32])
                 .build();
-            filter_intention_cell(pth, cid_tid, 1, Some(typ), vec![0u8; 16], None)
+            filter_intention_cell(
+                pth,
+                cid_tid,
+                1,
+                Some(typ),
+                1u128.to_le_bytes().to_vec(),
+                None,
+            )
         };
         let batch = vec![valid, below, xudt];
         let reasons = process_filter(&batch, bin_dir).expect("filter");

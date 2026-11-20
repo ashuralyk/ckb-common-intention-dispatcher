@@ -11,13 +11,12 @@ pub struct CreateRequest {
     pub fee_shannons: u64,
     /// Requested Intention capacity (shannons). Defaults to the example Process
     /// deposit minimum when [`Self::enforce_example_process_deposit_minimum`] is
-    /// true. Effective capacity is always `max(requested, occupied)`. Protocol
-    /// / CID impose no Intention floor — each Process owns its own minimum.
+    /// true. CKB Intention capacity is at least `occupied + 1 shannon`.
     #[serde(default = "default_intention_capacity")]
     pub intention_capacity: u64,
     /// When `true` (default), reject effective capacity below the **example**
     /// Process `MIN_DEPOSIT_CAPACITY` (600 CKB). Set `false` for other Processes
-    /// that own a lower (or zero) deposit floor — only occupied capacity applies.
+    /// that own a lower (or zero) deposit floor.
     #[serde(default = "default_enforce_example_deposit_minimum")]
     pub enforce_example_process_deposit_minimum: bool,
     pub funding: FundingCell,

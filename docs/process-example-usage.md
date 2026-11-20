@@ -90,9 +90,9 @@ Reason codes and wire format: [ssri-backend-interface.md](ssri-backend-interface
 
 ## CKB deposit minimum (Intention consume)
 
-Intention creates size capacity to `max(requested, occupied)`. Protocol / CID
-impose **no** Intention or deposit capacity floor — each Process owns its own
-minima (if any).
+CKB Intention creation uses `max(requested, occupied + 1 shannon)` because the
+CID lock requires spendable capacity. xUDT creation uses
+`max(requested, occupied)`. Each Process owns its deposit minima.
 
 This example Process treats DigestOk **CKB** Intentions **for its own**
 `process_type_hash` as deposits fulfilled by consuming the Intention into the

@@ -450,7 +450,7 @@ mod tests {
                 lock_args,
                 100_000_000_000,
                 None,
-                vec![0xaa, 0xbb],
+                vec![],
             ));
         }
         cells
@@ -517,7 +517,7 @@ mod tests {
 
         let cap0: u64 = assembled.outputs[1].capacity().unpack();
         assert_eq!(cap0, 100_000_000_000);
-        assert_eq!(assembled.outputs_data[1], vec![0xaa, 0xbb]);
+        assert!(assembled.outputs_data[1].is_empty());
     }
 
     #[test]
