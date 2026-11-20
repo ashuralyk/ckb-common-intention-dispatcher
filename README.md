@@ -134,7 +134,7 @@ smaller CKB DigestOk Intentions for **its own** process_type_hash
 (`DepositBelowMinimum` = 39). CLI defaults to that 600 CKB deposit minimum and
 rejects a smaller effective capacity before signing. See the
 [upgrade steps](docs/process-example-usage.md#upgrading-an-existing-process-deployment)
-before replacing the example Process binary at the same code Type ID.
+(parallel deploy with a new Process code Type ID — do not replace in place).
 
 **Intention filter (Sequencer):** Host crate `cid-intention-filter` (kept out of
 `cid-protocol` so the CID lock binary stays byte-stable) provides

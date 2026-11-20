@@ -125,23 +125,31 @@ minimum (token amount rules are separate).
 ### Upgrading an existing Process deployment
 
 **This release changes Process lock args** (CID identity embedded) and the
-Process binary. Lucas must:
+Process binary.
 
-1. Redeploy the example Process **code** cell (new binary).
-2. **Recreate** each live Process **state** cell with lock args
-   `cid_code_hash[32]||cid_hash_type[1]||salt` matching the live CID Intention
-   lock (typically Type ID script hash + `hash_type=type`). Old opaque args
-   (e.g. `0x01`) are rejected as `ProcessLockArgsInvalid` (41).
-3. Point Intentions / registry at the new state cell TYPE_ID as needed.
+**Do not replace the Process code cell in place at the same code Type ID.** New
+Verify rejects legacy state cells whose lock args are not `ProcessLockArgs`
+(e.g. opaque `0x01`), while recreate requires byte-identical lock scripts —
+so an in-place swap **permanently strands** those legacy state cells.
 
-Also: replacing the example Process binary at the same code Type ID applies the
-deposit minimum to existing Intention cells that target its live Process state.
-Pause new deposits and check for live CKB Intentions below 600 CKB for every
-Process instance using that code Type ID. Settle them using the previous
-assembler and deployed binary, or refund them before replacing the code cell.
-After the upgrade, any remaining sub-minimum Intention fails DigestOk with
-error 39. Use the CID refund path without a matching Process pair to return
-capacity to its User Lock.
+Recommended cutover (parallel deployment):
+
+1. Deploy a **new** Process **code** cell under a **new** code Type ID (new
+   binary with this Verify).
+2. Create **new** Process **state** cells locked to that code Type ID with
+   `ProcessLockArgs` = `cid_code_hash[32]||cid_hash_type[1]||salt` matching the
+   live CID Intention lock (typically Type ID script hash + `hash_type=type`).
+3. Point new Intentions / registry entries at the new state cell TYPE_IDs.
+4. Keep the **old** Process code cell live until legacy state cells are drained
+   (settle / refund with the previous assembler + binary) or **explicitly
+   abandoned** (Lucas’s direct cutover: leave them unspendable and stop
+   routing to them). Consensus does not include a legacy-args migration path.
+
+Deposit-minimum note: once Intentions target a Process instance on the new
+code Type ID, the 600 CKB example floor applies. Pause new deposits on the old
+instance and settle or refund sub-minimum Intentions with the previous
+assembler before abandoning that instance. After cutover, remaining
+sub-minimum Intentions on the new code fail DigestOk with error 39.
 
 ## Capacity / fee (example assemble)
 

@@ -9,7 +9,7 @@ use std::thread;
 
 use cid_intention_cli::{
     create_signed_intention, create_signed_process_state, send_signed_transaction, CliError,
-    ScriptJson, SendOptions,
+    CreateProcessRequest, ScriptJson, SendOptions,
 };
 use ckb_cinnabar_calculator::re_exports::ckb_jsonrpc_types;
 use serde_json::{json, Value};
@@ -472,6 +472,186 @@ fn send_rejects_process_create_without_live_cid_type_id_dep() {
         ),
         other => panic!("expected NetworkGuard, got {other:?}"),
     }
+}
+
+fn set_process_state_lock_args(created: &mut Value, args_hex: &str) {
+    let paths: &[&[&str]] = &[
+        &["outputs", "0", "lock", "args"],
+        &["transaction", "outputs", "0", "lock", "args"],
+        &["inner", "outputs", "0", "lock", "args"],
+        &["inner", "transaction", "outputs", "0", "lock", "args"],
+    ];
+    for path in paths {
+        let mut cur = &mut *created;
+        let mut ok = true;
+        for (i, key) in path.iter().enumerate() {
+            if i + 1 == path.len() {
+                if let Some(obj) = cur.as_object_mut() {
+                    obj.insert((*key).into(), json!(args_hex));
+                } else {
+                    ok = false;
+                }
+            } else if let Ok(idx) = key.parse::<usize>() {
+                match cur.as_array_mut().and_then(|a| a.get_mut(idx)) {
+                    Some(next) => cur = next,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            } else {
+                match cur.as_object_mut().and_then(|o| o.get_mut(*key)) {
+                    Some(next) => cur = next,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if ok {
+            return;
+        }
+    }
+    panic!("process create outputs not found");
+}
+
+fn send_opts_with_live_code_deps(
+    req: &CreateProcessRequest,
+    _created: &Value,
+) -> (SendOptions, String) {
+    let genesis = h256(0xAB);
+    let genesis_c = genesis.clone();
+    let cid_tx = req.cid_lock_dep.tx_hash.clone();
+    let cid_type = req.cid_lock_dep.type_script.clone().unwrap();
+    let process_tx = req.process_code_dep.tx_hash.clone();
+    let process_type = req.process_code_dep.type_script.clone().unwrap();
+    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+        move |method, params| match method {
+            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+            "get_block_hash" => json!(genesis_c.clone()),
+            "get_live_cell" => {
+                let op = &params.as_array().unwrap()[0];
+                let txh = op["tx_hash"].as_str().unwrap_or("");
+                if txh.eq_ignore_ascii_case(&cid_tx) {
+                    live_typed_cell(&cid_type)
+                } else if txh.eq_ignore_ascii_case(&process_tx) {
+                    live_typed_cell(&process_type)
+                } else {
+                    live_untyped_cell()
+                }
+            }
+            "send_transaction" => json!(h256(0xFF)),
+            _ => json!({"error": {"code": -1, "message": "unknown"}}),
+        },
+    ))));
+    (
+        SendOptions {
+            rpc_url: url,
+            network: "testnet".into(),
+            genesis_hash: genesis,
+        },
+        h256(0xFF),
+    )
+}
+
+#[test]
+fn send_rejects_process_create_legacy_opaque_lock_args() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let mut created = create_signed_process_state(&req, &secret).unwrap();
+    set_process_state_lock_args(&mut created, "0x01");
+    created
+        .as_object_mut()
+        .unwrap()
+        .insert("process_lock_args".into(), json!("0x01"));
+    let (opts, _) = send_opts_with_live_code_deps(&req, &created);
+    let err = send_signed_transaction(&opts, &created).unwrap_err();
+    assert!(
+        matches!(err, CliError::NetworkGuard(ref msg) if msg.contains("Process state lock args invalid") || msg.contains("TooShort")),
+        "{err}"
+    );
+}
+
+#[test]
+fn send_rejects_process_create_lock_args_wrong_cid_code_hash() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let mut created = create_signed_process_state(&req, &secret).unwrap();
+    let mut bad = vec![0xEEu8; 32];
+    bad.push(1);
+    bad.push(0x01);
+    let hex = format!("0x{}", hex::encode(&bad));
+    set_process_state_lock_args(&mut created, &hex);
+    created
+        .as_object_mut()
+        .unwrap()
+        .insert("process_lock_args".into(), json!(hex));
+    let (opts, _) = send_opts_with_live_code_deps(&req, &created);
+    let err = send_signed_transaction(&opts, &created).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CliError::NetworkGuard(ref msg) if msg.contains("cid_code_hash must equal live CID")
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn send_rejects_process_create_lock_args_wrong_hash_type() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let mut created = create_signed_process_state(&req, &secret).unwrap();
+    let cid = created["cid_code_type_id"].as_str().unwrap();
+    let mut bytes = hex::decode(cid.trim_start_matches("0x")).unwrap();
+    bytes.push(2); // Data1
+    bytes.push(0x01);
+    let hex = format!("0x{}", hex::encode(&bytes));
+    set_process_state_lock_args(&mut created, &hex);
+    created
+        .as_object_mut()
+        .unwrap()
+        .insert("process_lock_args".into(), json!(hex));
+    let (opts, _) = send_opts_with_live_code_deps(&req, &created);
+    let err = send_signed_transaction(&opts, &created).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CliError::NetworkGuard(ref msg) if msg.contains("cid_hash_type must be")
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn send_rejects_process_create_echoed_lock_args_mismatch() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let mut created = create_signed_process_state(&req, &secret).unwrap();
+    created.as_object_mut().unwrap().insert(
+        "process_lock_args".into(),
+        json!(format!("0x{}", hex::encode([0xABu8; 34]))),
+    );
+    let (opts, _) = send_opts_with_live_code_deps(&req, &created);
+    let err = send_signed_transaction(&opts, &created).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CliError::NetworkGuard(ref msg) if msg.contains("echoed process_lock_args")
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn send_accepts_process_create_with_valid_process_lock_args() {
+    let secret = key(0x42);
+    let req = fixture_process_request(&secret);
+    let created = create_signed_process_state(&req, &secret).unwrap();
+    let (opts, _) = send_opts_with_live_code_deps(&req, &created);
+    let hash = send_signed_transaction(&opts, &created).expect("valid ProcessLockArgs must send");
+    assert_eq!(hash, h256(0xFF));
 }
 
 #[test]

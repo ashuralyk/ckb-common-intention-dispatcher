@@ -160,18 +160,23 @@ fn mock_intention(i: u32, process_type_hash: [u8; 32]) -> IntentionCell {
     })
     .unwrap();
     let lock_args = encode_cid_args(process_type_hash, CidScript::default(), payload);
+    let lock = Script::new_builder()
+        .code_hash([0xC1; 32].pack())
+        .hash_type(ScriptHashType::Type)
+        .args(lock_args.clone().pack())
+        .build();
     IntentionCell {
         out_point: fake_outpoint(),
         lock_args,
         capacity: 100_000_000_000,
         data: vec![],
         type_script: None,
-        lock: None,
+        lock: Some(lock),
     }
 }
 
 fn mock_process_state() -> ProcessStateCell {
-    // Offline assemble defaults Intention locks to code_hash=[0xC1;32]/type.
+    // Matches mock_intention CID identity (code_hash=[0xC1;32], hash_type=type).
     let args = ProcessLockArgs::new([0xC1; 32], 1, vec![0x01])
         .encode()
         .unwrap();
@@ -1218,6 +1223,11 @@ async fn assemble_and_verify_data2_beneficiary() {
     let process = mock_process_state();
     let pth = process_example_type_hash(&process.type_script);
     let args = beneficiary_args(pth, &dest);
+    let lock = Script::new_builder()
+        .code_hash([0xC1; 32].pack())
+        .hash_type(ScriptHashType::Type)
+        .args(args.clone().pack())
+        .build();
     let (assembled, _) = process_digest_ok_with_process(
         &rpc,
         vec![IntentionCell {
@@ -1226,7 +1236,7 @@ async fn assemble_and_verify_data2_beneficiary() {
             capacity: CKB_CAPACITY,
             data: vec![],
             type_script: None,
-            lock: None,
+            lock: Some(lock),
         }],
         process,
         minimal_code_deps(),
