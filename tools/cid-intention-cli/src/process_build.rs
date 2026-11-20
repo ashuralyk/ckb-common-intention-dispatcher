@@ -1,8 +1,8 @@
 //! Assemble and offline-sign a Process state cell create tx.
 
 use cid_process_example_calculator::{
-    create_process_state_by_outpoint, CREATE_FEE_RATE, DEFAULT_PROCESS_STATE_CAPACITY,
-    PROCESS_CONTRACT_NAME,
+    create_process_state_by_outpoint, ProcessLockArgs, CREATE_FEE_RATE,
+    DEFAULT_PROCESS_STATE_CAPACITY, PROCESS_CONTRACT_NAME,
 };
 use ckb_cinnabar_calculator::{
     instruction::Instruction,
@@ -176,6 +176,49 @@ fn assert_unique_outpoints(req: &CreateProcessRequest) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Resolve Process state lock args from the request + live CID Type ID.
+///
+/// - Both `process_lock_args` and `process_lock_salt` set → ambiguous, reject.
+/// - `process_lock_args` omitted → encode `cid_code_type_id || type(1) || salt`.
+/// - `process_lock_args` set → decode and require identity matches `cid_lock_dep`.
+fn resolve_process_lock_args(
+    req: &CreateProcessRequest,
+    cid_code_type_id: [u8; 32],
+) -> Result<Vec<u8>, CliError> {
+    match (&req.process_lock_args, &req.process_lock_salt) {
+        (Some(_), Some(_)) => Err(CliError::InvalidRequest(
+            "set either process_lock_args or process_lock_salt, not both".into(),
+        )),
+        (None, salt_opt) => {
+            let salt = match salt_opt {
+                None => Vec::new(),
+                Some(s) => decode_hex(s)?,
+            };
+            ProcessLockArgs::new(cid_code_type_id, 1, salt)
+                .encode()
+                .map_err(|e| {
+                    CliError::InvalidRequest(format!(
+                        "process_lock_args encode failed ({e:?}): need cid_code_hash[32]||cid_hash_type[1]||salt (not CID Intention encoding)"
+                    ))
+                })
+        }
+        (Some(hex), None) => {
+            let lock_args = decode_hex(hex)?;
+            let decoded = ProcessLockArgs::decode(&lock_args).map_err(|e| {
+                CliError::InvalidRequest(format!(
+                    "process_lock_args invalid ({e:?}): need cid_code_hash[32]||cid_hash_type[1]||salt (not CID Intention encoding)"
+                ))
+            })?;
+            if decoded.cid_code_hash != cid_code_type_id || decoded.cid_hash_type != 1 {
+                return Err(CliError::InvalidRequest(
+                    "process_lock_args CID identity must match cid_lock_dep (cid_code_hash = Type ID script hash, cid_hash_type = type)".into(),
+                ));
+            }
+            Ok(lock_args)
+        }
+    }
+}
+
 fn add_named_dep(
     rpc: &FakeRpcClient,
     skeleton: &mut TransactionSkeleton,
@@ -264,12 +307,7 @@ pub fn create_signed_process_state_bundle(
     } else {
         req.process_capacity
     };
-    let lock_args = decode_hex(&req.process_lock_args)?;
-    if lock_args.is_empty() || cid_protocol::CidArgs::decode(&lock_args).is_ok() {
-        return Err(CliError::InvalidRequest(
-            "process_lock_args must be non-empty and distinct from CID Intention encoding".into(),
-        ));
-    }
+    let lock_args = resolve_process_lock_args(req, cid_code_type_id)?;
 
     let funding_lock = packed_script(&req.funding.lock)?;
     let funding_code: [u8; 32] = funding_lock.code_hash().unpack();
@@ -517,6 +555,10 @@ pub fn create_signed_process_state_bundle(
         obj.insert(
             "cid_code_type_id_args".into(),
             Value::String(encode_hex(&cid_code_type_id_args)),
+        );
+        obj.insert(
+            "process_lock_args".into(),
+            Value::String(encode_hex(&lock_args)),
         );
         obj.insert(
             "fee_shannons".into(),

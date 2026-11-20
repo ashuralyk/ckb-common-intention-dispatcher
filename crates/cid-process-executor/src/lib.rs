@@ -12,7 +12,7 @@ pub use types::{
     build_draft_tx, AssembledTx, DraftCell, ExecutorError, PartialTx, CUSTOM_ERROR_START,
 };
 
-use ckb_types::packed::{Byte32, CellOutput, OutPoint, Script};
+use ckb_types::packed::{CellOutput, OutPoint, Script};
 use ckb_types::prelude::*;
 
 /// Offline SSRI executor for CID Process contracts
@@ -130,19 +130,14 @@ fn check_filter_response_count(request: &[u8], reasons: &[i8]) -> Result<(), Exe
     Ok(())
 }
 
-/// Build a CKB-only Intention draft cell (lock args + capacity + data).
+/// Build an Intention draft cell with its complete, resolved lock script.
 pub fn intention_draft_cell(
     out_point: OutPoint,
-    lock_args: Vec<u8>,
+    lock: Script,
     capacity: u64,
     type_script: Option<Script>,
     data: Vec<u8>,
 ) -> DraftCell {
-    let lock = Script::new_builder()
-        .code_hash(Byte32::from_slice(&[0xC1; 32]).unwrap())
-        .hash_type(1u8.into())
-        .args(lock_args.pack())
-        .build();
     let mut output = CellOutput::new_builder()
         .capacity(capacity.pack())
         .lock(lock);
@@ -409,10 +404,28 @@ mod tests {
             .build()
     }
 
+    const TEST_CID_CODE_HASH: [u8; 32] = [0xC2; 32];
+    const TEST_CID_HASH_TYPE: u8 = 2;
+
+    fn intention_lock(args: Vec<u8>) -> Script {
+        Script::new_builder()
+            .code_hash(Byte32::from_slice(&TEST_CID_CODE_HASH).unwrap())
+            .hash_type(TEST_CID_HASH_TYPE.into())
+            .args(args.pack())
+            .build()
+    }
+
     fn process_lock_script() -> Script {
+        // Intention draft cells use code_hash=[0xC1;32], hash_type=type.
+        // ProcessLockArgs: cid_code_hash[32] || cid_hash_type[1] || salt.
+        let mut args = Vec::with_capacity(34);
+        args.extend_from_slice(&TEST_CID_CODE_HASH);
+        args.push(TEST_CID_HASH_TYPE);
+        args.push(0x01);
         Script::new_builder()
             .code_hash(Byte32::from_slice(&[0xAA; 32]).unwrap())
             .hash_type(2u8.into())
+            .args(args.pack())
             .build()
     }
 
@@ -447,10 +460,10 @@ mod tests {
                     .tx_hash(Byte32::from_slice(&[0x10 + i as u8; 32]).unwrap())
                     .index(0u32.pack())
                     .build(),
-                lock_args,
+                intention_lock(lock_args),
                 100_000_000_000,
                 None,
-                vec![0xaa, 0xbb],
+                vec![],
             ));
         }
         cells
@@ -517,7 +530,7 @@ mod tests {
 
         let cap0: u64 = assembled.outputs[1].capacity().unpack();
         assert_eq!(cap0, 100_000_000_000);
-        assert_eq!(assembled.outputs_data[1], vec![0xaa, 0xbb]);
+        assert!(assembled.outputs_data[1].is_empty());
     }
 
     #[test]
@@ -584,7 +597,7 @@ mod tests {
                     .tx_hash(Byte32::from_slice(&[0x02; 32]).unwrap())
                     .index(0u32.pack())
                     .build(),
-                lock_args,
+                intention_lock(lock_args),
                 100_000_000_000,
                 None,
                 vec![],
@@ -886,7 +899,7 @@ mod tests {
                     .tx_hash(Byte32::from_slice(&[0x02; 32]).unwrap())
                     .index(0u32.pack())
                     .build(),
-                lock_args,
+                intention_lock(lock_args),
                 100_000_000_000,
                 None,
                 vec![],

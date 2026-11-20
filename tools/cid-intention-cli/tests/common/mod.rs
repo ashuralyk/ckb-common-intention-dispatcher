@@ -119,10 +119,11 @@ pub fn fixture_process_request(secret: &SecretKey) -> CreateProcessRequest {
         .hash_type(ScriptHashType::Type)
         .args([0xCDu8; 32].to_vec().pack())
         .build();
+    // Auto-fill ProcessLockArgs from cid_lock_dep; salt keeps instances distinct.
     serde_json::from_value(json!({
         "network": "fake",
         "process_capacity": 300_000_000_000u64,
-        "process_lock_args": "0x01",
+        "process_lock_salt": "0x01",
         "funding": {
             "tx_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
             "index": 0,

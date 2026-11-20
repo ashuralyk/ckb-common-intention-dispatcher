@@ -16,7 +16,8 @@ pub struct CreateRequest {
     pub intention_capacity: u64,
     /// When `true` (default), reject effective capacity below the **example**
     /// Process `MIN_DEPOSIT_CAPACITY` (600 CKB). Set `false` for other Processes
-    /// that own a lower (or zero) deposit floor.
+    /// that own a lower (or zero) deposit floor. Example Process bundles also
+    /// use this flag to request a live CID binding check at broadcast.
     #[serde(default = "default_enforce_example_deposit_minimum")]
     pub enforce_example_process_deposit_minimum: bool,
     pub funding: FundingCell,
@@ -44,8 +45,19 @@ pub struct CreateProcessRequest {
     /// Process state capacity in shannons. Default: 300 CKB when omitted.
     #[serde(default = "default_process_capacity")]
     pub process_capacity: u64,
-    /// Distinct Process lock args for this instance (must be non-empty).
-    pub process_lock_args: String,
+    /// Optional explicit Process state lock args:
+    /// `cid_code_hash[32] || cid_hash_type[1] || instance_salt`.
+    /// When omitted, the CLI auto-builds args from `cid_lock_dep` (Type ID script
+    /// hash + `hash_type=type`) and optional [`Self::process_lock_salt`]. When
+    /// set, args are decoded and must match that CID identity. Mutually
+    /// exclusive with `process_lock_salt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_lock_args: Option<String>,
+    /// Optional `instance_salt` hex used only when `process_lock_args` is
+    /// omitted. Empty / `"0x"` means no salt. Mutually exclusive with
+    /// `process_lock_args`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_lock_salt: Option<String>,
     pub funding: FundingCell,
     /// Live CID lock **code** cell (Type ID required; live-verified on `send`).
     pub cid_lock_dep: NamedDep,

@@ -101,6 +101,14 @@ raw-transaction send stays usable. The CID check catches a correct live
 outpoint paired with mistyped Type ID args in the offline request (create
 alone cannot see the chain).
 
+For an example Process request (`enforce_example_process_deposit_minimum: true`),
+the signed bundle also carries `example_process_type_script`. Before broadcast,
+`send` resolves that TYPE_ID with the node's indexer, checks that the state is
+live, and compares its CID binding with the signed Intention lock. Keep the
+metadata in the bundle and use an RPC with the Indexer module enabled. Legacy
+example states with short opaque lock args have no CID binding to check.
+For other Processes use `enforce_example_process_deposit_minimum: false`.
+
 ## Process state create (`create-process`)
 
 Request JSON (no secrets):
@@ -109,7 +117,7 @@ Request JSON (no secrets):
 {
   "network": "testnet",
   "process_capacity": 300000000000,
-  "process_lock_args": "0x01",
+  "process_lock_salt": "0x01",
   "funding": { "tx_hash": "0x…", "index": 0, "capacity": 500000000000,
     "lock": { "code_hash": "0x…", "hash_type": "type", "args": "0x…" }, "data": "0x" },
   "cid_lock_dep": {
@@ -136,10 +144,19 @@ Request JSON (no secrets):
 ```
 
 Cell layout: Process lock = Process code Type ID (`hash_type=type`) with
-non-empty `process_lock_args` distinct per instance. The args must not use
-the CID Intention encoding. The state uses a built-in TYPE_ID derived from
-the first input and output index, with empty data. Both calculator entry
-points check the Process code dep and state capacity before adding the input.
+lock args `cid_code_hash[32] || cid_hash_type[1] || instance_salt`.
+
+By default **omit** `process_lock_args`: the CLI auto-fills
+`cid_code_hash = hash(cid_lock_dep.type_script)`, `cid_hash_type = type` (1),
+and `instance_salt` from optional `process_lock_salt` (omit / `"0x"` = empty).
+Pass explicit `process_lock_args` only when you already have the bytes; they are
+decoded and **must** match that CID identity (`cid_code_hash` + `hash_type=type`),
+or create fails. Do not set both `process_lock_args` and `process_lock_salt`.
+Args must not decode as a CID Intention. The signed JSON echoes the resolved
+`process_lock_args` hex. The state uses a built-in TYPE_ID derived from the
+first input and output index, with empty data. Both calculator entry points
+check the Process code dep, lock-args layout, and state capacity before adding
+the input.
 The state must reserve at least 1,000 shannons plus one shannon per lock-arg
 byte above occupied capacity for future digest fees. Reserve more for larger
 digest transactions.

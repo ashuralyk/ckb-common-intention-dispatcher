@@ -31,7 +31,10 @@ pub const DEFAULT_PROCESS_STATE_CAPACITY: u64 = 300_0000_0000;
 ///
 /// Process-owned (not protocol). Single source:
 /// `crates/cid-process-example-policy`.
-pub use cid_process_example_policy::{ckb_deposit_capacity_ok, MIN_DEPOSIT_CAPACITY};
+pub use cid_process_example_policy::{
+    ckb_deposit_capacity_ok, ProcessLockArgs, ProcessLockArgsError, MIN_DEPOSIT_CAPACITY,
+    PROCESS_LOCK_ARGS_MIN_LEN,
+};
 
 pub use cid_intention_filter::{
     intention_belongs_to_process, intention_process_type_id, FilterCell, FilterRequest,
@@ -124,11 +127,11 @@ impl<T: RPC> Operation<T> for ValidateProcessCreate {
         _log: &mut Log,
     ) -> Result<()> {
         let args = self.lock_script.args();
-        if args.is_empty() || CidArgs::decode(&args).is_ok() {
-            return Err(CalculatorError::Other(
-                "Process lock args must be non-empty and distinct from CID Intention encoding"
-                    .into(),
-            ));
+        // Require `cid_code_hash[32] || cid_hash_type[1] || salt` (ProcessLockArgs).
+        if let Err(e) = ProcessLockArgs::decode(&args) {
+            return Err(CalculatorError::Other(format!(
+                "Process lock args invalid ({e:?}): need cid_code_hash[32]||cid_hash_type[1]||salt"
+            )));
         }
 
         let (_, dep) = skeleton
@@ -178,9 +181,9 @@ pub struct IntentionCell {
     pub data: Vec<u8>,
     /// Packed molecule `Script` of the intention type, if any (official xUDT).
     pub type_script: Option<Vec<u8>>,
-    /// Full CID lock script. Required for FakeRpc/VM verify of the assembled
-    /// skeleton; SSRI-only assemble paths may leave this `None` (placeholder
-    /// code_hash is used for host cell shape only).
+    /// Full CID Intention lock script. **Required** for assemble: on-chain
+    /// Verify authenticates Intention lock `code_hash`/`hash_type` against
+    /// ProcessLockArgs. `None` is rejected (no silent `[0xC1; 32]` placeholder).
     pub lock: Option<Script>,
 }
 
@@ -276,13 +279,19 @@ pub fn process_filter_cells(cells: &[FilterCell], bin_dir: &str) -> Result<Vec<i
 }
 
 fn intention_output(intention: &IntentionCell) -> Result<CellOutput> {
-    let lock = intention.lock.clone().unwrap_or_else(|| {
-        Script::new_builder()
-            .code_hash([0xC1; 32].pack())
-            .hash_type(ScriptHashType::Type)
-            .args(intention.lock_args.clone().pack())
-            .build()
-    });
+    let lock = intention.lock.clone().ok_or_else(|| {
+        CalculatorError::Other(
+            "IntentionCell.lock is required for assemble: on-chain CID lock \
+             authentication needs the full Intention lock (code_hash + hash_type + args); \
+             do not omit lock (no [0xC1;32] placeholder)"
+                .into(),
+        )
+    })?;
+    if lock.args().raw_data().as_ref() != intention.lock_args.as_slice() {
+        return Err(CalculatorError::Other(
+            "IntentionCell.lock.args must match IntentionCell.lock_args".into(),
+        ));
+    }
     let mut builder = CellOutput::new_builder()
         .capacity(intention.capacity)
         .lock(lock);
@@ -692,17 +701,38 @@ mod tests {
         .unwrap()
     }
 
+    /// Default Intention lock identity used by host tests (`code_hash=[0xC1;32]`, type).
+    fn sample_cid_lock_identity() -> ([u8; 32], u8) {
+        ([0xC1; 32], 1)
+    }
+
+    fn sample_process_lock_args() -> Vec<u8> {
+        let (code, ht) = sample_cid_lock_identity();
+        ProcessLockArgs::new(code, ht, vec![0x01]).encode().unwrap()
+    }
+
     fn sample_process_and_intention() -> (ProcessStateCell, Vec<IntentionCell>) {
         let type_id = sample_type_id();
         let pth: [u8; 32] = type_id.calc_script_hash().unpack();
+        let (cid_code, cid_ht) = sample_cid_lock_identity();
         let lock_args = CidArgs::new(pth, CidScript::default(), sample_beneficiary_payload())
             .encode()
             .unwrap();
+        let intention_lock = Script::new_builder()
+            .code_hash(cid_code.pack())
+            .hash_type(if cid_ht == 1 {
+                ScriptHashType::Type
+            } else {
+                ScriptHashType::Data1
+            })
+            .args(lock_args.clone().pack())
+            .build();
         let process = ProcessStateCell {
             out_point: fake_outpoint(),
             lock: Script::new_builder()
                 .code_hash([0xAA; 32].pack())
                 .hash_type(ScriptHashType::Data1)
+                .args(sample_process_lock_args().pack())
                 .build(),
             type_script: type_id,
             capacity: 200_000_000_000,
@@ -714,7 +744,7 @@ mod tests {
             capacity: 100_000_000_000,
             data: vec![],
             type_script: None,
-            lock: None,
+            lock: Some(intention_lock),
         }];
         (process, intentions)
     }
@@ -731,7 +761,7 @@ mod tests {
         let funding_tx = [0x11u8; 32];
         let process_code_tx = [0x22u8; 32];
         let process_code_args = [0xABu8; 32];
-        let lock_args = b"instance-1".to_vec();
+        let lock_args = sample_process_lock_args();
 
         let process_type_script = Script::new_builder()
             .code_hash(CINNABAR_TYPE_ID.pack())
@@ -819,7 +849,7 @@ mod tests {
     fn calculator_rejects_untyped_process_code() {
         let funding_tx = [0x11u8; 32];
         let process_code_tx = [0x22u8; 32];
-        let lock_args = b"instance-1".to_vec();
+        let lock_args = sample_process_lock_args();
 
         let mut rpc = FakeRpcClient::default();
         let funding_lock = always_success_script(vec![0x01]);
@@ -918,7 +948,7 @@ mod tests {
         TransactionCalculator::default()
             .instruction(create_process_state_by_outpoint(
                 (h256_to_hash(&H256(funding_tx)), 0),
-                b"tid-check".to_vec(),
+                sample_process_lock_args(),
                 DEFAULT_PROCESS_STATE_CAPACITY,
             ))
             .apply_skeleton(&rpc, &mut skeleton)
@@ -994,7 +1024,7 @@ mod tests {
         TransactionCalculator::default()
             .instruction(create_process_state(
                 address,
-                b"addr-instance".to_vec(),
+                sample_process_lock_args(),
                 DEFAULT_PROCESS_STATE_CAPACITY,
             ))
             .apply_skeleton(&rpc, &mut skeleton)
@@ -1016,6 +1046,36 @@ mod tests {
         assert!(!ckb_deposit_capacity_ok(MIN_DEPOSIT_CAPACITY - 1, false));
         // xUDT Intentions are not CKB deposits; Process CKB min is not applied.
         assert!(ckb_deposit_capacity_ok(1, true));
+    }
+
+    #[test]
+    fn test_assemble_rejects_intention_without_full_lock() {
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!("Skipping test: binary not built at {bin_path}");
+            return;
+        }
+        let rpc = FakeRpcClient::default();
+        let (process, mut intentions) = sample_process_and_intention();
+        intentions[0].lock = None;
+        let err = process_digest_ok_with_extras(
+            &rpc,
+            intentions,
+            process,
+            AssembleExtras {
+                funding_cells: vec![],
+                cell_deps: vec![sample_code_dep()],
+            },
+            bin_dir,
+        )
+        .err()
+        .expect("lock: None must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("IntentionCell.lock is required") || msg.contains("full Intention lock"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
@@ -1094,13 +1154,17 @@ mod tests {
         let rpc = FakeRpcClient::default();
         let (process, mut intentions) = sample_process_and_intention();
         let foreign_pth = [0xFEu8; 32];
-        intentions[0].lock_args = CidArgs::new(
+        let lock_args = CidArgs::new(
             foreign_pth,
             CidScript::default(),
             sample_beneficiary_payload(),
         )
         .encode()
         .unwrap();
+        intentions[0].lock_args = lock_args.clone();
+        if let Some(lock) = intentions[0].lock.as_mut() {
+            *lock = lock.clone().as_builder().args(lock_args.pack()).build();
+        }
         let err = process_digest_ok_with_extras(
             &rpc,
             intentions,
@@ -1262,8 +1326,7 @@ mod tests {
         }
 
         let rpc = FakeRpcClient::default();
-        let (process, mut intentions) = sample_process_and_intention();
-        intentions[0].data = vec![0xaa, 0xbb];
+        let (process, intentions) = sample_process_and_intention();
         let (skeleton, assembled, _) = process_digest_ok_with_extras(
             &rpc,
             intentions,
@@ -1494,16 +1557,37 @@ mod tests {
                 .hash_type(ScriptHashType::Data1)
                 .args([0u8; 32])
                 .build();
-            filter_intention_cell(pth, cid_tid, 1, Some(typ), vec![0u8; 16], None)
+            filter_intention_cell(
+                pth,
+                cid_tid,
+                1,
+                Some(typ),
+                1u128.to_le_bytes().to_vec(),
+                None,
+            )
         };
-        let batch = vec![valid, foreign_pth, below, malformed, xudt];
+        let invalid_ckb =
+            filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY, None, vec![1], None);
+        let mut zero_xudt = xudt.clone();
+        zero_xudt.data = vec![0; 16];
+        let batch = vec![
+            valid,
+            foreign_pth,
+            below,
+            malformed,
+            xudt,
+            invalid_ckb,
+            zero_xudt,
+        ];
         let reasons = process_filter(&batch, bin_dir).expect("filter");
-        assert_eq!(reasons.len(), 5);
+        assert_eq!(reasons.len(), 7);
         assert_eq!(reasons[0], FILTER_ACCEPTED);
         assert_eq!(reasons[1], FILTER_ACCEPTED); // ownership not checked in filter
         assert_eq!(reasons[2], FILTER_DEPOSIT_BELOW_MINIMUM);
         assert_eq!(reasons[3], FILTER_MALFORMED_DIGEST);
         assert_eq!(reasons[4], FILTER_ACCEPTED);
+        assert_eq!(reasons[5], cid_intention_filter::FILTER_UNSUPPORTED_ASSET);
+        assert_eq!(reasons[6], cid_intention_filter::FILTER_UNSUPPORTED_ASSET);
     }
 
     #[test]
@@ -1630,7 +1714,14 @@ mod tests {
                 .hash_type(ScriptHashType::Data1)
                 .args([0u8; 32])
                 .build();
-            filter_intention_cell(pth, cid_tid, 1, Some(typ), vec![0u8; 16], None)
+            filter_intention_cell(
+                pth,
+                cid_tid,
+                1,
+                Some(typ),
+                1u128.to_le_bytes().to_vec(),
+                None,
+            )
         };
         let batch = vec![valid, below, xudt];
         let reasons = process_filter(&batch, bin_dir).expect("filter");

@@ -58,9 +58,23 @@ on-chain Process lock checks run on **spend**:
 3. **Create** path in `verify.rs` exists for completeness but is not executed
    for output-only mints.
 
-**Lock args:** use distinct Process lock args per live state cell. Identical
-args (including empty) merge cells into one lock group, so a two-Process tx
-becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
+**Lock args** (`ProcessLockArgs`):
+
+```text
+cid_code_hash[32] || cid_hash_type[1] || instance_salt[0..]
+```
+
+- `cid_code_hash` / `cid_hash_type`: exact Intention lock identity this Process
+  authenticates on-chain (live CID code Type ID script hash + `hash_type=type`
+  in normal deployments).
+- `instance_salt`: optional trailing bytes so multiple state cells that share
+  Process code + CID identity still have distinct locks (identical locks merge
+  into one group → N→N / `ProcessPairInvalid`).
+
+Recreate must keep lock args byte-identical (CID identity must not change).
+Malformed args → `ProcessLockArgsInvalid` (41). An Intention targeting this
+Process TYPE_ID whose lock `code_hash`/`hash_type` differ → `CidLockMismatch`
+(40).
 
 | Code | Error |
 |------|--------|
@@ -74,6 +88,8 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 | 37 | `CapacityInsufficient` (fee would drop state below occupied capacity) |
 | 38 | `UnsupportedFundingLock` (extra funding input) |
 | 39 | `DepositBelowMinimum` (CKB Intention capacity &lt; Process `MIN_DEPOSIT_CAPACITY`) |
+| 40 | `CidLockMismatch` (Intention lock ≠ CID identity in Process lock args) |
+| 41 | `ProcessLockArgsInvalid` (malformed Process state lock args) |
 
 ## Intention filter (`Process.filter`)
 
@@ -108,14 +124,32 @@ minimum (token amount rules are separate).
 
 ### Upgrading an existing Process deployment
 
-Replacing the example Process binary at the same code Type ID applies the new
-minimum to existing Intention cells that target its live Process state. Pause
-new deposits and check for live CKB Intentions below 600 CKB for every Process
-instance using that code Type ID. Settle them using the previous assembler
-and deployed binary, or refund them before replacing the code cell. After the
-upgrade, any remaining sub-minimum Intention fails DigestOk with error 39. Use
-the CID refund path without a matching Process pair to return capacity to its
-User Lock.
+**This release changes Process lock args** (CID identity embedded) and the
+Process binary.
+
+**Do not replace the Process code cell in place at the same code Type ID.** New
+Verify rejects legacy state cells whose lock args are not `ProcessLockArgs`
+(e.g. opaque `0x01`), while recreate requires byte-identical lock scripts —
+so an in-place swap **permanently strands** those legacy state cells.
+
+Recommended cutover (parallel deployment):
+
+1. Deploy a **new** Process **code** cell under a **new** code Type ID (new
+   binary with this Verify).
+2. Create **new** Process **state** cells locked to that code Type ID with
+   `ProcessLockArgs` = `cid_code_hash[32]||cid_hash_type[1]||salt` matching the
+   live CID Intention lock (typically Type ID script hash + `hash_type=type`).
+3. Point new Intentions / registry entries at the new state cell TYPE_IDs.
+4. Keep the **old** Process code cell live until legacy state cells are drained
+   (settle / refund with the previous assembler + binary) or **explicitly
+   abandoned** (Lucas’s direct cutover: leave them unspendable and stop
+   routing to them). Consensus does not include a legacy-args migration path.
+
+Deposit-minimum note: once Intentions target a Process instance on the new
+code Type ID, the 600 CKB example floor applies. Pause new deposits on the old
+instance and settle or refund sub-minimum Intentions with the previous
+assembler before abandoning that instance. After cutover, remaining
+sub-minimum Intentions on the new code fail DigestOk with error 39.
 
 ## Capacity / fee (example assemble)
 

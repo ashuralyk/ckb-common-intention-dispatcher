@@ -5,14 +5,19 @@
 //! digest/beneficiary shape, fee budget). Protocol / CID impose no Intention
 //! or deposit floor.
 //!
-//! **Ownership is not checked here.** The Sequencer routes with
-//! [`cid_intention_filter::intention_belongs_to_process`] before calling filter;
-//! on-chain Verify keeps its own `ours_prefix` scoping.
+//! Also defines [`ProcessLockArgs`]: CID lock identity embedded in the Process
+//! state cell's **lock args** so on-chain Verify / assemble can authenticate
+//! Intention locks without a backend-supplied CID Type ID.
+//!
+//! **Sequencer routing** still uses
+//! [`cid_intention_filter::intention_belongs_to_process`] before `Process.filter`
+//! (filter itself stays business-only and does not read Process state).
 
 #![no_std]
 
 extern crate alloc;
 
+use alloc::vec::Vec;
 use cid_intention_filter::{
     FILTER_ACCEPTED, FILTER_DEPOSIT_BELOW_MINIMUM, FILTER_MALFORMED_DIGEST,
     FILTER_UNSUPPORTED_ASSET,
@@ -44,6 +49,91 @@ pub fn ckb_deposit_capacity_ok(capacity: u64, has_type_script: bool) -> bool {
 #[inline]
 pub fn is_supported_script_hash_type(hash_type: u8) -> bool {
     matches!(hash_type, 0 | 1 | 2 | 4)
+}
+
+/// `cid_code_hash` length in [`ProcessLockArgs`].
+pub const PROCESS_LOCK_CID_CODE_HASH_LEN: usize = 32;
+/// Minimum Process lock args length: `cid_code_hash[32] || cid_hash_type[1]`.
+pub const PROCESS_LOCK_ARGS_MIN_LEN: usize = PROCESS_LOCK_CID_CODE_HASH_LEN + 1;
+
+/// Process state-cell **lock args** layout (example Process).
+///
+/// ```text
+/// cid_code_hash[32] || cid_hash_type[1] || instance_salt[0..]
+/// ```
+///
+/// - `cid_code_hash` / `cid_hash_type`: exact Intention lock identity this
+///   Process will count on-chain (typically the live CID code Type ID script
+///   hash with `hash_type = type`).
+/// - `instance_salt`: optional trailing bytes so multiple state cells that
+///   share the same Process code + CID identity still have distinct lock
+///   scripts (CKB merges identical locks into one group).
+///
+/// Must not decode as a CID Intention (`CidArgs`). Recreate must keep these
+/// args byte-identical.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessLockArgs {
+    pub cid_code_hash: [u8; 32],
+    pub cid_hash_type: u8,
+    pub instance_salt: Vec<u8>,
+}
+
+/// Why Process lock args are invalid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessLockArgsError {
+    TooShort,
+    UnsupportedHashType,
+    LooksLikeCidIntention,
+}
+
+impl ProcessLockArgs {
+    pub fn new(cid_code_hash: [u8; 32], cid_hash_type: u8, instance_salt: Vec<u8>) -> Self {
+        Self {
+            cid_code_hash,
+            cid_hash_type,
+            instance_salt,
+        }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, ProcessLockArgsError> {
+        if !is_supported_script_hash_type(self.cid_hash_type) {
+            return Err(ProcessLockArgsError::UnsupportedHashType);
+        }
+        let mut out = Vec::with_capacity(PROCESS_LOCK_ARGS_MIN_LEN + self.instance_salt.len());
+        out.extend_from_slice(&self.cid_code_hash);
+        out.push(self.cid_hash_type);
+        out.extend_from_slice(&self.instance_salt);
+        if CidArgs::decode(&out).is_ok() {
+            return Err(ProcessLockArgsError::LooksLikeCidIntention);
+        }
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProcessLockArgsError> {
+        if bytes.len() < PROCESS_LOCK_ARGS_MIN_LEN {
+            return Err(ProcessLockArgsError::TooShort);
+        }
+        if CidArgs::decode(bytes).is_ok() {
+            return Err(ProcessLockArgsError::LooksLikeCidIntention);
+        }
+        let mut cid_code_hash = [0u8; 32];
+        cid_code_hash.copy_from_slice(&bytes[..PROCESS_LOCK_CID_CODE_HASH_LEN]);
+        let cid_hash_type = bytes[PROCESS_LOCK_CID_CODE_HASH_LEN];
+        if !is_supported_script_hash_type(cid_hash_type) {
+            return Err(ProcessLockArgsError::UnsupportedHashType);
+        }
+        Ok(Self {
+            cid_code_hash,
+            cid_hash_type,
+            instance_salt: bytes[PROCESS_LOCK_ARGS_MIN_LEN..].to_vec(),
+        })
+    }
+
+    /// True when an Intention lock matches this Process's embedded CID identity.
+    #[inline]
+    pub fn matches_intention_lock(&self, lock_code_hash: &[u8; 32], lock_hash_type: u8) -> bool {
+        lock_code_hash == &self.cid_code_hash && lock_hash_type == self.cid_hash_type
+    }
 }
 
 /// Classify one Intention for Process **business** compliance only.
@@ -95,15 +185,27 @@ pub fn classify_intention_excluding_process_lock(
 
     match type_script {
         None => {
+            if !data.is_empty() {
+                return FILTER_UNSUPPORTED_ASSET;
+            }
             if !ckb_deposit_capacity_ok(capacity, false) {
                 return FILTER_DEPOSIT_BELOW_MINIMUM;
+            }
+            // Capacity field + lock code hash, hash type and args. The CKB
+            // Intention has no type or data and must exceed its occupied bytes.
+            let occupied = (41 + lock.args.len() as u64) * 100_000_000;
+            if capacity <= occupied {
+                return FILTER_UNSUPPORTED_ASSET;
             }
         }
         Some((code_hash, hash_type)) => {
             if !is_standard_xudt(code_hash, hash_type) {
                 return FILTER_UNSUPPORTED_ASSET;
             }
-            if data.len() < XUDT_AMOUNT_LEN {
+            let Some(amount) = data.get(..XUDT_AMOUNT_LEN) else {
+                return FILTER_UNSUPPORTED_ASSET;
+            };
+            if amount == [0; XUDT_AMOUNT_LEN] {
                 return FILTER_UNSUPPORTED_ASSET;
             }
         }
@@ -219,9 +321,46 @@ mod tests {
     #[test]
     fn accepts_xudt_below_ckb_min() {
         let lock = lock_for([0xA1; 32]);
-        let data = [0u8; 16];
+        let data = 1u128.to_le_bytes();
         assert_eq!(
             classify_intention(&lock, 1, Some((&XUDT_CODE_HASH, 2)), &data),
+            FILTER_ACCEPTED
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_ckb_data_and_zero_xudt_amount() {
+        let lock = lock_for([0xA1; 32]);
+        assert_eq!(
+            classify_intention(&lock, MIN_DEPOSIT_CAPACITY, None, &[1]),
+            FILTER_UNSUPPORTED_ASSET
+        );
+        let mut data = alloc::vec![0; XUDT_AMOUNT_LEN];
+        data.push(1); // An extension byte does not make the amount nonzero.
+        assert_eq!(
+            classify_intention(&lock, 1, Some((&XUDT_CODE_HASH, 2)), &data),
+            FILTER_UNSUPPORTED_ASSET
+        );
+    }
+
+    #[test]
+    fn rejects_ckb_with_no_capacity_above_occupied() {
+        let lock = lock_for_beneficiary(
+            [0xA1; 32],
+            Script {
+                code_hash: [0xBE; 32],
+                hash_type: 1,
+                args: alloc::vec![1; 600],
+            },
+        );
+        let occupied = (41 + lock.args.len() as u64) * 100_000_000;
+        assert!(occupied >= MIN_DEPOSIT_CAPACITY);
+        assert_eq!(
+            classify_intention(&lock, occupied, None, &[]),
+            FILTER_UNSUPPORTED_ASSET
+        );
+        assert_eq!(
+            classify_intention(&lock, occupied + 1, None, &[]),
             FILTER_ACCEPTED
         );
     }
@@ -267,5 +406,20 @@ mod tests {
     fn fee_from_tx_molecule_len_matches_feerate_formula() {
         let len = 1000u64;
         assert_eq!(fee_from_tx_molecule_len(len), (len + 4) * FEE_RATE / 1000);
+    }
+
+    #[test]
+    fn process_lock_args_round_trip_and_rejects_bad() {
+        let args = ProcessLockArgs::new([0xC1; 32], 1, alloc::vec![0x01, 0x02]);
+        let bytes = args.encode().unwrap();
+        assert_eq!(bytes.len(), 35);
+        assert_eq!(ProcessLockArgs::decode(&bytes).unwrap(), args);
+        assert!(ProcessLockArgs::decode(&bytes[..32]).is_err());
+        assert!(ProcessLockArgs::new([0xC1; 32], 3, alloc::vec![])
+            .encode()
+            .is_err());
+        assert!(args.matches_intention_lock(&[0xC1; 32], 1));
+        assert!(!args.matches_intention_lock(&[0xC1; 32], 2));
+        assert!(!args.matches_intention_lock(&[0xC2; 32], 1));
     }
 }

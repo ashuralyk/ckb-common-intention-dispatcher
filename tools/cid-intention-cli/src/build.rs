@@ -578,6 +578,12 @@ fn create_signed_intention_bundle_inner(
             "process_type_hash".into(),
             Value::String(encode_hex(&process_type_hash)),
         );
+        if req.enforce_example_process_deposit_minimum {
+            obj.insert(
+                "example_process_type_script".into(),
+                serde_json::to_value(&req.process_type_script)?,
+            );
+        }
     }
     // Belt-and-suspenders: ensure privkey hex is not present.
     let dumped = serde_json::to_string(&value)?;

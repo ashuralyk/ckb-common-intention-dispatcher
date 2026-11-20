@@ -16,8 +16,13 @@ CID only checks that this type hash appears in **both** inputs and outputs
 including **TYPE_ID continuity** (Process lock input type hash == output type
 hash) and forbidding that Type ID on non-Process-lock outputs.
 
-**Process lock args** must be distinct per live instance. Empty / shared args
-merge cells into one lock group (`ProcessPairInvalid` on multi-Process txs).
+**Process lock args** encode CID Intention lock identity plus an instance salt:
+
+`cid_code_hash[32] || cid_hash_type[1] || instance_salt[0..]`. On-chain Verify
+(and assemble, which reads the live Process state cell) count an Intention as
+ours only when its lock `code_hash`/`hash_type` match those fields **and**
+`process_type_hash` equals this Process TYPE_ID. `Process.filter` stays
+business-only (no Process state). Args must be distinct per live instance.
 
 **Creation:** CKB builds lock groups from inputs, so an output-only Process lock
 on first mint never runs `verify_create`. Creation tools (CLI / deploy) must
@@ -91,7 +96,7 @@ Host wrapper: `cid_process_example_calculator::process_filter`.
 | `FILTER_MALFORMED_CELL` | 1 | Packed `CellOutput` / framing invalid |
 | `FILTER_RESERVED_2` | 2 | Reserved (was ownership / not-Intention) |
 | `FILTER_RESERVED_3` | 3 | Reserved (was process mismatch) |
-| `FILTER_UNSUPPORTED_ASSET` | 4 | Typed asset not supported (e.g. non-xUDT) |
+| `FILTER_UNSUPPORTED_ASSET` | 4 | Unsupported type or asset data (empty CKB data with capacity above occupied, or a nonzero xUDT amount required) |
 | `FILTER_DEPOSIT_BELOW_MINIMUM` | 5 | CKB deposit below Process minimum |
 | `FILTER_MALFORMED_DIGEST` | 6 | Payload / digest undecodable for this Process |
 | `FILTER_UNSUPPORTED_ACTION` | 7 | Action not supported (reserved) |

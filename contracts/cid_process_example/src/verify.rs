@@ -5,7 +5,9 @@ use crate::{Context, ProcessError};
 use alloc::vec;
 use alloc::vec::Vec;
 use cid_intention_filter::FILTER_ACCEPTED;
-use cid_process_example_policy::{fee_from_tx_molecule_len, is_supported_script_hash_type};
+use cid_process_example_policy::{
+    fee_from_tx_molecule_len, is_supported_script_hash_type, ProcessLockArgs,
+};
 use cid_protocol::{
     is_standard_xudt, is_type_id_script, CidArgs, Script as CidScript, PROCESS_TYPE_HASH_LEN,
     XUDT_AMOUNT_LEN,
@@ -62,6 +64,8 @@ fn verify_create() -> Result<Option<&'static str>> {
     if output_indices.len() != 1 {
         return Err(ProcessError::ProcessPairInvalid.into());
     }
+    // Rarely executed (output-only mint); still reject malformed lock args.
+    let _ = our_process_lock_args()?;
     require_type_id_type(output_indices[0], Source::Output)?;
     Ok(None)
 }
@@ -69,18 +73,27 @@ fn verify_create() -> Result<Option<&'static str>> {
 /// Transfer: exactly one Process lock input and one Process lock output.
 ///
 /// Identity continuity: input and output must carry the **same** TYPE_ID type
-/// script hash. The TYPE_ID must not appear on any non-Process-lock output
-/// (prevents CID DigestOk matching via an attacker cell while the Process
-/// cell migrates to a new Type ID).
+/// script hash **and** identical Process lock scripts (including
+/// [`ProcessLockArgs`] — CID identity must not change on recreate). The
+/// TYPE_ID must not appear on any non-Process-lock output.
 ///
-/// Note: Process lock **args** should be distinct per live instance. Empty or
-/// shared args merge cells into one lock group (1→1 becomes N→N and fails
-/// `ProcessPairInvalid`).
+/// Process lock args encode CID lock identity + optional instance salt; they
+/// must be distinct per live instance so lock groups do not merge.
 fn verify_lock_pair() -> Result<Option<&'static str>> {
     let input_indices = this_script_indices(Source::Input, ScriptPlace::Lock)?;
     let output_indices = this_script_indices(Source::Output, ScriptPlace::Lock)?;
 
     if input_indices.len() != 1 || output_indices.len() != 1 {
+        return Err(ProcessError::ProcessPairInvalid.into());
+    }
+    // Decode/validate Process lock args early (Transfer only runs in this group).
+    let _ = our_process_lock_args()?;
+    let in_lock = load_cell_lock(input_indices[0], Source::Input)
+        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let out_lock = load_cell_lock(output_indices[0], Source::Output)
+        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+    if in_lock.as_slice() != out_lock.as_slice() {
+        // Changing lock args would swap CID identity; reject explicitly.
         return Err(ProcessError::ProcessPairInvalid.into());
     }
     let in_hash = require_type_id_type(input_indices[0], Source::Input)?;
@@ -90,6 +103,12 @@ fn verify_lock_pair() -> Result<Option<&'static str>> {
     }
     forbid_type_id_on_non_process_outputs(&in_hash)?;
     Ok(None)
+}
+
+fn our_process_lock_args() -> core::result::Result<ProcessLockArgs, ProcessError> {
+    let script = load_script().map_err(|_| ProcessError::ProcessPairInvalid)?;
+    ProcessLockArgs::decode(&script.args().raw_data())
+        .map_err(|_| ProcessError::ProcessLockArgsInvalid)
 }
 
 /// Bound Process state-cell capacity debits and require they fund the tx fee.
@@ -282,9 +301,10 @@ fn collect_output_obligations(
 ) -> core::result::Result<(Vec<OutputObligation>, Vec<OutputObligation>), ProcessError> {
     // Intention `process_type_hash` is the TYPE_ID type-script hash of this
     // Process state cell — not the Process lock script hash.
-    // Scoping matches bd11d44: `ours_prefix` only (no CID Type-ID ownership
-    // re-check — that is Sequencer-side via cid-intention-filter).
+    // "Ours" also requires Intention lock code_hash + hash_type equal the CID
+    // identity embedded in this Process state's lock args (Codex finding 5).
     let our_type_hash = our_process_type_id()?;
+    let expected_cid = our_process_lock_args()?;
     let digest_ok_hashes = type_hashes_in_both_io()?;
 
     let mut ours = Vec::new();
@@ -308,6 +328,12 @@ fn collect_output_obligations(
 
         if digest_ok {
             if ours_prefix {
+                let code_hash: [u8; 32] = lock.code_hash().unpack();
+                let hash_type: u8 = lock.hash_type().into();
+                if !expected_cid.matches_intention_lock(&code_hash, hash_type) {
+                    // Forged non-CID lock with CID-shaped args targeting us.
+                    return Err(ProcessError::CidLockMismatch);
+                }
                 // Shared business classify (deposit / asset / digest) — same SoT
                 // as assemble. Ownership is not re-checked here. Pass Process
                 // lock code_hash so a Process-binary beneficiary is rejected

@@ -478,7 +478,14 @@ fn create_process_state_shape_type_id_registry_and_no_key_leak() {
         lock["code_hash"].as_str().unwrap(),
         format!("0x{}", hex::encode(expected_lock_code))
     );
-    assert_eq!(lock["args"].as_str().unwrap(), "0x01");
+    let expected_args = tx["process_lock_args"].as_str().unwrap();
+    assert_eq!(lock["args"].as_str().unwrap(), expected_args);
+    let cid_type = req.cid_lock_dep.type_script.as_ref().unwrap();
+    let expected_cid = process_type_hash_of(cid_type).unwrap();
+    let mut want = expected_cid.to_vec();
+    want.push(1);
+    want.push(0x01);
+    assert_eq!(expected_args, format!("0x{}", hex::encode(want)));
 
     let typ = &outputs[0]["type"];
     assert_eq!(
@@ -508,8 +515,6 @@ fn create_process_state_shape_type_id_registry_and_no_key_leak() {
     assert!(tx["state_outpoint"]["tx_hash"].as_str().is_some());
     assert_eq!(tx["state_outpoint"]["index"].as_u64().unwrap(), 0);
     assert_eq!(tx["fee_rate"].as_u64().unwrap(), 1000);
-    let cid_type = req.cid_lock_dep.type_script.as_ref().unwrap();
-    let expected_cid = process_type_hash_of(cid_type).unwrap();
     assert_eq!(
         tx["cid_code_type_id"].as_str().unwrap(),
         format!("0x{}", hex::encode(expected_cid))
@@ -531,12 +536,153 @@ fn create_process_state_shape_type_id_registry_and_no_key_leak() {
 fn create_process_rejects_empty_lock_args() {
     let secret = key(0x42);
     let mut req = fixture_process_request(&secret);
-    req.process_lock_args = "0x".into();
+    req.process_lock_salt = None;
+    req.process_lock_args = Some("0x".into());
     let err = create_signed_process_state(&req, &secret).unwrap_err();
     match err {
-        CliError::InvalidRequest(msg) => assert!(msg.contains("non-empty"), "{msg}"),
+        CliError::InvalidRequest(msg) => assert!(
+            msg.contains("process_lock_args invalid") || msg.contains("TooShort"),
+            "{msg}"
+        ),
         other => panic!("expected InvalidRequest, got {other:?}"),
     }
+}
+
+#[test]
+fn create_process_rejects_unsupported_cid_hash_type_in_lock_args() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    req.process_lock_salt = None;
+    let cid = process_type_hash_of(req.cid_lock_dep.type_script.as_ref().unwrap()).unwrap();
+    let mut b = cid.to_vec();
+    b.push(3); // unsupported ScriptHashType
+    b.push(0x01);
+    req.process_lock_args = Some(format!("0x{}", hex::encode(b)));
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    assert!(
+        matches!(err, CliError::InvalidRequest(ref msg) if msg.contains("process_lock_args invalid")),
+        "{err}"
+    );
+}
+
+fn process_create_output_lock_args(tx: &serde_json::Value) -> &str {
+    let inner = tx
+        .get("inner")
+        .or_else(|| tx.get("transaction"))
+        .unwrap_or(tx);
+    let transaction = if inner.get("outputs").is_some() {
+        inner
+    } else {
+        inner.get("transaction").unwrap_or(inner)
+    };
+    transaction["outputs"][0]["lock"]["args"].as_str().unwrap()
+}
+
+#[test]
+fn create_process_autofills_lock_args_without_salt() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    req.process_lock_args = None;
+    req.process_lock_salt = None;
+    let tx = create_signed_process_state(&req, &secret).unwrap();
+    let cid = process_type_hash_of(req.cid_lock_dep.type_script.as_ref().unwrap()).unwrap();
+    let mut want = cid.to_vec();
+    want.push(1);
+    let expected = format!("0x{}", hex::encode(&want));
+    assert_eq!(tx["process_lock_args"].as_str().unwrap(), expected);
+    assert_eq!(process_create_output_lock_args(&tx), expected);
+}
+
+#[test]
+fn create_process_autofills_lock_args_with_salt() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    req.process_lock_args = None;
+    req.process_lock_salt = Some("0x0102".into());
+    let tx = create_signed_process_state(&req, &secret).unwrap();
+    let cid = process_type_hash_of(req.cid_lock_dep.type_script.as_ref().unwrap()).unwrap();
+    let mut want = cid.to_vec();
+    want.push(1);
+    want.extend_from_slice(&[0x01, 0x02]);
+    let expected = format!("0x{}", hex::encode(&want));
+    assert_eq!(tx["process_lock_args"].as_str().unwrap(), expected);
+    assert_eq!(process_create_output_lock_args(&tx), expected);
+}
+
+#[test]
+fn create_process_accepts_explicit_lock_args_matching_cid() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    let cid = process_type_hash_of(req.cid_lock_dep.type_script.as_ref().unwrap()).unwrap();
+    let mut args = cid.to_vec();
+    args.push(1);
+    args.push(0xAB);
+    req.process_lock_salt = None;
+    req.process_lock_args = Some(format!("0x{}", hex::encode(&args)));
+    let tx = create_signed_process_state(&req, &secret).unwrap();
+    assert_eq!(
+        tx["process_lock_args"].as_str().unwrap(),
+        format!("0x{}", hex::encode(&args))
+    );
+}
+
+#[test]
+fn create_process_rejects_explicit_lock_args_wrong_cid_code_hash() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    let mut args = vec![0xEEu8; 32];
+    args.push(1);
+    args.push(0x01);
+    req.process_lock_salt = None;
+    req.process_lock_args = Some(format!("0x{}", hex::encode(args)));
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CliError::InvalidRequest(ref msg) if msg.contains("CID identity must match cid_lock_dep")
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn create_process_rejects_explicit_lock_args_wrong_hash_type() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    let cid = process_type_hash_of(req.cid_lock_dep.type_script.as_ref().unwrap()).unwrap();
+    let mut args = cid.to_vec();
+    args.push(2); // Data1, not type
+    args.push(0x01);
+    req.process_lock_salt = None;
+    req.process_lock_args = Some(format!("0x{}", hex::encode(args)));
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CliError::InvalidRequest(ref msg) if msg.contains("CID identity must match cid_lock_dep")
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn create_process_rejects_both_lock_args_and_salt() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    let cid = process_type_hash_of(req.cid_lock_dep.type_script.as_ref().unwrap()).unwrap();
+    let mut args = cid.to_vec();
+    args.push(1);
+    req.process_lock_args = Some(format!("0x{}", hex::encode(args)));
+    req.process_lock_salt = Some("0x01".into());
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CliError::InvalidRequest(ref msg)
+                if msg.contains("process_lock_args") && msg.contains("process_lock_salt")
+        ),
+        "{err}"
+    );
 }
 
 #[test]
@@ -641,10 +787,13 @@ fn process_lock_args_cannot_use_intention_format() {
     let secret = key(0x42);
     let mut process = fixture_process_request(&secret);
     let intention = create_signed_intention(&fixture_request(&secret), &secret).unwrap();
-    process.process_lock_args = intention["outputs"][0]["lock"]["args"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    process.process_lock_salt = None;
+    process.process_lock_args = Some(
+        intention["outputs"][0]["lock"]["args"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    );
     assert!(create_signed_process_state(&process, &secret).is_err());
 }
 

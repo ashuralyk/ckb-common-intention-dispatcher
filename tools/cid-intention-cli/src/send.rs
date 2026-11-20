@@ -12,6 +12,8 @@ use ckb_cinnabar_calculator::{
 };
 use serde_json::{json, Value};
 
+use cid_process_example_calculator::{ProcessLockArgs, PROCESS_LOCK_ARGS_MIN_LEN};
+
 use crate::build::{process_type_hash_of, CliError};
 use crate::hexutil::{decode_hash32, decode_hex, encode_hex};
 use crate::process_build::{
@@ -47,6 +49,7 @@ fn strip_tx_metadata(mut value: Value) -> Value {
     if let Some(obj) = value.as_object_mut() {
         obj.remove("hash");
         obj.remove("process_type_hash");
+        obj.remove("example_process_type_script");
         // Process create metadata (not part of RPC Transaction).
         obj.remove("state_outpoint");
         obj.remove("identity_type_id");
@@ -55,6 +58,7 @@ fn strip_tx_metadata(mut value: Value) -> Value {
         obj.remove("registry_post");
         obj.remove("cid_code_type_id");
         obj.remove("cid_code_type_id_args");
+        obj.remove("process_lock_args");
         obj.remove("fee_shannons");
         obj.remove("fee_rate");
     }
@@ -70,16 +74,30 @@ fn has_process_metadata(value: &Value) -> bool {
         "registry_post",
         "cid_code_type_id",
         "cid_code_type_id_args",
+        "process_lock_args",
     ]
     .iter()
     .any(|field| value.get(*field).is_some())
 }
 
-fn extract_transaction(
-    mut value: &Value,
-) -> Result<(Value, ckb_jsonrpc_types::Transaction, Option<&Value>), CliError> {
+struct SignedTransaction<'a> {
+    body: Value,
+    parsed: ckb_jsonrpc_types::Transaction,
+    process_metadata: Option<&'a Value>,
+    example_process_type_script: Option<&'a Value>,
+}
+
+fn extract_transaction(mut value: &Value) -> Result<SignedTransaction<'_>, CliError> {
     let mut process_metadata = None;
+    let mut example_process_type_script = None;
     loop {
+        if let Some(script) = value.get("example_process_type_script") {
+            if example_process_type_script.replace(script).is_some() {
+                return Err(CliError::InvalidRequest(
+                    "example_process_type_script must come from one transaction layer".into(),
+                ));
+            }
+        }
         if has_process_metadata(value) && process_metadata.replace(value).is_some() {
             return Err(CliError::InvalidRequest(
                 "Process create metadata must come from one transaction layer".into(),
@@ -93,7 +111,12 @@ fn extract_transaction(
                     "signed JSON is not a valid CKB Transaction after stripping metadata: {e}"
                 ))
             })?;
-            return Ok((cleaned, parsed, process_metadata));
+            return Ok(SignedTransaction {
+                body: cleaned,
+                parsed,
+                process_metadata,
+                example_process_type_script,
+            });
         }
         value = value
             .get("transaction")
@@ -213,12 +236,17 @@ fn script_json_from_rpc(v: &Value) -> Result<ScriptJson, CliError> {
     })
 }
 
-/// Collect Type-ID `code_hash` values for **CID Intention** output locks only.
+/// Collect the CID code and target Process Type IDs from Intention output locks.
 ///
 /// Must not treat every `hash_type=type` lock as CID: testnet secp256k1/blake160
 /// also uses `hash_type=type`, often with a sighash `dep_group` whose group cell
 /// is not a TYPE_ID code cell. Scope by successful `CidArgs` decode.
-fn cid_intention_type_id_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, CliError> {
+struct CidIntentionTarget {
+    cid_code_hash: [u8; 32],
+    process_type_hash: [u8; 32],
+}
+
+fn cid_intention_targets(tx: &Value) -> Result<Vec<CidIntentionTarget>, CliError> {
     let outputs = tx
         .get("outputs")
         .and_then(|o| o.as_array())
@@ -234,16 +262,19 @@ fn cid_intention_type_id_code_hashes(tx: &Value) -> Result<Vec<[u8; 32]>, CliErr
         }
         let args_hex = lock.get("args").and_then(|a| a.as_str()).unwrap_or("0x");
         let args = decode_hex(args_hex)?;
-        if cid_protocol::CidArgs::decode(&args).is_err() {
+        let Ok(cid) = cid_protocol::CidArgs::decode(&args) else {
             continue;
-        }
+        };
         let code = lock
             .get("code_hash")
             .and_then(|c| c.as_str())
             .ok_or_else(|| {
                 CliError::InvalidRequest("CID Intention lock missing code_hash".into())
             })?;
-        out.push(decode_hash32(code)?);
+        out.push(CidIntentionTarget {
+            cid_code_hash: decode_hash32(code)?,
+            process_type_hash: cid.process_type_hash,
+        });
     }
     Ok(out)
 }
@@ -296,9 +327,12 @@ fn collect_live_type_id_script_hashes(
 /// outpoint would otherwise broadcast a stranded Intention. Non-CID type locks
 /// (e.g. genesis secp) are ignored so raw-transaction send with `dep_group`
 /// remains usable.
-fn assert_live_cid_type_id_matches_intention(url: &str, tx: &Value) -> Result<(), CliError> {
-    let want_hashes = cid_intention_type_id_code_hashes(tx)?;
-    if want_hashes.is_empty() {
+fn assert_live_cid_type_id_matches_intention(
+    url: &str,
+    tx: &Value,
+    targets: &[CidIntentionTarget],
+) -> Result<(), CliError> {
+    if targets.is_empty() {
         return Ok(());
     }
     let cell_deps = tx.get("cell_deps").and_then(|c| c.as_array());
@@ -309,13 +343,79 @@ fn assert_live_cid_type_id_matches_intention(url: &str, tx: &Value) -> Result<()
     }
 
     let live_type_ids = collect_live_type_id_script_hashes(url, tx)?;
-    for want in &want_hashes {
-        if !live_type_ids.iter().flatten().any(|got| got == want) {
+    for target in targets {
+        if !live_type_ids.contains(&Some(target.cid_code_hash)) {
             return Err(CliError::NetworkGuard(
                 "Intention lock Type ID does not match any live celldep TYPE_ID script hash; refusing send"
                     .into(),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Resolve the signed target's current state and check the CID identity it accepts.
+fn assert_example_process_cid_binding(
+    url: &str,
+    script: &Value,
+    targets: &[CidIntentionTarget],
+) -> Result<(), CliError> {
+    let process_type_hash = type_id_script_hash(script)?.ok_or_else(|| {
+        CliError::NetworkGuard("example Process state type must be a TYPE_ID script".into())
+    })?;
+    if targets.is_empty()
+        || targets
+            .iter()
+            .any(|target| target.process_type_hash != process_type_hash)
+    {
+        return Err(CliError::NetworkGuard(
+            "example Process TYPE_ID does not match the signed Intention targets".into(),
+        ));
+    }
+
+    let page = rpc_call(
+        url,
+        "get_cells",
+        json!([{
+            "script": script,
+            "script_type": "type",
+            "script_search_mode": "exact",
+            "with_data": false
+        }, "asc", "0x2", null]),
+    )?;
+    let state = page["objects"]
+        .as_array()
+        .filter(|objects| objects.len() == 1)
+        .and_then(|objects| objects[0].get("out_point"))
+        .ok_or_else(|| {
+            CliError::NetworkGuard("expected one indexed example Process state".into())
+        })?;
+    let live = rpc_call(url, "get_live_cell", json!([state, false]))?;
+    let output = &live["cell"]["output"];
+    if live["status"].as_str() != Some("live")
+        || type_id_script_hash(&output["type"])? != Some(process_type_hash)
+    {
+        return Err(CliError::NetworkGuard(
+            "indexed example Process state no longer matches the live TYPE_ID".into(),
+        ));
+    }
+    let lock = script_json_from_rpc(&output["lock"])?;
+    let args = decode_hex(&lock.args)?;
+    if !args.is_empty() && args.len() < PROCESS_LOCK_ARGS_MIN_LEN {
+        // Legacy example states use short opaque args without a CID binding.
+        return Ok(());
+    }
+    let binding = ProcessLockArgs::decode(&args).map_err(|err| {
+        CliError::NetworkGuard(format!("live example Process lock args invalid ({err:?})"))
+    })?;
+    if targets
+        .iter()
+        .any(|target| !binding.matches_intention_lock(&target.cid_code_hash, 1))
+    {
+        return Err(CliError::NetworkGuard(
+            "Intention CID lock does not match the binding in the live example Process state"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -359,11 +459,37 @@ fn validate_process_state_metadata(
     let identity_args = decode_hash32(typ["args"].as_str().unwrap_or_default())?;
     let lock = &output["lock"];
     let args = decode_hex(lock["args"].as_str().unwrap_or_default())?;
-    if lock["hash_type"].as_str() != Some("type")
-        || args.is_empty()
-        || cid_protocol::CidArgs::decode(&args).is_ok()
-    {
-        return Err(CliError::NetworkGuard("invalid Process state lock".into()));
+    if lock["hash_type"].as_str() != Some("type") {
+        return Err(CliError::NetworkGuard(
+            "Process state lock hash_type must be `type`".into(),
+        ));
+    }
+    let decoded = ProcessLockArgs::decode(&args).map_err(|e| {
+        CliError::NetworkGuard(format!(
+            "Process state lock args invalid ({e:?}): need cid_code_hash[32]||cid_hash_type[1]||salt"
+        ))
+    })?;
+    if decoded.cid_hash_type != 1 {
+        return Err(CliError::NetworkGuard(
+            "ProcessLockArgs.cid_hash_type must be `type` (1)".into(),
+        ));
+    }
+    let meta_cid = metadata_hash(metadata, "cid_code_type_id")?;
+    if decoded.cid_code_hash != meta_cid {
+        return Err(CliError::NetworkGuard(
+            "ProcessLockArgs.cid_code_hash must equal live CID code Type ID".into(),
+        ));
+    }
+    if let Some(echoed) = metadata.get("process_lock_args") {
+        let echoed = echoed.as_str().ok_or_else(|| {
+            CliError::NetworkGuard("echoed process_lock_args must be a hex string".into())
+        })?;
+        let echoed_bytes = decode_hex(echoed)?;
+        if echoed_bytes != args {
+            return Err(CliError::NetworkGuard(
+                "echoed process_lock_args metadata does not match signed state lock args".into(),
+            ));
+        }
     }
     let process_code = decode_hash32(lock["code_hash"].as_str().unwrap_or_default())?;
     let state_outpoint = &metadata["state_outpoint"];
@@ -437,6 +563,18 @@ fn assert_live_process_and_cid_code_type_ids(
             "CID and Process code Type IDs must be distinct".into(),
         ));
     }
+    let state_args = decode_hex(
+        tx["outputs"][PROCESS_STATE_OUTPUT_INDEX]["lock"]["args"]
+            .as_str()
+            .unwrap_or_default(),
+    )?;
+    let decoded = ProcessLockArgs::decode(&state_args)
+        .map_err(|e| CliError::NetworkGuard(format!("Process state lock args invalid ({e:?})")))?;
+    if decoded.cid_code_hash != cid {
+        return Err(CliError::NetworkGuard(
+            "ProcessLockArgs.cid_code_hash must equal live CID code Type ID".into(),
+        ));
+    }
     let live = collect_live_type_id_script_hashes(url, tx)?;
     for (role, index, expected) in [
         ("CID code", CID_CODE_DEP_INDEX, cid),
@@ -453,7 +591,8 @@ fn assert_live_process_and_cid_code_type_ids(
 /// Submit a signed tx JSON to a CKB JSON-RPC endpoint after testnet/genesis checks.
 pub fn send_signed_transaction(opts: &SendOptions, signed: &Value) -> Result<String, CliError> {
     assert_testnet_guards(opts)?;
-    let (tx, parsed, process_metadata) = extract_transaction(signed)?;
+    let signed = extract_transaction(signed)?;
+    let tx = signed.body;
 
     let chain_info = rpc_call(&opts.rpc_url, "get_blockchain_info", json!([]))?;
     assert_allowed_testnet_chain(&chain_info)?;
@@ -471,9 +610,13 @@ pub fn send_signed_transaction(opts: &SendOptions, signed: &Value) -> Result<Str
         });
     }
 
-    assert_live_cid_type_id_matches_intention(&opts.rpc_url, &tx)?;
-    if let Some(metadata) = process_metadata {
-        assert_live_process_and_cid_code_type_ids(&opts.rpc_url, &tx, parsed, metadata)?;
+    let targets = cid_intention_targets(&tx)?;
+    assert_live_cid_type_id_matches_intention(&opts.rpc_url, &tx, &targets)?;
+    if let Some(script) = signed.example_process_type_script {
+        assert_example_process_cid_binding(&opts.rpc_url, script, &targets)?;
+    }
+    if let Some(metadata) = signed.process_metadata {
+        assert_live_process_and_cid_code_type_ids(&opts.rpc_url, &tx, signed.parsed, metadata)?;
     }
 
     let result = rpc_call(
