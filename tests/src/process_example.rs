@@ -42,6 +42,7 @@ const MAX_CYCLES: u64 = 50_000_000;
 const ERROR_BENEFICIARY_MISSING: i8 = 32;
 const ERROR_BENEFICIARY_AMOUNT_MISMATCH: i8 = 33;
 const ERROR_TYPE_ID_INVALID: i8 = 35;
+const ERROR_CAPACITY_INSUFFICIENT: i8 = 37;
 const ERROR_DEPOSIT_BELOW_MINIMUM: i8 = 39;
 
 fn require_binaries() {
@@ -1209,6 +1210,69 @@ async fn assemble_and_verify_data2_beneficiary() {
     verify(&rpc, skeleton, vec![])
         .await
         .expect("on-chain verify must accept a Data2 beneficiary that assemble emitted");
+}
+
+#[tokio::test]
+async fn reject_unsupported_beneficiary_hash_type() {
+    // Shared policy / filter / assemble / verify all reject hash_type=3.
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
+    let bad_payload = Payload::from_script(&CidScript {
+        code_hash: [0xBE; 32],
+        hash_type: 3,
+        args: vec![0x01],
+    })
+    .unwrap();
+    let args = encode_cid_args(process_hash, user_lock_cid(), bad_payload);
+    let intention = seed_intention(&mut rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("unsupported beneficiary hash_type must fail");
+    assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
+}
+
+#[tokio::test]
+async fn reject_excess_process_state_capacity_debit() {
+    // State-cell debit must be bounded by the shared fee policy (not unlimited).
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = apply_transfer(&mut rpc, dest_lock(), CKB_CAPACITY, vec![]);
+    // ConsumeProcess recreates Process as outputs[0] at full input capacity; drain
+    // far beyond any plausible FeeRate(1000) fee for this tx.
+    let drain = 50_0000_0000u64; // 50 CKB
+    assert!(drain > 1_000_000, "drain must exceed any tiny fee budget");
+    let process_out = &mut skeleton.outputs[0];
+    let before = process_out.capacity_shannons();
+    process_out.output = process_out
+        .output
+        .clone()
+        .as_builder()
+        .capacity(before - drain)
+        .build();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("excess Process state debit must fail");
+    assert_eq!(exit(err), ERROR_CAPACITY_INSUFFICIENT);
 }
 
 #[tokio::test]

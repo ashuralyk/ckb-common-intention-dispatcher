@@ -121,9 +121,12 @@ User Lock.
 
 `Process.assemble` computes fee as `FeeRate(FEE_RATE).fee(serialized_size_in_block)`
 — i.e. `floor((molecule_len + 4) × FEE_RATE / 1000)` with Process-owned
-`FEE_RATE = 1000` (testnet `min_fee_rate`) — and deducts it from the recreated
-state cell. The `+ 4` matches CKB `serialized_size_in_block` (molecule
-`NUMBER_SIZE` in the block), so the fee is never below the node min fee. If the
-result would be below occupied capacity, assemble errors. Draft must include
-CID, Process, and applicable xUDT cell_deps; the example copies them through.
-Submit returned molecule bytes unchanged.
+`FEE_RATE = 1000` (testnet `min_fee_rate`, shared via
+`cid-process-example-policy`) — and deducts it from the recreated state cell.
+The `+ 4` matches CKB `serialized_size_in_block` (molecule `NUMBER_SIZE` in the
+block), so the fee is never below the node min fee. If the result would be
+below occupied capacity, assemble errors. On-chain Transfer verify bounds the
+state-cell capacity debit by the same fee formula (rejects excess drains with
+`CapacityInsufficient` / 37). Draft must include CID, Process, and applicable
+xUDT cell_deps; the example copies them through. Submit returned molecule bytes
+unchanged.

@@ -2,7 +2,8 @@
 //!
 //! Single source of truth for **business** rules shared by `Process.filter`,
 //! `Process.assemble`, and on-chain Verify (deposit floor, supported assets,
-//! digest/beneficiary shape). Protocol / CID impose no Intention or deposit floor.
+//! digest/beneficiary shape, fee budget). Protocol / CID impose no Intention
+//! or deposit floor.
 //!
 //! **Ownership is not checked here.** The Sequencer routes with
 //! [`cid_intention_filter::intention_belongs_to_process`] before calling filter;
@@ -22,10 +23,27 @@ use cid_protocol::{is_standard_xudt, CidArgs, Script, XUDT_AMOUNT_LEN};
 /// Process: **600 CKB**.
 pub const MIN_DEPOSIT_CAPACITY: u64 = 600_0000_0000;
 
+/// Process-owned fee rate (shannons per kB), matching testnet `min_fee_rate`.
+pub const FEE_RATE: u64 = 1000;
+
+/// CKB `FeeRate(FEE_RATE).fee(serialized_size_in_block)` with
+/// `serialized_size_in_block = molecule_len + 4`.
+#[inline]
+pub fn fee_from_tx_molecule_len(molecule_len: u64) -> u64 {
+    let weight = molecule_len.saturating_add(4);
+    weight.saturating_mul(FEE_RATE) / 1000
+}
+
 /// Reject CKB-only deposit Intentions below [`MIN_DEPOSIT_CAPACITY`].
 #[inline]
 pub fn ckb_deposit_capacity_ok(capacity: u64, has_type_script: bool) -> bool {
     has_type_script || capacity >= MIN_DEPOSIT_CAPACITY
+}
+
+/// Beneficiary / lock `hash_type` values CKB recognizes (`data`/`type`/`data1`/`data2`).
+#[inline]
+pub fn is_supported_script_hash_type(hash_type: u8) -> bool {
+    matches!(hash_type, 0 | 1 | 2 | 4)
 }
 
 /// Classify one Intention for Process **business** compliance only.
@@ -42,8 +60,12 @@ pub fn classify_intention(
     let Ok(cid) = CidArgs::decode(&lock.args) else {
         return FILTER_MALFORMED_DIGEST;
     };
-    // Example Process DigestOk requires a beneficiary Script in the payload.
-    if cid.entry.payload.to_script().is_err() {
+    // Example Process DigestOk requires a beneficiary Script with a CKB-valid
+    // hash_type (shared with assemble / on-chain `packed_script`).
+    let Ok(beneficiary) = cid.entry.payload.to_script() else {
+        return FILTER_MALFORMED_DIGEST;
+    };
+    if !is_supported_script_hash_type(beneficiary.hash_type) {
         return FILTER_MALFORMED_DIGEST;
     }
 
@@ -84,15 +106,21 @@ mod tests {
     use cid_protocol::{Payload, SCRIPT_HASH_TYPE_TYPE, XUDT_CODE_HASH};
 
     fn lock_for(pth: [u8; 32]) -> Script {
-        let args = CidArgs::new(
+        lock_for_beneficiary(
             pth,
-            Script::default(),
-            Payload::from_script(&Script {
+            Script {
                 code_hash: [0xBE; 32],
                 hash_type: 1,
                 args: alloc::vec![1],
-            })
-            .unwrap(),
+            },
+        )
+    }
+
+    fn lock_for_beneficiary(pth: [u8; 32], beneficiary: Script) -> Script {
+        let args = CidArgs::new(
+            pth,
+            Script::default(),
+            Payload::from_script(&beneficiary).unwrap(),
         )
         .encode()
         .unwrap();
@@ -132,6 +160,39 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unsupported_beneficiary_hash_type() {
+        // hash_type=3 is not a CKB ScriptHashType; verify's packed_script rejects it.
+        let lock = lock_for_beneficiary(
+            [0xA1; 32],
+            Script {
+                code_hash: [0xBE; 32],
+                hash_type: 3,
+                args: alloc::vec![1],
+            },
+        );
+        assert_eq!(
+            classify_intention(&lock, MIN_DEPOSIT_CAPACITY, None, &[]),
+            FILTER_MALFORMED_DIGEST
+        );
+    }
+
+    #[test]
+    fn accepts_data2_beneficiary_hash_type() {
+        let lock = lock_for_beneficiary(
+            [0xA1; 32],
+            Script {
+                code_hash: [0xBE; 32],
+                hash_type: 4,
+                args: alloc::vec![1],
+            },
+        );
+        assert_eq!(
+            classify_intention(&lock, MIN_DEPOSIT_CAPACITY, None, &[]),
+            FILTER_ACCEPTED
+        );
+    }
+
+    #[test]
     fn accepts_xudt_below_ckb_min() {
         let lock = lock_for([0xA1; 32]);
         let data = [0u8; 16];
@@ -149,5 +210,11 @@ mod tests {
             classify_intention(&lock, 1, Some((&fake, 2)), &[0u8; 16]),
             FILTER_UNSUPPORTED_ASSET
         );
+    }
+
+    #[test]
+    fn fee_from_tx_molecule_len_matches_feerate_formula() {
+        let len = 1000u64;
+        assert_eq!(fee_from_tx_molecule_len(len), (len + 4) * FEE_RATE / 1000);
     }
 }
