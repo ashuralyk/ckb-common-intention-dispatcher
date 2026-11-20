@@ -1700,6 +1700,61 @@ async fn reject_wrong_intention_hash_type() {
 }
 
 #[tokio::test]
+async fn reject_wrong_intention_hash_type_data_hash_pair() {
+    // Resolvable Intention-side hash_type mismatch: same CID binary data-hash
+    // as code_hash, Intention uses Data1, ProcessLockArgs expects Data2.
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let cid_data_hash = blake2b_256(
+        std::fs::read(format!("{CONTRACT_BIN}/{CID_CONTRACT_NAME}")).expect("cid binary"),
+    );
+    let process_args = ProcessLockArgs::new(cid_data_hash, 4, vec![0x01])
+        .encode()
+        .expect("process lock args with cid_hash_type=Data2");
+    let process = seed_process_example_cell(
+        &mut rpc,
+        process_example_lock_script_with(ScriptHashType::Data1, process_args),
+        type_script,
+    );
+    let args = beneficiary_args(process_hash, &dest_script());
+    let intention_lock = Script::new_builder()
+        .code_hash(cid_data_hash.pack())
+        .hash_type(ScriptHashType::Data1)
+        .args(args.pack())
+        .build();
+    let intention = {
+        let cell = CellOutputEx::new_from_scripts(intention_lock, None, vec![], Some(CKB_CAPACITY))
+            .expect("data1 intention");
+        let op = fake_outpoint();
+        rpc.insert_fake_cell(op.clone(), cell, Some(fake_header_view(PACK_BLOCK, 1, 1)));
+        op
+    };
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("Intention Data1 vs ProcessLockArgs Data2 must fail");
+    assert_eq!(exit(err), ERROR_CID_LOCK_MISMATCH);
+}
+
+#[tokio::test]
 async fn reject_changed_process_lock_args_on_recreate() {
     require_binaries();
     let mut rpc = FakeRpcClient::default();
