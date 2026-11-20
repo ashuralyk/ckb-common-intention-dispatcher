@@ -84,8 +84,10 @@ struct IntentionView {
 /// code). Guest resolves inputs via host queries and returns a complete
 /// molecule `Transaction` the backend submits unchanged.
 ///
-/// Business classification matches `Process.filter` (deposit / asset / digest);
-/// ownership is not re-checked (Sequencer routes before assemble).
+/// Business classification matches `Process.filter` (deposit / asset / digest).
+/// CID Type-ID ownership is not re-checked (Sequencer routes before assemble).
+/// All Intentions must share one `process_type_hash` equal to this Process's
+/// TYPE_ID script hash (bd11d44 assemble behaviour — no CID Type ID input).
 pub fn assemble_handler(
     _src: &SsriSource,
     _args: SsriArgs,
@@ -105,11 +107,20 @@ pub fn assemble_handler(
 
     let mut intention_idxs = Vec::new();
     let mut process_idx: Option<usize> = None;
+    let mut process_type_hash: Option<[u8; 32]> = None;
 
     for (idx, item) in loaded.iter().enumerate() {
         let lock = item.cell.output.lock();
         let args = lock.args().raw_data();
-        if CidArgs::decode(&args).is_ok() {
+        if let Ok(cid) = CidArgs::decode(&args) {
+            // bd11d44: every Intention in the draft shares one process_type_hash.
+            if let Some(expected) = process_type_hash {
+                if cid.process_type_hash != expected {
+                    return Err(ProcessError::IncompatibleBatch);
+                }
+            } else {
+                process_type_hash = Some(cid.process_type_hash);
+            }
             intention_idxs.push(idx);
         } else if item.cell.output.type_().is_some() {
             // Candidate Process state cell (TYPE_ID type); keep the first.
@@ -132,14 +143,21 @@ pub fn assemble_handler(
     }
 
     let process = &loaded[process_idx];
-    let _ = process
-        .cell
-        .output
-        .type_()
-        .to_opt()
-        .ok_or(ProcessError::ReadFailed)?;
+    // bd11d44: that shared process_type_hash must equal this Process TYPE_ID.
+    if let Some(pth) = process_type_hash {
+        let typ = process
+            .cell
+            .output
+            .type_()
+            .to_opt()
+            .ok_or(ProcessError::ReadFailed)?;
+        let hash: [u8; 32] = typ.calc_script_hash().unpack();
+        if hash != pth {
+            return Err(ProcessError::IncompatibleBatch);
+        }
+    }
 
-    // Same business classification as Process.filter (no ownership re-check).
+    // Same business classification as Process.filter (no CID Type-ID re-check).
     let mut intentions = Vec::with_capacity(intention_idxs.len());
     for &idx in &intention_idxs {
         let item = &loaded[idx];

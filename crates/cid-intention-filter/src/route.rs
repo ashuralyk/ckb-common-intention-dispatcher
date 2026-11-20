@@ -1,8 +1,10 @@
 //! Intention ownership / Process Type ID extraction (Process-independent).
 //!
 //! Used by the **Sequencer** to group scanned Intentions by Process Type ID
-//! before calling each Process's `Process.filter`. Ownership is **solely** the
-//! Sequencer's responsibility — `Process.filter` / assemble do not re-check it.
+//! before calling each Process's `Process.filter`. CID Type-ID ownership is
+//! **solely** the Sequencer's responsibility — `Process.filter` does not use
+//! these helpers. Assemble still requires Intentions share one
+//! `process_type_hash` equal to the Process TYPE_ID (bd11d44; no CID Type ID).
 //! On-chain Process Verify keeps its own `ours_prefix` scoping.
 //!
 //! Single source of truth for CID Intention lock shape and Process identity
@@ -77,8 +79,11 @@ pub fn intention_process_type_id_parts(
     Ok(cid.process_type_hash)
 }
 
-/// Require that `lock` is a CID Type-ID Intention targeting
-/// `expected_process_type_id` (Process filter / `ours_prefix` ownership check).
+/// Sequencer routing helper: require that `lock` is a CID Type-ID Intention
+/// targeting `expected_process_type_id`.
+///
+/// Used to group scanned Intentions by Process before calling that Process's
+/// `Process.filter`. The Process filter does **not** use this helper.
 pub fn intention_belongs_to_process(
     lock: &Script,
     cid_code_type_id_hash: &[u8; 32],
