@@ -102,7 +102,7 @@ async fn create_ckb_intention_skeleton() {
     seed_user_cell(&mut rpc, CKB_CAPACITY);
     let mut skeleton = prepared_skeleton(&rpc);
     let args = cid_args(process_type_hash(), b"hello");
-    // Request below occupied: create bumps to occupied only (no protocol floor).
+    // A CKB Intention must carry capacity above the occupied bytes.
     let ix = create_intention::<FakeRpcClient>(user_address(), args.clone(), 1, None);
     TransactionCalculator::default()
         .instruction(ix)
@@ -118,13 +118,26 @@ async fn create_ckb_intention_skeleton() {
         .occupied_capacity(Capacity::bytes(out.data.len()).unwrap())
         .unwrap()
         .as_u64();
-    assert_eq!(out.capacity_shannons(), occupied);
+    assert_eq!(out.capacity_shannons(), occupied + 1);
     let expected = cid_lock(args).to_script(&skeleton).expect("cid lock");
     assert_eq!(out.lock_script().as_slice(), expected.as_slice());
 
+    let created_output = out.clone();
     verify(&rpc, skeleton, vec![])
         .await
         .expect("create does not run CID; payer lock succeeds");
+
+    let intention = ckb_cinnabar_calculator::simulation::fake_outpoint();
+    rpc.insert_fake_cell(intention.clone(), created_output, None);
+    let refund = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        user_lock(),
+        occupied + 1,
+        None,
+    );
+    verify(&rpc, prepared_skeleton(&rpc), vec![refund])
+        .await
+        .expect("a minimum-sized CKB Intention can be refunded");
 }
 
 #[tokio::test]
