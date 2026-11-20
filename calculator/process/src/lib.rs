@@ -31,7 +31,10 @@ pub const DEFAULT_PROCESS_STATE_CAPACITY: u64 = 300_0000_0000;
 ///
 /// Process-owned (not protocol). Single source:
 /// `crates/cid-process-example-policy`.
-pub use cid_process_example_policy::{ckb_deposit_capacity_ok, MIN_DEPOSIT_CAPACITY};
+pub use cid_process_example_policy::{
+    ckb_deposit_capacity_ok, ProcessLockArgs, ProcessLockArgsError, MIN_DEPOSIT_CAPACITY,
+    PROCESS_LOCK_ARGS_MIN_LEN,
+};
 
 pub use cid_intention_filter::{
     intention_belongs_to_process, intention_process_type_id, FilterCell, FilterRequest,
@@ -124,11 +127,11 @@ impl<T: RPC> Operation<T> for ValidateProcessCreate {
         _log: &mut Log,
     ) -> Result<()> {
         let args = self.lock_script.args();
-        if args.is_empty() || CidArgs::decode(&args).is_ok() {
-            return Err(CalculatorError::Other(
-                "Process lock args must be non-empty and distinct from CID Intention encoding"
-                    .into(),
-            ));
+        // Require `cid_code_hash[32] || cid_hash_type[1] || salt` (ProcessLockArgs).
+        if let Err(e) = ProcessLockArgs::decode(&args) {
+            return Err(CalculatorError::Other(format!(
+                "Process lock args invalid ({e:?}): need cid_code_hash[32]||cid_hash_type[1]||salt"
+            )));
         }
 
         let (_, dep) = skeleton
@@ -692,17 +695,38 @@ mod tests {
         .unwrap()
     }
 
+    /// Default Intention lock identity used by host tests (`code_hash=[0xC1;32]`, type).
+    fn sample_cid_lock_identity() -> ([u8; 32], u8) {
+        ([0xC1; 32], 1)
+    }
+
+    fn sample_process_lock_args() -> Vec<u8> {
+        let (code, ht) = sample_cid_lock_identity();
+        ProcessLockArgs::new(code, ht, vec![0x01]).encode().unwrap()
+    }
+
     fn sample_process_and_intention() -> (ProcessStateCell, Vec<IntentionCell>) {
         let type_id = sample_type_id();
         let pth: [u8; 32] = type_id.calc_script_hash().unpack();
+        let (cid_code, cid_ht) = sample_cid_lock_identity();
         let lock_args = CidArgs::new(pth, CidScript::default(), sample_beneficiary_payload())
             .encode()
             .unwrap();
+        let intention_lock = Script::new_builder()
+            .code_hash(cid_code.pack())
+            .hash_type(if cid_ht == 1 {
+                ScriptHashType::Type
+            } else {
+                ScriptHashType::Data1
+            })
+            .args(lock_args.clone().pack())
+            .build();
         let process = ProcessStateCell {
             out_point: fake_outpoint(),
             lock: Script::new_builder()
                 .code_hash([0xAA; 32].pack())
                 .hash_type(ScriptHashType::Data1)
+                .args(sample_process_lock_args().pack())
                 .build(),
             type_script: type_id,
             capacity: 200_000_000_000,
@@ -714,7 +738,7 @@ mod tests {
             capacity: 100_000_000_000,
             data: vec![],
             type_script: None,
-            lock: None,
+            lock: Some(intention_lock),
         }];
         (process, intentions)
     }
@@ -731,7 +755,7 @@ mod tests {
         let funding_tx = [0x11u8; 32];
         let process_code_tx = [0x22u8; 32];
         let process_code_args = [0xABu8; 32];
-        let lock_args = b"instance-1".to_vec();
+        let lock_args = sample_process_lock_args();
 
         let process_type_script = Script::new_builder()
             .code_hash(CINNABAR_TYPE_ID.pack())
@@ -819,7 +843,7 @@ mod tests {
     fn calculator_rejects_untyped_process_code() {
         let funding_tx = [0x11u8; 32];
         let process_code_tx = [0x22u8; 32];
-        let lock_args = b"instance-1".to_vec();
+        let lock_args = sample_process_lock_args();
 
         let mut rpc = FakeRpcClient::default();
         let funding_lock = always_success_script(vec![0x01]);
@@ -918,7 +942,7 @@ mod tests {
         TransactionCalculator::default()
             .instruction(create_process_state_by_outpoint(
                 (h256_to_hash(&H256(funding_tx)), 0),
-                b"tid-check".to_vec(),
+                sample_process_lock_args(),
                 DEFAULT_PROCESS_STATE_CAPACITY,
             ))
             .apply_skeleton(&rpc, &mut skeleton)
@@ -994,7 +1018,7 @@ mod tests {
         TransactionCalculator::default()
             .instruction(create_process_state(
                 address,
-                b"addr-instance".to_vec(),
+                sample_process_lock_args(),
                 DEFAULT_PROCESS_STATE_CAPACITY,
             ))
             .apply_skeleton(&rpc, &mut skeleton)

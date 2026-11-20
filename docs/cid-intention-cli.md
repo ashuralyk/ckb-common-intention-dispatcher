@@ -136,10 +136,12 @@ Request JSON (no secrets):
 ```
 
 Cell layout: Process lock = Process code Type ID (`hash_type=type`) with
-non-empty `process_lock_args` distinct per instance. The args must not use
-the CID Intention encoding. The state uses a built-in TYPE_ID derived from
-the first input and output index, with empty data. Both calculator entry
-points check the Process code dep and state capacity before adding the input.
+`process_lock_args` = `cid_code_hash[32] || cid_hash_type[1] || instance_salt`.
+The CID fields must match the live Intention lock identity; `instance_salt`
+keeps instances distinct. Args must not decode as a CID Intention. The state
+uses a built-in TYPE_ID derived from the first input and output index, with
+empty data. Both calculator entry points check the Process code dep, lock-args
+layout, and state capacity before adding the input.
 The state must reserve at least 1,000 shannons plus one shannon per lock-arg
 byte above occupied capacity for future digest fees. Reserve more for larger
 digest transactions.

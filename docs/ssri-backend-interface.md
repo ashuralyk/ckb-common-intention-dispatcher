@@ -16,8 +16,13 @@ CID only checks that this type hash appears in **both** inputs and outputs
 including **TYPE_ID continuity** (Process lock input type hash == output type
 hash) and forbidding that Type ID on non-Process-lock outputs.
 
-**Process lock args** must be distinct per live instance. Empty / shared args
-merge cells into one lock group (`ProcessPairInvalid` on multi-Process txs).
+**Process lock args** encode CID Intention lock identity plus an instance salt:
+
+`cid_code_hash[32] || cid_hash_type[1] || instance_salt[0..]`. On-chain Verify
+(and assemble, which reads the live Process state cell) count an Intention as
+ours only when its lock `code_hash`/`hash_type` match those fields **and**
+`process_type_hash` equals this Process TYPE_ID. `Process.filter` stays
+business-only (no Process state). Args must be distinct per live instance.
 
 **Creation:** CKB builds lock groups from inputs, so an output-only Process lock
 on first mint never runs `verify_create`. Creation tools (CLI / deploy) must
