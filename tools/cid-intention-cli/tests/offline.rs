@@ -379,6 +379,7 @@ fn create_intention_fee_covers_rate_1000_serialized_size_in_block() {
 fn create_rejects_intention_below_example_deposit_minimum() {
     let secret = key(0x42);
     let mut req = fixture_request(&secret);
+    assert!(req.enforce_example_process_deposit_minimum);
     let minimum = cid_process_example_calculator::MIN_DEPOSIT_CAPACITY;
 
     for capacity in [minimum / 2, minimum - 1] {
@@ -390,6 +391,24 @@ fn create_rejects_intention_below_example_deposit_minimum() {
             "unexpected error for requested capacity {capacity}: {err}"
         );
     }
+}
+
+#[test]
+fn create_allows_sub_example_min_when_example_deposit_policy_disabled() {
+    // Non-example Process: no protocol floor — only occupied capacity applies.
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    req.enforce_example_process_deposit_minimum = false;
+    let minimum = cid_process_example_calculator::MIN_DEPOSIT_CAPACITY;
+    // Below example 600 CKB, but well above typical occupied (~61 CKB + args).
+    req.intention_capacity = minimum / 2; // 300 CKB
+    assert!(req.intention_capacity < minimum);
+    let bundle = create_signed_intention_bundle(&req, &secret).expect(
+        "non-example Process must accept deposit below example 600 CKB when above occupied",
+    );
+    let effective = bundle.skeleton.outputs[0].capacity_shannons();
+    assert!(effective >= req.intention_capacity);
+    assert!(effective < minimum);
 }
 
 #[test]

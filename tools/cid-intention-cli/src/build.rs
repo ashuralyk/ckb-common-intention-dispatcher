@@ -436,9 +436,11 @@ fn create_signed_intention_bundle_inner(
     let draft = CellOutput::new_builder().lock(intention_lock).build();
     let occupied = occupied_capacity_shannons(&draft, 0);
     let intention_capacity = req.intention_capacity.max(occupied);
-    if intention_capacity < MIN_DEPOSIT_CAPACITY {
+    // Example Process deposit floor is opt-in via the request flag. Other
+    // Processes own their own minima; protocol / CID impose none.
+    if req.enforce_example_process_deposit_minimum && intention_capacity < MIN_DEPOSIT_CAPACITY {
         return Err(CliError::InvalidRequest(format!(
-            "effective intention_capacity {intention_capacity} is below the example Process minimum of {MIN_DEPOSIT_CAPACITY} shannons"
+            "effective intention_capacity {intention_capacity} is below the example Process minimum of {MIN_DEPOSIT_CAPACITY} shannons (set enforce_example_process_deposit_minimum=false for non-example Processes)"
         )));
     }
 
