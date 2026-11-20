@@ -55,6 +55,7 @@ fn strip_tx_metadata(mut value: Value) -> Value {
         obj.remove("registry_post");
         obj.remove("cid_code_type_id");
         obj.remove("cid_code_type_id_args");
+        obj.remove("process_lock_args");
         obj.remove("fee_shannons");
         obj.remove("fee_rate");
     }
@@ -70,6 +71,7 @@ fn has_process_metadata(value: &Value) -> bool {
         "registry_post",
         "cid_code_type_id",
         "cid_code_type_id_args",
+        "process_lock_args",
     ]
     .iter()
     .any(|field| value.get(*field).is_some())

@@ -45,10 +45,19 @@ pub struct CreateProcessRequest {
     /// Process state capacity in shannons. Default: 300 CKB when omitted.
     #[serde(default = "default_process_capacity")]
     pub process_capacity: u64,
-    /// Process state lock args: `cid_code_hash[32] || cid_hash_type[1] || salt`.
-    /// `cid_*` must match the live CID Intention lock identity; `salt` keeps
-    /// instances distinct when they share Process code + CID identity.
-    pub process_lock_args: String,
+    /// Optional explicit Process state lock args:
+    /// `cid_code_hash[32] || cid_hash_type[1] || instance_salt`.
+    /// When omitted, the CLI auto-builds args from `cid_lock_dep` (Type ID script
+    /// hash + `hash_type=type`) and optional [`Self::process_lock_salt`]. When
+    /// set, args are decoded and must match that CID identity. Mutually
+    /// exclusive with `process_lock_salt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_lock_args: Option<String>,
+    /// Optional `instance_salt` hex used only when `process_lock_args` is
+    /// omitted. Empty / `"0x"` means no salt. Mutually exclusive with
+    /// `process_lock_args`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_lock_salt: Option<String>,
     pub funding: FundingCell,
     /// Live CID lock **code** cell (Type ID required; live-verified on `send`).
     pub cid_lock_dep: NamedDep,

@@ -109,7 +109,7 @@ Request JSON (no secrets):
 {
   "network": "testnet",
   "process_capacity": 300000000000,
-  "process_lock_args": "0x01",
+  "process_lock_salt": "0x01",
   "funding": { "tx_hash": "0x…", "index": 0, "capacity": 500000000000,
     "lock": { "code_hash": "0x…", "hash_type": "type", "args": "0x…" }, "data": "0x" },
   "cid_lock_dep": {
@@ -136,12 +136,19 @@ Request JSON (no secrets):
 ```
 
 Cell layout: Process lock = Process code Type ID (`hash_type=type`) with
-`process_lock_args` = `cid_code_hash[32] || cid_hash_type[1] || instance_salt`.
-The CID fields must match the live Intention lock identity; `instance_salt`
-keeps instances distinct. Args must not decode as a CID Intention. The state
-uses a built-in TYPE_ID derived from the first input and output index, with
-empty data. Both calculator entry points check the Process code dep, lock-args
-layout, and state capacity before adding the input.
+lock args `cid_code_hash[32] || cid_hash_type[1] || instance_salt`.
+
+By default **omit** `process_lock_args`: the CLI auto-fills
+`cid_code_hash = hash(cid_lock_dep.type_script)`, `cid_hash_type = type` (1),
+and `instance_salt` from optional `process_lock_salt` (omit / `"0x"` = empty).
+Pass explicit `process_lock_args` only when you already have the bytes; they are
+decoded and **must** match that CID identity (`cid_code_hash` + `hash_type=type`),
+or create fails. Do not set both `process_lock_args` and `process_lock_salt`.
+Args must not decode as a CID Intention. The signed JSON echoes the resolved
+`process_lock_args` hex. The state uses a built-in TYPE_ID derived from the
+first input and output index, with empty data. Both calculator entry points
+check the Process code dep, lock-args layout, and state capacity before adding
+the input.
 The state must reserve at least 1,000 shannons plus one shannon per lock-arg
 byte above occupied capacity for future digest fees. Reserve more for larger
 digest transactions.
