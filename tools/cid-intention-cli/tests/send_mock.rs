@@ -336,6 +336,7 @@ fn create_process_output_sends_after_stripping_metadata() {
                 assert!(tx.get("process_type_script").is_none());
                 assert!(tx.get("cid_code_type_id").is_none());
                 assert!(tx.get("cid_code_type_id_args").is_none());
+                assert!(tx.get("process_lock_args").is_none());
                 serde_json::from_value::<ckb_jsonrpc_types::Transaction>(tx.clone())
                     .expect("process create→send payload must be a Transaction");
                 *saw_send_c.lock().unwrap() = true;
