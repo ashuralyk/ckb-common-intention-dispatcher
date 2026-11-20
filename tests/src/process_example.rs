@@ -1590,27 +1590,26 @@ async fn accept_correct_cid_lock_identity() {
 
 #[tokio::test]
 async fn reject_wrong_intention_hash_type() {
+    // Intention keeps a resolvable CID Type-ID lock (`hash_type=type`). Process
+    // lock args embed the same code_hash but `cid_hash_type=Data1` so Verify
+    // returns CidLockMismatch — building Intention as Data1 with a Type-ID
+    // code_hash instead yields ScriptNotFound before Process runs.
     require_binaries();
     let mut rpc = FakeRpcClient::default();
     let mut skeleton = prepared_process_skeleton(&rpc);
     let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
     let process_hash = process_example_type_hash(&type_script);
-    let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
-    let args = beneficiary_args(process_hash, &dest_script());
-    // Same code_hash as live CID Type ID, but hash_type=data1 instead of type.
     let cid_code = cid_code_hash_for_type_id_args(DEFAULT_CID_TYPE_ID_ARGS);
-    let wrong_ht_lock = Script::new_builder()
-        .code_hash(cid_code.pack())
-        .hash_type(ScriptHashType::Data1)
-        .args(args.clone().pack())
-        .build();
-    let intention = {
-        let cell = CellOutputEx::new_from_scripts(wrong_ht_lock, None, vec![], Some(CKB_CAPACITY))
-            .expect("wrong-ht intention");
-        let op = fake_outpoint();
-        rpc.insert_fake_cell(op.clone(), cell, Some(fake_header_view(PACK_BLOCK, 1, 1)));
-        op
-    };
+    let mismatched_args = ProcessLockArgs::new(cid_code, 2, vec![0x01])
+        .encode()
+        .expect("process lock args with cid_hash_type=Data1");
+    let process = seed_process_example_cell(
+        &mut rpc,
+        process_example_lock_script_with(ScriptHashType::Data1, mismatched_args),
+        type_script,
+    );
+    let args = beneficiary_args(process_hash, &dest_script());
+    let intention = seed_intention(&mut rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
     let ix = digest_ok::<FakeRpcClient>(
         outpoint_ids(&intention),
         outpoint_ids(&process),
