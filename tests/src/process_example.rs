@@ -1305,6 +1305,105 @@ async fn reject_diverted_process_state_debit_not_paid_as_fee() {
 }
 
 #[tokio::test]
+async fn reject_process_debit_diverted_to_peer_process_lock_group() {
+    // Process A debited by D (within fee allowance) while Process B (same
+    // Process code_hash+hash_type, different lock_args) is credited by D so
+    // net tx_fee == 0. Global code_hash netting would hide this; per-lock-group
+    // positive debits must still require tx_fee >= D → CapacityInsufficient.
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
+    let type_b = process_example_type_script(b"process-type-id-v1".to_vec());
+    let lock_a = process_example_lock_script_with(ScriptHashType::Data1, vec![0xA1]);
+    let lock_b = process_example_lock_script_with(ScriptHashType::Data1, vec![0xB2]);
+    let process_a = seed_process_example_cell(&mut rpc, lock_a, type_a.clone());
+    let process_b = seed_process_example_cell(&mut rpc, lock_b, type_b.clone());
+    let dest_a = dest_script();
+    let dest_b = always_success_script(vec![0xBD]);
+    let int_a = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_a), &dest_a),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let int_b = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_b), &dest_b),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+
+    let first = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&int_a),
+        outpoint_ids(&process_a),
+        Some(AddOutputCell {
+            lock_script: dest_a.into(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    let second = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&int_b),
+        outpoint_ids(&process_b),
+        Some(AddOutputCell {
+            lock_script: dest_b.into(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(first)
+        .instruction(second)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+
+    // Locate Process recreate outputs by lock args (A=0xA1, B=0xB2).
+    let mut idx_a = None;
+    let mut idx_b = None;
+    for (i, out) in skeleton.outputs.iter().enumerate() {
+        let args = out.lock_script().args().raw_data();
+        if args.as_ref() == [0xA1] {
+            idx_a = Some(i);
+        } else if args.as_ref() == [0xB2] {
+            idx_b = Some(i);
+        }
+    }
+    let idx_a = idx_a.expect("Process A recreate output");
+    let idx_b = idx_b.expect("Process B recreate output");
+    let divert = 10_000u64;
+    let cap_a = skeleton.outputs[idx_a].capacity_shannons();
+    let cap_b = skeleton.outputs[idx_b].capacity_shannons();
+    skeleton.outputs[idx_a].output = skeleton.outputs[idx_a]
+        .output
+        .clone()
+        .as_builder()
+        .capacity(cap_a - divert)
+        .build();
+    skeleton.outputs[idx_b].output = skeleton.outputs[idx_b]
+        .output
+        .clone()
+        .as_builder()
+        .capacity(cap_b + divert)
+        .build();
+
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("Process A debit diverted to Process B must fail when tx_fee < debit");
+    assert_eq!(exit(err), ERROR_CAPACITY_INSUFFICIENT);
+}
+
+#[tokio::test]
 async fn reject_beneficiary_using_process_lock_code_hash() {
     require_binaries();
     let mut rpc = FakeRpcClient::default();

@@ -96,10 +96,12 @@ fn verify_lock_pair() -> Result<Option<&'static str>> {
 ///
 /// 1. This lock-group pair's debit is capped by `fee_from_tx_molecule_len(tx)`.
 /// 2. `tx_fee = sum(all input caps) - sum(all output caps)` (fail closed on
-///    underflow) must cover the **aggregate** positive debit across every
-///    Process state cell that shares this lock `code_hash` + `hash_type`
-///    (distinct args → distinct lock groups; all still count). Diverting a
-///    debit into another output without paying fee is rejected.
+///    underflow) must cover the **aggregate of per-lock-group positive
+///    debits** across every Process state cell that shares this lock
+///    `code_hash` + `hash_type`. Groups are keyed by full lock script
+///    (`calc_script_hash`); a credit on Process B must **not** offset a debit
+///    on Process A. Diverting a debit into another Process (or any output)
+///    without paying fee is rejected.
 fn verify_state_fee_budget() -> Result<Option<&'static str>> {
     let input_indices = this_script_indices(Source::Input, ScriptPlace::Lock)?;
     let output_indices = this_script_indices(Source::Output, ScriptPlace::Lock)?;
@@ -121,9 +123,7 @@ fn verify_state_fee_budget() -> Result<Option<&'static str>> {
     let our_code = ours.code_hash();
     let our_ht = ours.hash_type();
 
-    let process_in = sum_capacity_matching_lock(Source::Input, &our_code, our_ht)?;
-    let process_out = sum_capacity_matching_lock(Source::Output, &our_code, our_ht)?;
-    let aggregate_debit = process_in.saturating_sub(process_out);
+    let aggregate_debit = sum_positive_lock_group_debits(&our_code, our_ht)?;
 
     let all_in = sum_capacity_all(Source::Input)?;
     let all_out = sum_capacity_all(Source::Output)?;
@@ -152,28 +152,72 @@ fn sum_capacity_all(source: Source) -> core::result::Result<u64, ProcessError> {
     Ok(sum)
 }
 
-fn sum_capacity_matching_lock(
-    source: Source,
+/// Sum positive capacity debits **per full Process lock group**.
+///
+/// Only locks with `code_hash`/`hash_type` matching this Process binary are
+/// considered. Groups are identified by `lock.calc_script_hash()` (full lock
+/// script, including args). For each group that appears in **inputs**, the
+/// debit is `in_cap.saturating_sub(out_cap)` — credits on a different group
+/// (or a newly minted Process-code output) never offset another group's
+/// debit. Aggregate uses checked addition (fail closed on overflow).
+fn sum_positive_lock_group_debits(
     code_hash: &ckb_std::ckb_types::packed::Byte32,
     hash_type: ckb_std::ckb_types::packed::Byte,
 ) -> core::result::Result<u64, ProcessError> {
-    let mut sum = 0u64;
+    // (lock_hash, in_cap_sum, out_cap_sum) — only groups seen on inputs.
+    let mut groups: Vec<([u8; 32], u64, u64)> = Vec::new();
+
     for i in 0.. {
-        match load_cell_lock(i, source) {
+        match load_cell_lock(i, Source::Input) {
             Ok(lock) => {
                 if &lock.code_hash() == code_hash && lock.hash_type() == hash_type {
-                    let c = load_cell_capacity(i, source)
+                    let hash: [u8; 32] = lock.calc_script_hash().unpack();
+                    let c = load_cell_capacity(i, Source::Input)
                         .map_err(|_| ProcessError::ProcessPairInvalid)?;
-                    sum = sum
-                        .checked_add(c)
-                        .ok_or(ProcessError::CapacityInsufficient)?;
+                    match groups.iter_mut().find(|(h, _, _)| h == &hash) {
+                        Some((_, in_sum, _)) => {
+                            *in_sum = in_sum
+                                .checked_add(c)
+                                .ok_or(ProcessError::CapacityInsufficient)?;
+                        }
+                        None => groups.push((hash, c, 0)),
+                    }
                 }
             }
             Err(ckb_std::error::SysError::IndexOutOfBound) => break,
             Err(_) => return Err(ProcessError::ProcessPairInvalid),
         }
     }
-    Ok(sum)
+
+    for i in 0.. {
+        match load_cell_lock(i, Source::Output) {
+            Ok(lock) => {
+                if &lock.code_hash() == code_hash && lock.hash_type() == hash_type {
+                    let hash: [u8; 32] = lock.calc_script_hash().unpack();
+                    if let Some((_, _, out_sum)) = groups.iter_mut().find(|(h, _, _)| h == &hash) {
+                        let c = load_cell_capacity(i, Source::Output)
+                            .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                        *out_sum = out_sum
+                            .checked_add(c)
+                            .ok_or(ProcessError::CapacityInsufficient)?;
+                    }
+                    // Output-only Process locks (credits / mints) are ignored —
+                    // they must not offset another group's debit.
+                }
+            }
+            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
+            Err(_) => return Err(ProcessError::ProcessPairInvalid),
+        }
+    }
+
+    let mut aggregate = 0u64;
+    for (_, in_sum, out_sum) in groups {
+        let debit = in_sum.saturating_sub(out_sum);
+        aggregate = aggregate
+            .checked_add(debit)
+            .ok_or(ProcessError::CapacityInsufficient)?;
+    }
+    Ok(aggregate)
 }
 
 fn require_type_id_type(index: usize, source: Source) -> Result<[u8; 32]> {
