@@ -1083,6 +1083,85 @@ mod tests {
     }
 
     #[test]
+    fn test_assemble_rejects_intention_process_type_hash_mismatch() {
+        // Calculator host guard (`require_process_matches_intentions`) — bd11d44.
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!("Skipping test: binary not built at {bin_path}");
+            return;
+        }
+        let rpc = FakeRpcClient::default();
+        let (process, mut intentions) = sample_process_and_intention();
+        let foreign_pth = [0xFEu8; 32];
+        intentions[0].lock_args = CidArgs::new(
+            foreign_pth,
+            CidScript::default(),
+            sample_beneficiary_payload(),
+        )
+        .encode()
+        .unwrap();
+        let err = process_digest_ok_with_extras(
+            &rpc,
+            intentions,
+            process,
+            AssembleExtras {
+                funding_cells: vec![],
+                cell_deps: vec![sample_code_dep()],
+            },
+            bin_dir,
+        )
+        .err()
+        .expect("foreign process_type_hash must fail before guest");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("process_type_hash does not match"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_ssri_guest_rejects_intention_process_type_hash_mismatch() {
+        // Guest assemble bd11d44 check: Intention process_type_hash must equal
+        // Process TYPE_ID (no CID Type ID involved). Bypass the calculator guard
+        // by mutating the cell the guest loads.
+        use cid_process_executor::ExecutorError;
+
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!("Skipping test: binary not built at {bin_path}");
+            return;
+        }
+        let executor = ProcessExecutor::new(load_process_binary(bin_dir).unwrap());
+        let (process, intentions) = sample_process_and_intention();
+        let extras = AssembleExtras {
+            funding_cells: vec![],
+            cell_deps: vec![sample_code_dep()],
+        };
+        let (draft, mut known) = build_draft_and_known(&intentions, &process, &extras).unwrap();
+        let foreign_args = CidArgs::new(
+            [0xFEu8; 32],
+            CidScript::default(),
+            sample_beneficiary_payload(),
+        )
+        .encode()
+        .unwrap();
+        let (output, _) = known.get_mut(intentions[0].out_point.as_slice()).unwrap();
+        let lock = output.lock();
+        *output = output
+            .clone()
+            .as_builder()
+            .lock(lock.as_builder().args(foreign_args.pack()).build())
+            .build();
+        let result = executor.assemble(&draft, seed_mock_from_known(&known).unwrap());
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(21))),
+            "guest must reject mismatched process_type_hash: {result:?}"
+        );
+    }
+
+    #[test]
     fn test_assemble_deposit_by_consuming_intention_at_min() {
         let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
         let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
