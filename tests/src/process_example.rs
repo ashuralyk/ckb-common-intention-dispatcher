@@ -128,7 +128,13 @@ fn mock_process_type_id() -> Script {
 
 fn mock_intention(i: u32, process_type_hash: [u8; 32]) -> IntentionCell {
     let _ = i;
-    let lock_args = encode_cid_args(process_type_hash, CidScript::default(), Payload::default());
+    let payload = Payload::from_script(&CidScript {
+        code_hash: [0xBE; 32],
+        hash_type: 1,
+        args: vec![0x01],
+    })
+    .unwrap();
+    let lock_args = encode_cid_args(process_type_hash, CidScript::default(), payload);
     IntentionCell {
         out_point: fake_outpoint(),
         lock_args,
@@ -156,8 +162,10 @@ fn dest_script_data2() -> Script {
         .build()
 }
 
+/// Default fixture: CID code celldep carries a Type ID so Intention locks
+/// resolve as `hash_type=type` — required for shared classify / filter ownership.
 fn prepared_process_skeleton(rpc: &FakeRpcClient) -> TransactionSkeleton {
-    prepared_process_skeleton_with_cid_type_id(rpc, None)
+    prepared_process_skeleton_with_cid_type_id(rpc, Some([0x71u8; 32]))
 }
 
 /// When `cid_type_id_args` is set, the CID code celldep carries a Type ID type
@@ -1208,7 +1216,8 @@ async fn assemble_and_verify_xudt_beneficiary() {
     require_binaries();
     let mut rpc = FakeRpcClient::default();
     seed_fakenet_xudt_cell(&mut rpc);
-    let skeleton = prepared_process_skeleton(&rpc);
+    // CID lock Type-ID referenced (`hash_type=type`) as on live deployments.
+    let skeleton = prepared_process_skeleton_with_cid_type_id(&rpc, Some([0x71u8; 32]));
     let xudt = xudt_type_script();
     let xudt_packed = xudt.clone().to_script(&skeleton).expect("xudt script");
     let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
@@ -1294,7 +1303,7 @@ async fn assemble_and_verify_xudt_beneficiary() {
         .expect("assembled full tx must verify on-chain as-is");
 
     // Also confirm digest_ok path with assembled beneficiary still works.
-    let mut verify_skel = prepared_process_skeleton(&rpc);
+    let mut verify_skel = prepared_process_skeleton_with_cid_type_id(&rpc, Some([0x71u8; 32]));
     let ix = digest_ok::<FakeRpcClient>(
         outpoint_ids(&intention),
         outpoint_ids(&process),

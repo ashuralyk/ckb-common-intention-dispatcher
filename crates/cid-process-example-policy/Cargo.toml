@@ -7,3 +7,7 @@ edition = "2021"
 # host calculator/CLI. Not protocol — other Processes define their own policy.
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+cid-protocol = { path = "../../protocol" }
+cid-intention-filter = { path = "../cid-intention-filter" }

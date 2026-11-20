@@ -1,9 +1,15 @@
 extern crate alloc;
 
-use crate::deposit::ckb_deposit_capacity_ok;
+use crate::classify::{
+    classify_live_intention, classify_packed_intention, filter_reason_to_process_error,
+};
 use crate::host::{self, HostCell};
 use crate::ProcessError;
 use alloc::vec::Vec;
+use cid_intention_filter::{
+    decode_filter_request, encode_filter_response, read_capped_from, FILTER_ACCEPTED,
+    FILTER_STDIN_MAX,
+};
 use cid_protocol::CidArgs;
 use ckb_cinnabar_verifier::ssri::{SsriArgs, SsriSource};
 use ckb_std::ckb_types::packed::{Byte32, Bytes, CellOutput, RawTransaction, Script, Transaction};
@@ -34,6 +40,32 @@ pub fn batch_handler(
     Ok(output)
 }
 
+/// SSRI handler for `Process.filter`.
+///
+/// Stdin: [`cid_intention_filter::FilterRequest`] bytes (`encode_filter_request`).
+/// Stdout: `count:u32 LE || reason:i8 * count` (request order).
+///
+/// Per-cell; never aborts the batch because one cell fails. Judges **Process
+/// business compliance only** (malformed cell/digest, asset, deposit, …).
+/// Callers **must route first** via `intention_process_type_id` — this handler
+/// does not verify CID Type-ID ownership.
+pub fn filter_handler(
+    _src: &SsriSource,
+    _args: SsriArgs,
+) -> core::result::Result<Vec<u8>, ProcessError> {
+    let raw = read_stdin_capped(FILTER_STDIN_MAX)?;
+    // Empty stdin → empty batch (count 0), not a hard error.
+    if raw.is_empty() {
+        return encode_filter_response(&[]).map_err(|_| ProcessError::ReadFailed);
+    }
+    let req = decode_filter_request(&raw).map_err(|_| ProcessError::ReadFailed)?;
+    let mut reasons = Vec::with_capacity(req.cells.len());
+    for cell in &req.cells {
+        reasons.push(classify_packed_intention(&cell.output, &cell.data));
+    }
+    encode_filter_response(&reasons).map_err(|_| ProcessError::ReadFailed)
+}
+
 struct LoadedInput {
     cell: HostCell,
 }
@@ -51,6 +83,11 @@ struct IntentionView {
 /// caller supplies cell_deps the Process documents — CID, Process, and any xUDT
 /// code). Guest resolves inputs via host queries and returns a complete
 /// molecule `Transaction` the backend submits unchanged.
+///
+/// Business classification matches `Process.filter` (deposit / asset / digest).
+/// CID Type-ID ownership is not re-checked (Sequencer routes before assemble).
+/// All Intentions must share one `process_type_hash` equal to this Process's
+/// TYPE_ID script hash (bd11d44 assemble behaviour — no CID Type ID input).
 pub fn assemble_handler(
     _src: &SsriSource,
     _args: SsriArgs,
@@ -68,7 +105,7 @@ pub fn assemble_handler(
     // Tip probe so backends exercise header/tip host queries during assemble.
     let _ = host::block_hash(0);
 
-    let mut intentions = Vec::new();
+    let mut intention_idxs = Vec::new();
     let mut process_idx: Option<usize> = None;
     let mut process_type_hash: Option<[u8; 32]> = None;
 
@@ -76,6 +113,7 @@ pub fn assemble_handler(
         let lock = item.cell.output.lock();
         let args = lock.args().raw_data();
         if let Ok(cid) = CidArgs::decode(&args) {
+            // bd11d44: every Intention in the draft shares one process_type_hash.
             if let Some(expected) = process_type_hash {
                 if cid.process_type_hash != expected {
                     return Err(ProcessError::IncompatibleBatch);
@@ -83,12 +121,7 @@ pub fn assemble_handler(
             } else {
                 process_type_hash = Some(cid.process_type_hash);
             }
-            intentions.push(IntentionView {
-                capacity: item.cell.output.capacity().unpack(),
-                lock_args: args.to_vec(),
-                data: item.cell.data.clone(),
-                type_script: item.cell.output.type_().to_opt(),
-            });
+            intention_idxs.push(idx);
         } else if item.cell.output.type_().is_some() {
             // Candidate Process state cell (TYPE_ID type); keep the first.
             if process_idx.is_none() {
@@ -97,27 +130,20 @@ pub fn assemble_handler(
         }
     }
 
-    let count = intentions.len() as u32;
+    let count = intention_idxs.len() as u32;
     if !(BATCH_MIN..=BATCH_MAX).contains(&count) {
         return Err(ProcessError::IncompatibleBatch);
-    }
-
-    // CKB deposit Intentions must clear the Process minimum so assemble can
-    // fund the beneficiary by consuming Intention capacity alone.
-    for intention in &intentions {
-        if !ckb_deposit_capacity_ok(intention.capacity, intention.type_script.is_some()) {
-            return Err(ProcessError::DepositBelowMinimum);
-        }
     }
 
     let process_idx = process_idx.ok_or(ProcessError::ReadFailed)?;
     // Only the Process state and Intentions have corresponding outputs.
     // Extra inputs would otherwise add their entire capacity to the fee.
-    if loaded.len() != 1 + intentions.len() {
+    if loaded.len() != 1 + intention_idxs.len() {
         return Err(ProcessError::UnsupportedFundingLock);
     }
 
     let process = &loaded[process_idx];
+    // bd11d44: that shared process_type_hash must equal this Process TYPE_ID.
     if let Some(pth) = process_type_hash {
         let typ = process
             .cell
@@ -129,6 +155,28 @@ pub fn assemble_handler(
         if hash != pth {
             return Err(ProcessError::IncompatibleBatch);
         }
+    }
+
+    // Same business classification as Process.filter (no CID Type-ID re-check).
+    let mut intentions = Vec::with_capacity(intention_idxs.len());
+    for &idx in &intention_idxs {
+        let item = &loaded[idx];
+        let lock = item.cell.output.lock();
+        let capacity: u64 = item.cell.output.capacity().unpack();
+        let type_script = item.cell.output.type_().to_opt();
+        let reason =
+            classify_live_intention(&lock, capacity, type_script.as_ref(), &item.cell.data);
+        if reason != FILTER_ACCEPTED {
+            return Err(
+                filter_reason_to_process_error(reason).unwrap_or(ProcessError::IncompatibleBatch)
+            );
+        }
+        intentions.push(IntentionView {
+            capacity,
+            lock_args: lock.args().raw_data().to_vec(),
+            data: item.cell.data.clone(),
+            type_script,
+        });
     }
 
     // Preserve draft inputs as-is, including their since values.
@@ -233,20 +281,15 @@ fn occupied_capacity_shannons(output: &CellOutput, data_len: usize) -> u64 {
 }
 
 fn read_stdin() -> Result<Vec<u8>, ProcessError> {
-    let mut input_buf = [0u8; 16384];
-    let mut total_read = 0;
-    loop {
-        let read_result = ckb_std::syscalls::read(0, &mut input_buf[total_read..])
-            .map_err(|_| ProcessError::ReadFailed)?;
-        if read_result == 0 {
-            break;
-        }
-        total_read += read_result;
-        if total_read >= input_buf.len() {
-            return Err(ProcessError::ReadFailed);
-        }
-    }
-    Ok(input_buf[..total_read].to_vec())
+    read_stdin_capped(16384)
+}
+
+fn read_stdin_capped(max: usize) -> Result<Vec<u8>, ProcessError> {
+    // Accept exactly `max` bytes; reject only payloads larger than `max`.
+    read_capped_from(max, |dst| {
+        ckb_std::syscalls::read(0, dst).map_err(|_| cid_intention_filter::CappedReadError::Read)
+    })
+    .map_err(|_| ProcessError::ReadFailed)
 }
 
 fn beneficiary_lock(lock_args: Vec<u8>) -> Script {

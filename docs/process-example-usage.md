@@ -37,10 +37,10 @@ cd tests && cargo test process_example -- --nocapture
 ## SSRI
 
 - **Process.batch** — `(min, max)` = `(1, 4)` as 8 LE bytes  
-- **Process.assemble** — stdin = molecule `Transaction` draft (Intention + Process
-  inputs and required code `cell_deps`); stdout =
-  complete molecule `Transaction` (inputs, outputs, outputs_data, cell_deps,
-  header_deps, witnesses). Cells are loaded via ckb-ssri-std host queries
+- **Process.assemble** — stdin = molecule `Transaction` draft (Intention +
+  Process inputs and required code `cell_deps`); stdout = complete molecule
+  `Transaction` (inputs, outputs, outputs_data, cell_deps, header_deps,
+  witnesses). Cells are loaded via ckb-ssri-std host queries
   (`find_cell_by_out_point`, …). Extra funding inputs return
   `UnsupportedFundingLock` (38). The Process state pays the fee.
 
@@ -74,6 +74,19 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 | 37 | `CapacityInsufficient` (fee would drop state below occupied capacity) |
 | 38 | `UnsupportedFundingLock` (extra funding input) |
 | 39 | `DepositBelowMinimum` (CKB Intention capacity &lt; Process `MIN_DEPOSIT_CAPACITY`) |
+
+## Intention filter (`Process.filter`)
+
+SSRI method for the Sequencer to pre-select Intentions before assemble:
+
+1. Sequencer **routes** with `cid_intention_filter::intention_process_type_id`
+   / `intention_belongs_to_process` (ownership is Sequencer-only).
+2. Calls `Process.filter` (host: `process_filter`) on the routed batch.
+3. Filter judges **business compliance only** (deposit / asset / digest) from
+   `cid-process-example-policy` — it does **not** re-check ownership.
+4. Assemble only the accepted cells.
+
+Reason codes and wire format: [ssri-backend-interface.md](ssri-backend-interface.md).
 
 ## CKB deposit minimum (Intention consume)
 

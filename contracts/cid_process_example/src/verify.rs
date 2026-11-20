@@ -1,8 +1,10 @@
 extern crate alloc;
 
+use crate::classify::{classify_live_intention, filter_reason_to_process_error};
 use crate::{Context, ProcessError};
 use alloc::vec;
 use alloc::vec::Vec;
+use cid_intention_filter::FILTER_ACCEPTED;
 use cid_protocol::{
     is_standard_xudt, is_type_id_script, CidArgs, Script as CidScript, PROCESS_TYPE_HASH_LEN,
     XUDT_AMOUNT_LEN,
@@ -149,6 +151,8 @@ fn collect_output_obligations(
 ) -> core::result::Result<(Vec<OutputObligation>, Vec<OutputObligation>), ProcessError> {
     // Intention `process_type_hash` is the TYPE_ID type-script hash of this
     // Process state cell — not the Process lock script hash.
+    // Scoping matches bd11d44: `ours_prefix` only (no CID Type-ID ownership
+    // re-check — that is Sequencer-side via cid-intention-filter).
     let our_type_hash = our_process_type_id()?;
     let digest_ok_hashes = type_hashes_in_both_io()?;
 
@@ -172,25 +176,32 @@ fn collect_output_obligations(
         let digest_ok = digest_ok_hashes.iter().any(|h| h == &cid.process_type_hash);
 
         if digest_ok {
-            let transfer = match parse_payment(i, &cid) {
-                Ok(Some(t)) => t,
-                Ok(None) if ours_prefix => return Err(ProcessError::BeneficiaryMissing),
-                Ok(None) => continue,
-                Err(e) => return Err(e),
-            };
-            // Deposit floor is Process-local: only this Process's Intentions.
-            if ours_prefix
-                && !crate::deposit::ckb_deposit_capacity_ok(
-                    transfer.capacity,
-                    transfer.type_script.is_some(),
-                )
-            {
-                return Err(ProcessError::DepositBelowMinimum);
-            }
             if ours_prefix {
+                // Shared business classify (deposit / asset / digest) — same SoT
+                // as filter/assemble. Ownership is not re-checked here.
+                let capacity = load_cell_capacity(i, Source::Input)
+                    .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let data = load_cell_data(i, Source::Input)
+                    .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let type_script = load_cell_type(i, Source::Input)
+                    .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let reason = classify_live_intention(&lock, capacity, type_script.as_ref(), &data);
+                if reason != FILTER_ACCEPTED {
+                    return Err(filter_reason_to_process_error(reason)
+                        .unwrap_or(ProcessError::IncompatibleBatch));
+                }
+                let transfer = match parse_payment(i, &cid)? {
+                    Some(t) => t,
+                    None => return Err(ProcessError::BeneficiaryMissing),
+                };
                 ours.push(transfer.clone());
+                obligations.push(transfer);
+            } else {
+                match parse_payment(i, &cid)? {
+                    Some(t) => obligations.push(t),
+                    None => continue,
+                }
             }
-            obligations.push(transfer);
         } else {
             // Refund branch (DigestIncompatible and TimeoutBurn): unique-assign
             // the user_lock output, never the payload. TimeoutBurn still requires
