@@ -125,8 +125,10 @@ User Lock.
 `cid-process-example-policy`) — and deducts it from the recreated state cell.
 The `+ 4` matches CKB `serialized_size_in_block` (molecule `NUMBER_SIZE` in the
 block), so the fee is never below the node min fee. If the result would be
-below occupied capacity, assemble errors. On-chain Transfer verify bounds the
-state-cell capacity debit by the same fee formula (rejects excess drains with
-`CapacityInsufficient` / 37). Draft must include CID, Process, and applicable
-xUDT cell_deps; the example copies them through. Submit returned molecule bytes
-unchanged.
+below occupied capacity, assemble errors. On-chain Transfer verify (1) caps
+each Process state-cell debit by that fee formula and (2) requires
+`tx_fee = Σ(input caps) − Σ(output caps)` to cover the aggregate positive
+debit across all Process locks sharing this binary’s `code_hash`/`hash_type`
+(rejects diverted drains with `CapacityInsufficient` / 37). Draft must include
+CID, Process, and applicable xUDT cell_deps; the example copies them through.
+Submit returned molecule bytes unchanged.
