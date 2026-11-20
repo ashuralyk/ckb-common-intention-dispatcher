@@ -1,6 +1,6 @@
 extern crate alloc;
 
-use crate::classify::{classify_live_intention, filter_reason_to_process_error};
+use crate::classify::{classify_live_intention_excluding, filter_reason_to_process_error};
 use crate::{Context, ProcessError};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -92,10 +92,14 @@ fn verify_lock_pair() -> Result<Option<&'static str>> {
     Ok(None)
 }
 
-/// Bound Process state-cell capacity debit by the shared fee policy.
+/// Bound Process state-cell capacity debits and require they fund the tx fee.
 ///
-/// Assemble deducts at most `fee_from_tx_molecule_len(tx)`; consensus must not
-/// allow excess state-capacity loss beyond that budget.
+/// 1. This lock-group pair's debit is capped by `fee_from_tx_molecule_len(tx)`.
+/// 2. `tx_fee = sum(all input caps) - sum(all output caps)` (fail closed on
+///    underflow) must cover the **aggregate** positive debit across every
+///    Process state cell that shares this lock `code_hash` + `hash_type`
+///    (distinct args → distinct lock groups; all still count). Diverting a
+///    debit into another output without paying fee is rejected.
 fn verify_state_fee_budget() -> Result<Option<&'static str>> {
     let input_indices = this_script_indices(Source::Input, ScriptPlace::Lock)?;
     let output_indices = this_script_indices(Source::Output, ScriptPlace::Lock)?;
@@ -106,15 +110,70 @@ fn verify_state_fee_budget() -> Result<Option<&'static str>> {
         .map_err(|_| ProcessError::ProcessPairInvalid)?;
     let out_cap = load_cell_capacity(output_indices[0], Source::Output)
         .map_err(|_| ProcessError::ProcessPairInvalid)?;
-    if in_cap > out_cap {
-        let debit = in_cap - out_cap;
-        let tx = load_transaction().map_err(|_| ProcessError::ProcessPairInvalid)?;
-        let max_fee = fee_from_tx_molecule_len(tx.as_slice().len() as u64);
-        if debit > max_fee {
-            return Err(ProcessError::CapacityInsufficient.into());
-        }
+    let this_debit = in_cap.saturating_sub(out_cap);
+    let tx = load_transaction().map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let max_fee = fee_from_tx_molecule_len(tx.as_slice().len() as u64);
+    if this_debit > max_fee {
+        return Err(ProcessError::CapacityInsufficient.into());
+    }
+
+    let ours = load_script().map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let our_code = ours.code_hash();
+    let our_ht = ours.hash_type();
+
+    let process_in = sum_capacity_matching_lock(Source::Input, &our_code, our_ht)?;
+    let process_out = sum_capacity_matching_lock(Source::Output, &our_code, our_ht)?;
+    let aggregate_debit = process_in.saturating_sub(process_out);
+
+    let all_in = sum_capacity_all(Source::Input)?;
+    let all_out = sum_capacity_all(Source::Output)?;
+    let tx_fee = all_in
+        .checked_sub(all_out)
+        .ok_or(ProcessError::CapacityInsufficient)?;
+    if tx_fee < aggregate_debit {
+        return Err(ProcessError::CapacityInsufficient.into());
     }
     Ok(None)
+}
+
+fn sum_capacity_all(source: Source) -> core::result::Result<u64, ProcessError> {
+    let mut sum = 0u64;
+    for i in 0.. {
+        match load_cell_capacity(i, source) {
+            Ok(c) => {
+                sum = sum
+                    .checked_add(c)
+                    .ok_or(ProcessError::CapacityInsufficient)?;
+            }
+            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
+            Err(_) => return Err(ProcessError::ProcessPairInvalid),
+        }
+    }
+    Ok(sum)
+}
+
+fn sum_capacity_matching_lock(
+    source: Source,
+    code_hash: &ckb_std::ckb_types::packed::Byte32,
+    hash_type: ckb_std::ckb_types::packed::Byte,
+) -> core::result::Result<u64, ProcessError> {
+    let mut sum = 0u64;
+    for i in 0.. {
+        match load_cell_lock(i, source) {
+            Ok(lock) => {
+                if &lock.code_hash() == code_hash && lock.hash_type() == hash_type {
+                    let c = load_cell_capacity(i, source)
+                        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                    sum = sum
+                        .checked_add(c)
+                        .ok_or(ProcessError::CapacityInsufficient)?;
+                }
+            }
+            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
+            Err(_) => return Err(ProcessError::ProcessPairInvalid),
+        }
+    }
+    Ok(sum)
 }
 
 fn require_type_id_type(index: usize, source: Source) -> Result<[u8; 32]> {
@@ -206,14 +265,24 @@ fn collect_output_obligations(
         if digest_ok {
             if ours_prefix {
                 // Shared business classify (deposit / asset / digest) — same SoT
-                // as filter/assemble. Ownership is not re-checked here.
+                // as assemble. Ownership is not re-checked here. Pass Process
+                // lock code_hash so a Process-binary beneficiary is rejected
+                // (claim_output would skip it as a recreate cell).
                 let capacity = load_cell_capacity(i, Source::Input)
                     .map_err(|_| ProcessError::ProcessPairInvalid)?;
                 let data = load_cell_data(i, Source::Input)
                     .map_err(|_| ProcessError::ProcessPairInvalid)?;
                 let type_script = load_cell_type(i, Source::Input)
                     .map_err(|_| ProcessError::ProcessPairInvalid)?;
-                let reason = classify_live_intention(&lock, capacity, type_script.as_ref(), &data);
+                let process_script = load_script().map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let process_code: [u8; 32] = process_script.code_hash().unpack();
+                let reason = classify_live_intention_excluding(
+                    &lock,
+                    capacity,
+                    type_script.as_ref(),
+                    &data,
+                    Some(&process_code),
+                );
                 if reason != FILTER_ACCEPTED {
                     return Err(filter_reason_to_process_error(reason)
                         .unwrap_or(ProcessError::IncompatibleBatch));

@@ -1276,6 +1276,73 @@ async fn reject_excess_process_state_capacity_debit() {
 }
 
 #[tokio::test]
+async fn reject_diverted_process_state_debit_not_paid_as_fee() {
+    // Debit Process state by a small amount (<= fee allowance) but give that
+    // capacity to the beneficiary so net tx_fee does not cover the debit.
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = apply_transfer(&mut rpc, dest_lock(), CKB_CAPACITY, vec![]);
+    assert!(skeleton.outputs.len() >= 2);
+    let process_before = skeleton.outputs[0].capacity_shannons();
+    let bene_before = skeleton.outputs[1].capacity_shannons();
+    let divert = 10_000u64; // tiny vs fee allowance, still must be paid as fee
+    skeleton.outputs[0].output = skeleton.outputs[0]
+        .output
+        .clone()
+        .as_builder()
+        .capacity(process_before - divert)
+        .build();
+    skeleton.outputs[1].output = skeleton.outputs[1]
+        .output
+        .clone()
+        .as_builder()
+        .capacity(bene_before + divert)
+        .build();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("diverted Process debit must fail when tx_fee < debit");
+    assert_eq!(exit(err), ERROR_CAPACITY_INSUFFICIENT);
+}
+
+#[tokio::test]
+async fn reject_beneficiary_using_process_lock_code_hash() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process_lock = process_example_lock_script();
+    let process = seed_process_example_cell(&mut rpc, process_lock.clone(), type_script);
+    // Beneficiary reuses Process binary code_hash (Verify skips such outputs).
+    let bad_bene = process_lock
+        .as_builder()
+        .args([0xEEu8, 0xFFu8].pack())
+        .build();
+    let args = beneficiary_args(process_hash, &bad_bene);
+    let intention = seed_intention(&mut rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: ScriptEx::from(bad_bene),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("Process-lock-code_hash beneficiary must fail");
+    assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
+}
+
+#[tokio::test]
 async fn assemble_and_verify_xudt_beneficiary() {
     require_binaries();
     let mut rpc = FakeRpcClient::default();
