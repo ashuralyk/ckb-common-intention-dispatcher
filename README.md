@@ -138,10 +138,11 @@ before replacing the example Process binary at the same code Type ID.
 
 **Intention filter (Sequencer):** Host crate `cid-intention-filter` (kept out of
 `cid-protocol` so the CID lock binary stays byte-stable) provides
-`intention_process_type_id` for routing and `Process.filter` wire framing.
-Each Process exposes SSRI `Process.filter` to classify a batch (ownership +
-Process rules) with stable reason codes. Ownership is checked at **both**
-layers (Sequencer route + Process filter) using the same helper. See
+`intention_process_type_id` / `intention_belongs_to_process` for **Sequencer
+routing** (ownership is Sequencer-only) and `Process.filter` wire framing.
+Each Process exposes SSRI `Process.filter` for **business compliance**
+(deposit / asset / digest) after routing — the filter does not re-check
+ownership. Flow: scan → route → filter → assemble. See
 [docs/ssri-backend-interface.md](docs/ssri-backend-interface.md).
 
 ## Build and test

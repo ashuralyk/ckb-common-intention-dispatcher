@@ -37,13 +37,12 @@ cd tests && cargo test process_example -- --nocapture
 ## SSRI
 
 - **Process.batch** — `(min, max)` = `(1, 4)` as 8 LE bytes  
-- **Process.assemble** — stdin = `cid_code_type_id_hash[32] ||` molecule
-  `Transaction` draft (Intention + Process inputs and required code
-  `cell_deps`); the 32-byte prefix is the same expected CID Type ID as
-  `Process.filter`. Stdout = complete molecule `Transaction` (inputs, outputs,
-  outputs_data, cell_deps, header_deps, witnesses). Cells are loaded via
-  ckb-ssri-std host queries (`find_cell_by_out_point`, …). Extra funding inputs
-  return `UnsupportedFundingLock` (38). The Process state pays the fee.
+- **Process.assemble** — stdin = molecule `Transaction` draft (Intention +
+  Process inputs and required code `cell_deps`); stdout = complete molecule
+  `Transaction` (inputs, outputs, outputs_data, cell_deps, header_deps,
+  witnesses). Cells are loaded via ckb-ssri-std host queries
+  (`find_cell_by_out_point`, …). Extra funding inputs return
+  `UnsupportedFundingLock` (38). The Process state pays the fee.
 
 ## On-chain verification (Process **lock**)
 
@@ -80,11 +79,11 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 
 SSRI method for the Sequencer to pre-select Intentions before assemble:
 
-1. Sequencer routes with `cid_intention_filter::intention_process_type_id`.
-2. Calls `Process.filter` (host: `process_filter`) for that Process Type ID.
-3. Filter **requires** ownership: CID Type-ID lock + `process_type_hash` equals
-   this Process (same helper / `ours_prefix` semantics), then applies deposit /
-   asset / digest rules from `cid-process-example-policy`.
+1. Sequencer **routes** with `cid_intention_filter::intention_process_type_id`
+   / `intention_belongs_to_process` (ownership is Sequencer-only).
+2. Calls `Process.filter` (host: `process_filter`) on the routed batch.
+3. Filter judges **business compliance only** (deposit / asset / digest) from
+   `cid-process-example-policy` — it does **not** re-check ownership.
 4. Assemble only the accepted cells.
 
 Reason codes and wire format: [ssri-backend-interface.md](ssri-backend-interface.md).

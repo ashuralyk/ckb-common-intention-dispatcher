@@ -36,8 +36,8 @@ pub use cid_process_example_policy::{ckb_deposit_capacity_ok, MIN_DEPOSIT_CAPACI
 pub use cid_intention_filter::{
     intention_belongs_to_process, intention_process_type_id, FilterCell, FilterRequest,
     IntentionRouteError, FILTER_ACCEPTED, FILTER_DEPOSIT_BELOW_MINIMUM, FILTER_MALFORMED_CELL,
-    FILTER_MALFORMED_DIGEST, FILTER_NOT_INTENTION, FILTER_PROCESS_MISMATCH,
-    FILTER_UNSUPPORTED_ACTION, FILTER_UNSUPPORTED_ASSET,
+    FILTER_MALFORMED_DIGEST, FILTER_RESERVED_2, FILTER_RESERVED_3, FILTER_UNSUPPORTED_ACTION,
+    FILTER_UNSUPPORTED_ASSET,
 };
 
 /// Fee rate (shannons/KW) used when balancing Process state create txs.
@@ -215,10 +215,6 @@ pub struct DraftCellDep {
 pub struct AssembleExtras {
     pub funding_cells: Vec<ProcessStateCell>,
     pub cell_deps: Vec<DraftCellDep>,
-    /// Expected CID lock code Type ID for assemble ownership checks (same value
-    /// as `Process.filter`). When `None`, derived from the first Type-hash
-    /// Intention lock, else the placeholder `[0xC1; 32]`.
-    pub cid_code_type_id_hash: Option<[u8; 32]>,
 }
 
 fn require_submit_cell_deps(extras: &AssembleExtras) -> Result<()> {
@@ -252,37 +248,24 @@ pub fn intention_to_filter_cell(intention: &IntentionCell) -> Result<FilterCell>
 
 /// Call SSRI `Process.filter` for Intentions already routed to one Process.
 ///
-/// `process_type_hash` is this Process instance identity (state TYPE_ID hash).
-/// `cid_code_type_id_hash` is the CID lock code Type ID script hash used for
-/// ownership checks. Returns one reason code per input, same order.
+/// Returns one reason code per input, same order. Judges Process **business**
+/// compliance only — callers must route with [`intention_process_type_id`] /
+/// [`intention_belongs_to_process`] first.
 ///
-/// Sequencer flow: scan → [`intention_process_type_id`] group → this filter →
-/// assemble accepted cells.
-pub fn process_filter(
-    process_type_hash: [u8; 32],
-    cid_code_type_id_hash: [u8; 32],
-    intentions: &[IntentionCell],
-    bin_dir: &str,
-) -> Result<Vec<i8>> {
+/// Sequencer flow: scan → route → this filter → assemble accepted cells.
+pub fn process_filter(intentions: &[IntentionCell], bin_dir: &str) -> Result<Vec<i8>> {
     let mut cells = Vec::with_capacity(intentions.len());
     for intention in intentions {
         cells.push(intention_to_filter_cell(intention)?);
     }
-    process_filter_cells(process_type_hash, cid_code_type_id_hash, &cells, bin_dir)
+    process_filter_cells(&cells, bin_dir)
 }
 
 /// Like [`process_filter`] but takes pre-encoded [`FilterCell`]s.
-pub fn process_filter_cells(
-    process_type_hash: [u8; 32],
-    cid_code_type_id_hash: [u8; 32],
-    cells: &[FilterCell],
-    bin_dir: &str,
-) -> Result<Vec<i8>> {
+pub fn process_filter_cells(cells: &[FilterCell], bin_dir: &str) -> Result<Vec<i8>> {
     let binary = load_process_binary(bin_dir)?;
     let executor = ProcessExecutor::new(binary);
     let req = FilterRequest {
-        process_type_hash,
-        cid_code_type_id_hash,
         cells: cells.to_vec(),
     };
     let bytes = cid_intention_filter::encode_filter_request(&req)
@@ -430,30 +413,13 @@ fn assemble_with_host<T: RPC, H: HostQuery + Send + 'static>(
 
     require_submit_cell_deps(extras)?;
     require_process_matches_intentions(process, intentions)?;
-    let cid_tid = resolve_assemble_cid_tid(extras, intentions);
     let (draft, known) = build_draft_and_known(intentions, process, extras)?;
     let assembled = executor
-        .assemble(cid_tid, &draft, host)
+        .assemble(&draft, host)
         .map_err(|e| CalculatorError::Other(format!("executor assemble failed: {}", e)))?;
 
     let skeleton = skeleton_from_assembled(&assembled, &known)?;
     Ok((skeleton, assembled, vec![]))
-}
-
-/// CID Type ID for `Process.assemble` stdin prefix (Sequencer-authoritative).
-fn resolve_assemble_cid_tid(extras: &AssembleExtras, intentions: &[IntentionCell]) -> [u8; 32] {
-    if let Some(h) = extras.cid_code_type_id_hash {
-        return h;
-    }
-    for intention in intentions {
-        if let Some(ref lock) = intention.lock {
-            let ht: u8 = lock.hash_type().into();
-            if ht == 1 {
-                return lock.code_hash().unpack();
-            }
-        }
-    }
-    [0xC1; 32]
 }
 
 /// Resolve a live Process state cell whose **type** script equals `type_script`
@@ -564,7 +530,6 @@ pub fn process_digest_ok_with_process<T: RPC>(
         AssembleExtras {
             funding_cells: vec![],
             cell_deps,
-            cid_code_type_id_hash: None,
         },
         bin_dir,
     )?;
@@ -1072,7 +1037,6 @@ mod tests {
             AssembleExtras {
                 funding_cells: vec![],
                 cell_deps: vec![sample_code_dep()],
-                cid_code_type_id_hash: None,
             },
             bin_dir,
         )
@@ -1101,7 +1065,6 @@ mod tests {
         let extras = AssembleExtras {
             funding_cells: vec![],
             cell_deps: vec![sample_code_dep()],
-            cid_code_type_id_hash: None,
         };
         let (draft, mut known) = build_draft_and_known(&intentions, &process, &extras).unwrap();
         // Change the cell served to the guest so the host draft guard does not
@@ -1112,7 +1075,7 @@ mod tests {
             .as_builder()
             .capacity(MIN_DEPOSIT_CAPACITY - 1)
             .build();
-        let result = executor.assemble([0xC1; 32], &draft, seed_mock_from_known(&known).unwrap());
+        let result = executor.assemble(&draft, seed_mock_from_known(&known).unwrap());
         assert!(
             matches!(result, Err(ExecutorError::Incompatible(39))),
             "{result:?}"
@@ -1137,7 +1100,6 @@ mod tests {
             AssembleExtras {
                 funding_cells: vec![],
                 cell_deps: vec![sample_code_dep()],
-                cid_code_type_id_hash: None,
             },
             bin_dir,
         )
@@ -1230,7 +1192,6 @@ mod tests {
             AssembleExtras {
                 funding_cells: vec![],
                 cell_deps: vec![sample_code_dep()],
-                cid_code_type_id_hash: None,
             },
             bin_dir,
         )
@@ -1294,7 +1255,6 @@ mod tests {
                 AssembleExtras {
                     funding_cells: vec![funding],
                     cell_deps: vec![sample_code_dep()],
-                    cid_code_type_id_hash: None,
                 },
                 bin_dir,
             )
@@ -1337,7 +1297,6 @@ mod tests {
             AssembleExtras {
                 funding_cells: vec![bad_funding],
                 cell_deps: vec![sample_code_dep()],
-                cid_code_type_id_hash: None,
             },
             bin_dir,
         )
@@ -1364,7 +1323,6 @@ mod tests {
             AssembleExtras {
                 funding_cells: vec![same_lock_funding],
                 cell_deps: vec![sample_code_dep()],
-                cid_code_type_id_hash: None,
             },
             bin_dir,
         )
@@ -1411,12 +1369,12 @@ mod tests {
             eprintln!("Skipping test: binary not built");
             return;
         }
-        let reasons = process_filter([0xA1; 32], [0xC1; 32], &[], bin_dir).expect("empty filter");
+        let reasons = process_filter(&[], bin_dir).expect("empty filter");
         assert!(reasons.is_empty());
     }
 
     #[test]
-    fn test_process_filter_mixed_batch_order_and_ownership() {
+    fn test_process_filter_mixed_batch_business_rules() {
         let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
         if !std::path::Path::new(&format!("{bin_dir}/{PROCESS_CONTRACT_NAME}")).exists() {
             eprintln!("Skipping test: binary not built");
@@ -1426,7 +1384,9 @@ mod tests {
         let pth: [u8; 32] = process.type_script.calc_script_hash().unpack();
         let cid_tid = [0xC1; 32];
         let valid = filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY, None, vec![], None);
-        let foreign = filter_intention_cell(
+        // Foreign process_type_hash: filter no longer rejects ownership; args still
+        // decode with a beneficiary → business ACCEPTED after Sequencer routing.
+        let foreign_pth = filter_intention_cell(
             pth,
             cid_tid,
             MIN_DEPOSIT_CAPACITY,
@@ -1436,15 +1396,17 @@ mod tests {
         );
         let below =
             filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY / 2, None, vec![], None);
-        let non_cid = {
+        let malformed = {
             let mut c =
                 filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY, None, vec![], None);
-            let lock = c.lock.as_mut().unwrap();
-            *lock = lock
-                .clone()
-                .as_builder()
-                .hash_type(ScriptHashType::Data1)
-                .build();
+            c.lock_args = vec![0u8; 40];
+            if let Some(ref mut lock) = c.lock {
+                *lock = lock
+                    .clone()
+                    .as_builder()
+                    .args(c.lock_args.clone().pack())
+                    .build();
+            }
             c
         };
         let xudt = {
@@ -1455,13 +1417,13 @@ mod tests {
                 .build();
             filter_intention_cell(pth, cid_tid, 1, Some(typ), vec![0u8; 16], None)
         };
-        let batch = vec![valid, foreign, below, non_cid, xudt];
-        let reasons = process_filter(pth, cid_tid, &batch, bin_dir).expect("filter");
+        let batch = vec![valid, foreign_pth, below, malformed, xudt];
+        let reasons = process_filter(&batch, bin_dir).expect("filter");
         assert_eq!(reasons.len(), 5);
         assert_eq!(reasons[0], FILTER_ACCEPTED);
-        assert_eq!(reasons[1], FILTER_PROCESS_MISMATCH);
+        assert_eq!(reasons[1], FILTER_ACCEPTED); // ownership not checked in filter
         assert_eq!(reasons[2], FILTER_DEPOSIT_BELOW_MINIMUM);
-        assert_eq!(reasons[3], FILTER_NOT_INTENTION);
+        assert_eq!(reasons[3], FILTER_MALFORMED_DIGEST);
         assert_eq!(reasons[4], FILTER_ACCEPTED);
     }
 
@@ -1474,8 +1436,6 @@ mod tests {
         }
         let rpc = FakeRpcClient::default();
         let (process, intentions) = sample_process_and_intention();
-        let pth: [u8; 32] = process.type_script.calc_script_hash().unpack();
-        // sample Intentions use placeholder lock code_hash [0xC1;32] when lock is None.
         let cid_tid = [0xC1; 32];
         let with_lock: Vec<_> = intentions
             .iter()
@@ -1491,7 +1451,7 @@ mod tests {
                 c
             })
             .collect();
-        let reasons = process_filter(pth, cid_tid, &with_lock, bin_dir).expect("filter");
+        let reasons = process_filter(&with_lock, bin_dir).expect("filter");
         assert!(reasons.iter().all(|r| *r == FILTER_ACCEPTED));
         process_digest_ok_with_extras(
             &rpc,
@@ -1500,7 +1460,6 @@ mod tests {
             AssembleExtras {
                 funding_cells: vec![],
                 cell_deps: vec![sample_code_dep()],
-                cid_code_type_id_hash: None,
             },
             bin_dir,
         )
@@ -1508,43 +1467,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_rejects_foreign_cid_type_id_in_batch() {
-        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
-        if !std::path::Path::new(&format!("{bin_dir}/{PROCESS_CONTRACT_NAME}")).exists() {
-            eprintln!("Skipping test: binary not built");
-            return;
-        }
-        let rpc = FakeRpcClient::default();
-        let (process, _) = sample_process_and_intention();
-        let pth: [u8; 32] = process.type_script.calc_script_hash().unpack();
-        let cid_tid = [0xC1; 32];
-        let foreign_tid = [0xF0; 32];
-        // Same process_type_hash, but lock.code_hash is a different Type ID.
-        let foreign =
-            filter_intention_cell(pth, foreign_tid, MIN_DEPOSIT_CAPACITY, None, vec![], None);
-        let err = process_digest_ok_with_extras(
-            &rpc,
-            vec![foreign],
-            process,
-            AssembleExtras {
-                funding_cells: vec![],
-                cell_deps: vec![sample_code_dep()],
-                // Sequencer-authoritative CID Type ID (not the Intention's own).
-                cid_code_type_id_hash: Some(cid_tid),
-            },
-            bin_dir,
-        )
-        .err()
-        .expect("foreign CID Type ID must fail assemble");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("Incompatible") || msg.contains("assemble"),
-            "unexpected error: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_filter_accepted_equals_verify_classify_mixed_corpus() {
+    fn test_filter_accepted_equals_business_classify_mixed_corpus() {
         use cid_process_example_policy::classify_intention;
         use cid_protocol::Script as CidScript;
 
@@ -1557,27 +1480,8 @@ mod tests {
         let pth: [u8; 32] = process.type_script.calc_script_hash().unpack();
         let cid_tid = [0xC1; 32];
         let valid = filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY, None, vec![], None);
-        let foreign = filter_intention_cell(
-            pth,
-            cid_tid,
-            MIN_DEPOSIT_CAPACITY,
-            None,
-            vec![],
-            Some([0xB2; 32]),
-        );
         let below =
             filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY / 2, None, vec![], None);
-        let non_cid = {
-            let mut c =
-                filter_intention_cell(pth, cid_tid, MIN_DEPOSIT_CAPACITY, None, vec![], None);
-            let lock = c.lock.as_mut().unwrap();
-            *lock = lock
-                .clone()
-                .as_builder()
-                .hash_type(ScriptHashType::Data1)
-                .build();
-            c
-        };
         let xudt = {
             let typ = Script::new_builder()
                 .code_hash(cid_protocol::XUDT_CODE_HASH.pack())
@@ -1586,10 +1490,8 @@ mod tests {
                 .build();
             filter_intention_cell(pth, cid_tid, 1, Some(typ), vec![0u8; 16], None)
         };
-        let foreign_tid =
-            filter_intention_cell(pth, [0xF0; 32], MIN_DEPOSIT_CAPACITY, None, vec![], None);
-        let batch = vec![valid, foreign, below, non_cid, xudt, foreign_tid];
-        let reasons = process_filter(pth, cid_tid, &batch, bin_dir).expect("filter");
+        let batch = vec![valid, below, xudt];
+        let reasons = process_filter(&batch, bin_dir).expect("filter");
         assert_eq!(reasons.len(), batch.len());
         for (cell, &reason) in batch.iter().zip(reasons.iter()) {
             let lock = cell.lock.as_ref().unwrap();
@@ -1606,28 +1508,12 @@ mod tests {
                 (code, ht)
             });
             let typ_ref = typ.as_ref().map(|(c, ht)| (c, *ht));
-            // Shared classify = filter SoT = on-chain verify for ours Intentions.
-            let classified = classify_intention(
-                &pth,
-                &cid_tid,
-                &cid_lock,
-                cell.capacity,
-                typ_ref,
-                &cell.data,
-            );
-            assert_eq!(classified, reason, "filter vs classify mismatch");
-            assert_eq!(
-                reason == FILTER_ACCEPTED,
-                classified == FILTER_ACCEPTED,
-                "filter-accepted must equal verify-accepted"
-            );
+            let classified = classify_intention(&cid_lock, cell.capacity, typ_ref, &cell.data);
+            assert_eq!(classified, reason, "filter vs business classify mismatch");
         }
         assert_eq!(reasons[0], FILTER_ACCEPTED);
-        assert_eq!(reasons[1], FILTER_PROCESS_MISMATCH);
-        assert_eq!(reasons[2], FILTER_DEPOSIT_BELOW_MINIMUM);
-        assert_eq!(reasons[3], FILTER_NOT_INTENTION);
-        assert_eq!(reasons[4], FILTER_ACCEPTED);
-        assert_eq!(reasons[5], FILTER_NOT_INTENTION); // foreign Type ID
+        assert_eq!(reasons[1], FILTER_DEPOSIT_BELOW_MINIMUM);
+        assert_eq!(reasons[2], FILTER_ACCEPTED);
     }
 
     #[test]
@@ -1641,10 +1527,7 @@ mod tests {
             return;
         }
         let executor = ProcessExecutor::new(load_process_binary(bin_dir).unwrap());
-        // Build a valid empty request, then pad with a single large cell to hit exact max.
         let mut req = FilterRequest {
-            process_type_hash: [0xA1; 32],
-            cid_code_type_id_hash: [0xC1; 32],
             cells: vec![FilterCell {
                 out_point: vec![1],
                 output: vec![2],

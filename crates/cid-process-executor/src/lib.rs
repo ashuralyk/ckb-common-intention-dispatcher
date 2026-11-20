@@ -53,33 +53,24 @@ impl ProcessExecutor {
 
     /// Assemble a complete digest transaction via SSRI `Process.assemble`.
     ///
-    /// `cid_code_type_id_hash` is the expected CID lock code Type ID (same value
-    /// the Sequencer passes to `Process.filter`). Stdin is
-    /// `cid_code_type_id_hash[32] || draft_tx`.
-    ///
     /// `draft_tx` is a packed molecule `Transaction` whose inputs are the
     /// Intention + Process out points. `host` must resolve those out points
     /// (and any tip queries) interactively via [`HostQuery`] syscalls during
     /// VM execution — use [`MockHost`] offline or an RPC-backed impl live.
     pub fn assemble<H: HostQuery + Send + 'static>(
         &self,
-        cid_code_type_id_hash: [u8; 32],
         draft_tx: &[u8],
         host: H,
     ) -> Result<AssembledTx, ExecutorError> {
         if self.binary.is_empty() {
             return Err(ExecutorError::VmError("empty binary".into()));
         }
-        let stdin = encode_assemble_stdin(&cid_code_type_id_hash, draft_tx);
         let response =
-            vm::call_ssri_method_with_host(&self.binary, "Process.assemble", &stdin, host)?;
+            vm::call_ssri_method_with_host(&self.binary, "Process.assemble", draft_tx, host)?;
         AssembledTx::from_bytes(&response)
     }
 
     /// Convenience: seed `host` from `cells`, build a draft, and assemble.
-    ///
-    /// Uses the placeholder CID Type ID `[0xC1; 32]` matching
-    /// [`intention_draft_cell`].
     pub fn assemble_from_cells(&self, cells: &[DraftCell]) -> Result<AssembledTx, ExecutorError> {
         let host = MockHost::new();
         host.insert_block_hash(0, [0xAB; 32]);
@@ -91,16 +82,8 @@ impl ProcessExecutor {
             );
         }
         let draft = build_draft_tx(cells);
-        self.assemble([0xC1; 32], &draft, host)
+        self.assemble(&draft, host)
     }
-}
-
-/// Encode `Process.assemble` stdin: `cid_code_type_id_hash[32] || draft_tx`.
-pub fn encode_assemble_stdin(cid_code_type_id_hash: &[u8; 32], draft_tx: &[u8]) -> Vec<u8> {
-    let mut stdin = Vec::with_capacity(32 + draft_tx.len());
-    stdin.extend_from_slice(cid_code_type_id_hash);
-    stdin.extend_from_slice(draft_tx);
-    stdin
 }
 
 fn parse_batch_bounds(response: &[u8]) -> Result<(u32, u32), ExecutorError> {
@@ -671,7 +654,7 @@ mod tests {
         let host = std::sync::Arc::new(RecordingHost::wrap(mock));
         let draft = build_draft_tx(&cells);
         let assembled = executor
-            .assemble([0xC1; 32], &draft, host.clone())
+            .assemble(&draft, host.clone())
             .expect("assemble with Arc custom HostQuery");
         assert!(!assembled.outputs.is_empty());
         assert!(
@@ -792,9 +775,7 @@ mod tests {
             .build()
             .as_slice()
             .to_vec();
-        let assembled = executor
-            .assemble([0xC1; 32], &draft, host)
-            .expect("assemble");
+        let assembled = executor.assemble(&draft, host).expect("assemble");
         let got: u64 = assembled.inputs[0].since().unpack();
         assert_eq!(got, since, "assemble must preserve CellInput.since");
     }

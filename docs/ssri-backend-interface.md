@@ -48,20 +48,19 @@ are Process responsibilities; submit the returned bytes unchanged.
 ## Sequencer flow (scan → route → filter → assemble)
 
 1. **Scan** live Intention cells (indexer / node).
-2. **Route** with the Process-independent protocol helper
+2. **Route** with the Process-independent helper
    [`intention_process_type_id`](../crates/cid-intention-filter/src/route.rs)
    (crate `cid-intention-filter`, not linked into the CID lock): require CID
    lock `hash_type = type` and `code_hash =` the Sequencer's CID code Type ID
    script hash; extract `process_type_hash`. Group Intentions by that Process
    Type ID. Non-Intentions / malformed cells get a typed
-   [`IntentionRouteError`].
-3. **Filter** per Process: call SSRI `Process.filter` with that Process's
-   identity + the CID Type ID hash + the routed cell batch. The filter
-   **must** verify ownership itself (same protocol helper: CID Type-ID lock +
-   `process_type_hash` equals this Process) and reject foreign / non-CID cells
-   with dedicated reason codes — consistent with on-chain `ours_prefix`.
+   [`IntentionRouteError`]. **Ownership is solely the Sequencer's job.**
+3. **Filter** per Process: call SSRI `Process.filter` with the already-routed
+   cell batch. The filter judges **Process business compliance only**
+   (malformed cell/digest, unsupported asset/action, deposit below Process
+   minimum, …) — it does **not** re-check CID Type-ID ownership.
 4. **Assemble** with the accepted Intentions + live Process state via
-   `Process.assemble`.
+   `Process.assemble` (plain molecule `Transaction` draft).
 
 Host wrapper: `cid_process_example_calculator::process_filter`.
 
@@ -76,41 +75,36 @@ Host wrapper: `cid_process_example_calculator::process_filter`.
 
 - **stdin:** [`FilterRequest`](../crates/cid-intention-filter/src/filter.rs) via
   `encode_filter_request`:
-  - `process_type_hash[32]` — this Process instance (state TYPE_ID script hash)
-  - `cid_code_type_id_hash[32]` — CID lock code Type ID script hash
   - `count:u32 LE` then per cell: length-prefixed packed `OutPoint`, packed
     `CellOutput`, and `data` (same molecule cell encoding as elsewhere)
   - empty stdin or `count = 0` → empty verdict list
   - soft cap: `FILTER_MAX_CELLS` (64)
+  - **Callers must route first** — no `process_type_hash` /
+    `cid_code_type_id_hash` in the request
 - **stdout:** `count:u32 LE || reason:i8 * count` (same order as input)
-- **Semantics:** per-cell; one bad cell does **not** abort the batch. Ownership
-  (CID Type-ID Intention lock targeting this Process) is a **required** first
-  check. Then Process-owned rules (deposit min, supported assets, digest).
+- **Semantics:** per-cell; one bad cell does **not** abort the batch.
+  Process-owned business rules only (deposit min, supported assets, digest).
 
 | Reason | Code | Meaning |
 |--------|------|---------|
-| `FILTER_ACCEPTED` | 0 | Meets this Process's requirements |
+| `FILTER_ACCEPTED` | 0 | Meets this Process's business requirements |
 | `FILTER_MALFORMED_CELL` | 1 | Packed `CellOutput` / framing invalid |
-| `FILTER_NOT_INTENTION` | 2 | Not a CID Type-ID Intention lock |
-| `FILTER_PROCESS_MISMATCH` | 3 | CID Intention for another Process Type ID |
+| `FILTER_RESERVED_2` | 2 | Reserved (was ownership / not-Intention) |
+| `FILTER_RESERVED_3` | 3 | Reserved (was process mismatch) |
 | `FILTER_UNSUPPORTED_ASSET` | 4 | Typed asset not supported (e.g. non-xUDT) |
 | `FILTER_DEPOSIT_BELOW_MINIMUM` | 5 | CKB deposit below Process minimum |
 | `FILTER_MALFORMED_DIGEST` | 6 | Payload / digest undecodable for this Process |
 | `FILTER_UNSUPPORTED_ACTION` | 7 | Action not supported (reserved) |
 
-Example Process classification is shared with assemble / on-chain verify via
-`crates/cid-process-example-policy` (`classify_intention`). Filter, assemble, and
-on-chain Verify all call that helper with one expected CID Type ID (filter /
-assemble: Sequencer-supplied; on-chain: the unique Type-hash `code_hash` among
-this Process's Intentions).
+Example Process **business** classification is shared with assemble / on-chain
+verify via `crates/cid-process-example-policy` (`classify_intention`). On-chain
+Verify keeps `ours_prefix` scoping separately (bd11d44 semantics); it does not
+re-check CID Type-ID ownership.
 
 ### `Process.assemble`
 
-- **stdin:** `cid_code_type_id_hash[32] ||` packed molecule `Transaction`
-  **draft**. The 32-byte prefix is the same expected CID lock code Type ID the
-  Sequencer passes to `Process.filter` — every Intention is classified against
-  that single value (not each cell's own `lock.code_hash`). Each Process defines
-  its own draft preconditions. For `cid_process_example`, the draft must include:
+- **stdin:** packed molecule `Transaction` **draft**. Each Process defines its
+  own draft preconditions. For `cid_process_example`, the draft must include:
   - `raw.inputs`: Intention and Process state out points only
   - `raw.cell_deps`: at least CID lock code, Process code, and any official
     xUDT code deps needed to execute the returned tx

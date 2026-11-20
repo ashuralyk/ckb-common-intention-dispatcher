@@ -1,20 +1,20 @@
 //! Example Process deposit + Intention classification policy (Process-owned).
 //!
-//! Single source of truth for rules shared by `Process.filter`, `Process.assemble`,
-//! and on-chain Verify. Protocol / CID impose no Intention or deposit floor.
+//! Single source of truth for **business** rules shared by `Process.filter`,
+//! `Process.assemble`, and on-chain Verify (deposit floor, supported assets,
+//! digest/beneficiary shape). Protocol / CID impose no Intention or deposit floor.
 //!
-//! Ownership (CID Type-ID lock + Process Type ID) uses
-//! [`cid_intention_filter::intention_belongs_to_process`] — same helper the
-//! Sequencer uses for routing.
+//! **Ownership is not checked here.** The Sequencer routes with
+//! [`cid_intention_filter::intention_belongs_to_process`] before calling filter;
+//! on-chain Verify keeps its own `ours_prefix` scoping.
 
 #![no_std]
 
 extern crate alloc;
 
 use cid_intention_filter::{
-    intention_belongs_to_process, IntentionRouteError, FILTER_ACCEPTED,
-    FILTER_DEPOSIT_BELOW_MINIMUM, FILTER_MALFORMED_DIGEST, FILTER_NOT_INTENTION,
-    FILTER_PROCESS_MISMATCH, FILTER_UNSUPPORTED_ASSET,
+    FILTER_ACCEPTED, FILTER_DEPOSIT_BELOW_MINIMUM, FILTER_MALFORMED_DIGEST,
+    FILTER_UNSUPPORTED_ASSET,
 };
 use cid_protocol::{is_standard_xudt, CidArgs, Script, XUDT_AMOUNT_LEN};
 
@@ -28,38 +28,19 @@ pub fn ckb_deposit_capacity_ok(capacity: u64, has_type_script: bool) -> bool {
     has_type_script || capacity >= MIN_DEPOSIT_CAPACITY
 }
 
-/// Map protocol ownership errors to `Process.filter` reason codes.
-pub fn filter_reason_from_route_error(err: IntentionRouteError) -> i8 {
-    match err {
-        IntentionRouteError::ProcessMismatch => FILTER_PROCESS_MISMATCH,
-        IntentionRouteError::WrongHashType
-        | IntentionRouteError::WrongCodeHash
-        | IntentionRouteError::ArgsTooShort
-        | IntentionRouteError::MalformedArgs
-        | IntentionRouteError::UnsupportedVersion => FILTER_NOT_INTENTION,
-    }
-}
-
-/// Classify one Intention for this Process (ownership + asset + deposit + digest).
+/// Classify one Intention for Process **business** compliance only.
 ///
-/// Returns a `FILTER_*` reason (`FILTER_ACCEPTED` on success). Used by filter
-/// and mirrored by assemble / verify so rules stay consistent.
+/// Returns a `FILTER_*` reason (`FILTER_ACCEPTED` on success). Does **not**
+/// verify CID Type-ID ownership or `process_type_hash` — callers must route
+/// first (Sequencer) or use on-chain `ours_prefix` scoping (Verify).
 pub fn classify_intention(
-    expected_process_type_hash: &[u8; 32],
-    cid_code_type_id_hash: &[u8; 32],
     lock: &Script,
     capacity: u64,
     type_script: Option<(&[u8; 32], u8)>,
     data: &[u8],
 ) -> i8 {
-    if let Err(e) =
-        intention_belongs_to_process(lock, cid_code_type_id_hash, expected_process_type_hash)
-    {
-        return filter_reason_from_route_error(e);
-    }
-
     let Ok(cid) = CidArgs::decode(&lock.args) else {
-        return FILTER_NOT_INTENTION;
+        return FILTER_MALFORMED_DIGEST;
     };
     // Example Process DigestOk requires a beneficiary Script in the payload.
     if cid.entry.payload.to_script().is_err() {
@@ -87,8 +68,6 @@ pub fn classify_intention(
 
 /// Host/guest helper when type script is absent or presented as code_hash+hash_type.
 pub fn classify_intention_ckb_or_xudt(
-    expected_process_type_hash: &[u8; 32],
-    cid_code_type_id_hash: &[u8; 32],
     lock: &Script,
     capacity: u64,
     type_code_hash: Option<[u8; 32]>,
@@ -96,14 +75,7 @@ pub fn classify_intention_ckb_or_xudt(
     data: &[u8],
 ) -> i8 {
     let typ = type_code_hash.as_ref().map(|h| (h, type_hash_type));
-    classify_intention(
-        expected_process_type_hash,
-        cid_code_type_id_hash,
-        lock,
-        capacity,
-        typ,
-        data,
-    )
+    classify_intention(lock, capacity, typ, data)
 }
 
 #[cfg(test)]
@@ -111,7 +83,7 @@ mod tests {
     use super::*;
     use cid_protocol::{Payload, SCRIPT_HASH_TYPE_TYPE, XUDT_CODE_HASH};
 
-    fn lock_for(pth: [u8; 32], cid_tid: [u8; 32]) -> Script {
+    fn lock_for(pth: [u8; 32]) -> Script {
         let args = CidArgs::new(
             pth,
             Script::default(),
@@ -125,65 +97,57 @@ mod tests {
         .encode()
         .unwrap();
         Script {
-            code_hash: cid_tid,
+            code_hash: [0xC1; 32],
             hash_type: SCRIPT_HASH_TYPE_TYPE,
             args,
         }
     }
 
     #[test]
-    fn accepts_own_ckb_deposit_at_minimum() {
-        let cid = [0xC1; 32];
-        let pth = [0xA1; 32];
-        let lock = lock_for(pth, cid);
+    fn accepts_ckb_deposit_at_minimum() {
+        let lock = lock_for([0xA1; 32]);
         assert_eq!(
-            classify_intention(&pth, &cid, &lock, MIN_DEPOSIT_CAPACITY, None, &[]),
+            classify_intention(&lock, MIN_DEPOSIT_CAPACITY, None, &[]),
             FILTER_ACCEPTED
-        );
-    }
-
-    #[test]
-    fn rejects_foreign_process() {
-        let cid = [0xC1; 32];
-        let lock = lock_for([0xA1; 32], cid);
-        assert_eq!(
-            classify_intention(&[0xB2; 32], &cid, &lock, MIN_DEPOSIT_CAPACITY, None, &[]),
-            FILTER_PROCESS_MISMATCH
-        );
-    }
-
-    #[test]
-    fn rejects_non_cid_lock() {
-        let cid = [0xC1; 32];
-        let pth = [0xA1; 32];
-        let mut lock = lock_for(pth, cid);
-        lock.hash_type = 2;
-        assert_eq!(
-            classify_intention(&pth, &cid, &lock, MIN_DEPOSIT_CAPACITY, None, &[]),
-            FILTER_NOT_INTENTION
         );
     }
 
     #[test]
     fn rejects_below_min_deposit() {
-        let cid = [0xC1; 32];
-        let pth = [0xA1; 32];
-        let lock = lock_for(pth, cid);
+        let lock = lock_for([0xA1; 32]);
         assert_eq!(
-            classify_intention(&pth, &cid, &lock, MIN_DEPOSIT_CAPACITY - 1, None, &[]),
+            classify_intention(&lock, MIN_DEPOSIT_CAPACITY - 1, None, &[]),
             FILTER_DEPOSIT_BELOW_MINIMUM
         );
     }
 
     #[test]
+    fn rejects_malformed_digest() {
+        let mut lock = lock_for([0xA1; 32]);
+        lock.args = alloc::vec![0u8; 40];
+        assert_eq!(
+            classify_intention(&lock, MIN_DEPOSIT_CAPACITY, None, &[]),
+            FILTER_MALFORMED_DIGEST
+        );
+    }
+
+    #[test]
     fn accepts_xudt_below_ckb_min() {
-        let cid = [0xC1; 32];
-        let pth = [0xA1; 32];
-        let lock = lock_for(pth, cid);
+        let lock = lock_for([0xA1; 32]);
         let data = [0u8; 16];
         assert_eq!(
-            classify_intention(&pth, &cid, &lock, 1, Some((&XUDT_CODE_HASH, 2)), &data),
+            classify_intention(&lock, 1, Some((&XUDT_CODE_HASH, 2)), &data),
             FILTER_ACCEPTED
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_asset() {
+        let lock = lock_for([0xA1; 32]);
+        let fake = [0xEE; 32];
+        assert_eq!(
+            classify_intention(&lock, 1, Some((&fake, 2)), &[0u8; 16]),
+            FILTER_UNSUPPORTED_ASSET
         );
     }
 }
