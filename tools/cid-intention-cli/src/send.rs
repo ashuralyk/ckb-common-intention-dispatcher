@@ -12,6 +12,8 @@ use ckb_cinnabar_calculator::{
 };
 use serde_json::{json, Value};
 
+use cid_process_example_calculator::ProcessLockArgs;
+
 use crate::build::{process_type_hash_of, CliError};
 use crate::hexutil::{decode_hash32, decode_hex, encode_hex};
 use crate::process_build::{
@@ -361,11 +363,34 @@ fn validate_process_state_metadata(
     let identity_args = decode_hash32(typ["args"].as_str().unwrap_or_default())?;
     let lock = &output["lock"];
     let args = decode_hex(lock["args"].as_str().unwrap_or_default())?;
-    if lock["hash_type"].as_str() != Some("type")
-        || args.is_empty()
-        || cid_protocol::CidArgs::decode(&args).is_ok()
-    {
-        return Err(CliError::NetworkGuard("invalid Process state lock".into()));
+    if lock["hash_type"].as_str() != Some("type") {
+        return Err(CliError::NetworkGuard(
+            "Process state lock hash_type must be `type`".into(),
+        ));
+    }
+    let decoded = ProcessLockArgs::decode(&args).map_err(|e| {
+        CliError::NetworkGuard(format!(
+            "Process state lock args invalid ({e:?}): need cid_code_hash[32]||cid_hash_type[1]||salt"
+        ))
+    })?;
+    if decoded.cid_hash_type != 1 {
+        return Err(CliError::NetworkGuard(
+            "ProcessLockArgs.cid_hash_type must be `type` (1)".into(),
+        ));
+    }
+    let meta_cid = metadata_hash(metadata, "cid_code_type_id")?;
+    if decoded.cid_code_hash != meta_cid {
+        return Err(CliError::NetworkGuard(
+            "ProcessLockArgs.cid_code_hash must equal live CID code Type ID".into(),
+        ));
+    }
+    if let Some(echoed) = metadata.get("process_lock_args").and_then(|v| v.as_str()) {
+        let echoed_bytes = decode_hex(echoed)?;
+        if echoed_bytes != args {
+            return Err(CliError::NetworkGuard(
+                "echoed process_lock_args metadata does not match signed state lock args".into(),
+            ));
+        }
     }
     let process_code = decode_hash32(lock["code_hash"].as_str().unwrap_or_default())?;
     let state_outpoint = &metadata["state_outpoint"];
@@ -437,6 +462,18 @@ fn assert_live_process_and_cid_code_type_ids(
     if cid == process {
         return Err(CliError::NetworkGuard(
             "CID and Process code Type IDs must be distinct".into(),
+        ));
+    }
+    let state_args = decode_hex(
+        tx["outputs"][PROCESS_STATE_OUTPUT_INDEX]["lock"]["args"]
+            .as_str()
+            .unwrap_or_default(),
+    )?;
+    let decoded = ProcessLockArgs::decode(&state_args)
+        .map_err(|e| CliError::NetworkGuard(format!("Process state lock args invalid ({e:?})")))?;
+    if decoded.cid_code_hash != cid {
+        return Err(CliError::NetworkGuard(
+            "ProcessLockArgs.cid_code_hash must equal live CID code Type ID".into(),
         ));
     }
     let live = collect_live_type_id_script_hashes(url, tx)?;

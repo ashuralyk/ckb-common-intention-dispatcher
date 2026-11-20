@@ -181,9 +181,9 @@ pub struct IntentionCell {
     pub data: Vec<u8>,
     /// Packed molecule `Script` of the intention type, if any (official xUDT).
     pub type_script: Option<Vec<u8>>,
-    /// Full CID lock script. Required for FakeRpc/VM verify of the assembled
-    /// skeleton; SSRI-only assemble paths may leave this `None` (placeholder
-    /// code_hash is used for host cell shape only).
+    /// Full CID Intention lock script. **Required** for assemble: on-chain
+    /// Verify authenticates Intention lock `code_hash`/`hash_type` against
+    /// ProcessLockArgs. `None` is rejected (no silent `[0xC1; 32]` placeholder).
     pub lock: Option<Script>,
 }
 
@@ -279,13 +279,19 @@ pub fn process_filter_cells(cells: &[FilterCell], bin_dir: &str) -> Result<Vec<i
 }
 
 fn intention_output(intention: &IntentionCell) -> Result<CellOutput> {
-    let lock = intention.lock.clone().unwrap_or_else(|| {
-        Script::new_builder()
-            .code_hash([0xC1; 32].pack())
-            .hash_type(ScriptHashType::Type)
-            .args(intention.lock_args.clone().pack())
-            .build()
-    });
+    let lock = intention.lock.clone().ok_or_else(|| {
+        CalculatorError::Other(
+            "IntentionCell.lock is required for assemble: on-chain CID lock \
+             authentication needs the full Intention lock (code_hash + hash_type + args); \
+             do not omit lock (no [0xC1;32] placeholder)"
+                .into(),
+        )
+    })?;
+    if lock.args().raw_data().as_ref() != intention.lock_args.as_slice() {
+        return Err(CalculatorError::Other(
+            "IntentionCell.lock.args must match IntentionCell.lock_args".into(),
+        ));
+    }
     let mut builder = CellOutput::new_builder()
         .capacity(intention.capacity)
         .lock(lock);
@@ -1043,6 +1049,36 @@ mod tests {
     }
 
     #[test]
+    fn test_assemble_rejects_intention_without_full_lock() {
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
+        if !std::path::Path::new(&bin_path).exists() {
+            eprintln!("Skipping test: binary not built at {bin_path}");
+            return;
+        }
+        let rpc = FakeRpcClient::default();
+        let (process, mut intentions) = sample_process_and_intention();
+        intentions[0].lock = None;
+        let err = process_digest_ok_with_extras(
+            &rpc,
+            intentions,
+            process,
+            AssembleExtras {
+                funding_cells: vec![],
+                cell_deps: vec![sample_code_dep()],
+            },
+            bin_dir,
+        )
+        .err()
+        .expect("lock: None must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("IntentionCell.lock is required") || msg.contains("full Intention lock"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
     fn test_assemble_rejects_ckb_deposit_below_process_minimum() {
         let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
         let bin_path = format!("{}/{}", bin_dir, PROCESS_CONTRACT_NAME);
@@ -1118,13 +1154,17 @@ mod tests {
         let rpc = FakeRpcClient::default();
         let (process, mut intentions) = sample_process_and_intention();
         let foreign_pth = [0xFEu8; 32];
-        intentions[0].lock_args = CidArgs::new(
+        let lock_args = CidArgs::new(
             foreign_pth,
             CidScript::default(),
             sample_beneficiary_payload(),
         )
         .encode()
         .unwrap();
+        intentions[0].lock_args = lock_args.clone();
+        if let Some(lock) = intentions[0].lock.as_mut() {
+            *lock = lock.clone().as_builder().args(lock_args.pack()).build();
+        }
         let err = process_digest_ok_with_extras(
             &rpc,
             intentions,
