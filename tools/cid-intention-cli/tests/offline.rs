@@ -417,8 +417,12 @@ fn create_checks_funding_against_occupied_capacity() {
     let mut req = fixture_request(&secret);
     req.beneficiary_lock.args = format!("0x{}", "ab".repeat(512));
     let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
-    let effective = bundle.skeleton.outputs[0].capacity_shannons();
-    assert!(effective > req.intention_capacity);
+    let output = &bundle.skeleton.outputs[0];
+    assert_eq!(
+        output.capacity_shannons(),
+        output.occupied_capacity().as_u64() + 1
+    );
+    assert!(output.capacity_shannons() > req.intention_capacity);
 
     // Enough for the requested capacity, but not the same output at its
     // occupied capacity.

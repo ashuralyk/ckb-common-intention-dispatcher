@@ -185,15 +185,27 @@ pub fn classify_intention_excluding_process_lock(
 
     match type_script {
         None => {
+            if !data.is_empty() {
+                return FILTER_UNSUPPORTED_ASSET;
+            }
             if !ckb_deposit_capacity_ok(capacity, false) {
                 return FILTER_DEPOSIT_BELOW_MINIMUM;
+            }
+            // Capacity field + lock code hash, hash type and args. The CKB
+            // Intention has no type or data and must exceed its occupied bytes.
+            let occupied = (41 + lock.args.len() as u64) * 100_000_000;
+            if capacity <= occupied {
+                return FILTER_UNSUPPORTED_ASSET;
             }
         }
         Some((code_hash, hash_type)) => {
             if !is_standard_xudt(code_hash, hash_type) {
                 return FILTER_UNSUPPORTED_ASSET;
             }
-            if data.len() < XUDT_AMOUNT_LEN {
+            let Some(amount) = data.get(..XUDT_AMOUNT_LEN) else {
+                return FILTER_UNSUPPORTED_ASSET;
+            };
+            if amount == [0; XUDT_AMOUNT_LEN] {
                 return FILTER_UNSUPPORTED_ASSET;
             }
         }
@@ -309,9 +321,46 @@ mod tests {
     #[test]
     fn accepts_xudt_below_ckb_min() {
         let lock = lock_for([0xA1; 32]);
-        let data = [0u8; 16];
+        let data = 1u128.to_le_bytes();
         assert_eq!(
             classify_intention(&lock, 1, Some((&XUDT_CODE_HASH, 2)), &data),
+            FILTER_ACCEPTED
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_ckb_data_and_zero_xudt_amount() {
+        let lock = lock_for([0xA1; 32]);
+        assert_eq!(
+            classify_intention(&lock, MIN_DEPOSIT_CAPACITY, None, &[1]),
+            FILTER_UNSUPPORTED_ASSET
+        );
+        let mut data = alloc::vec![0; XUDT_AMOUNT_LEN];
+        data.push(1); // An extension byte does not make the amount nonzero.
+        assert_eq!(
+            classify_intention(&lock, 1, Some((&XUDT_CODE_HASH, 2)), &data),
+            FILTER_UNSUPPORTED_ASSET
+        );
+    }
+
+    #[test]
+    fn rejects_ckb_with_no_capacity_above_occupied() {
+        let lock = lock_for_beneficiary(
+            [0xA1; 32],
+            Script {
+                code_hash: [0xBE; 32],
+                hash_type: 1,
+                args: alloc::vec![1; 600],
+            },
+        );
+        let occupied = (41 + lock.args.len() as u64) * 100_000_000;
+        assert!(occupied >= MIN_DEPOSIT_CAPACITY);
+        assert_eq!(
+            classify_intention(&lock, occupied, None, &[]),
+            FILTER_UNSUPPORTED_ASSET
+        );
+        assert_eq!(
+            classify_intention(&lock, occupied + 1, None, &[]),
             FILTER_ACCEPTED
         );
     }

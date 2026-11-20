@@ -198,59 +198,90 @@ fn send_success_returns_hash_after_guards() {
 }
 
 #[test]
-fn create_output_sends_after_stripping_view_metadata() {
+fn create_output_checks_live_process_binding_before_sending() {
     let secret = key(0x42);
     let req = fixture_request(&secret);
     let created = create_signed_intention(&req, &secret).unwrap();
-    assert!(created.get("hash").is_some() || created.get("process_type_hash").is_some());
-    // Create output must not parse as Transaction until metadata is stripped.
+    assert!(created.get("example_process_type_script").is_some());
     assert!(serde_json::from_value::<ckb_jsonrpc_types::Transaction>(created.clone()).is_err());
 
-    let genesis = h256(0xAB);
-    let tx_hash = h256(0xCD);
-    let genesis_c = genesis.clone();
-    let tx_hash_c = tx_hash.clone();
-    let cid_tx = req.cid_lock_dep.tx_hash.clone();
-    let cid_type = req.cid_lock_dep.type_script.clone().unwrap();
-    let saw_send = Arc::new(Mutex::new(false));
-    let saw_send_c = Arc::clone(&saw_send);
-    let url = spawn_mock(Arc::new(Mutex::new(Box::new(
-        move |method, params| match method {
-            "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
-            "get_block_hash" => json!(genesis_c.clone()),
-            "get_live_cell" => {
-                let op = &params.as_array().unwrap()[0];
-                let txh = op["tx_hash"].as_str().unwrap_or("");
-                if txh.eq_ignore_ascii_case(&cid_tx) {
-                    live_typed_cell(&cid_type)
-                } else {
-                    live_untyped_cell()
+    for (binding_matches, legacy) in [(true, false), (false, false), (false, true)] {
+        let genesis = h256(0xAB);
+        let tx_hash = h256(0xCD);
+        let genesis_c = genesis.clone();
+        let tx_hash_c = tx_hash.clone();
+        let cid_tx = req.cid_lock_dep.tx_hash.clone();
+        let cid_type = req.cid_lock_dep.type_script.clone().unwrap();
+        let process_type = req.process_type_script.clone();
+        let process_outpoint = h256(0xEF);
+        let state_lock_args = if legacy {
+            "0x01".to_string()
+        } else {
+            let code_hash = if binding_matches {
+                created["outputs"][0]["lock"]["code_hash"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            } else {
+                h256(0xEE)
+            };
+            format!("{code_hash}01")
+        };
+        let saw_send = Arc::new(Mutex::new(false));
+        let saw_send_c = Arc::clone(&saw_send);
+        let url = spawn_mock(Arc::new(Mutex::new(Box::new(
+            move |method, params| match method {
+                "get_blockchain_info" => json!({"chain": "ckb_testnet"}),
+                "get_block_hash" => json!(genesis_c.clone()),
+                "get_cells" => {
+                    assert_eq!(params[0]["script"], json!(process_type));
+                    assert_eq!(params[0]["script_type"], "type");
+                    assert_eq!(params[0]["script_search_mode"], "exact");
+                    json!({"objects": [{"out_point": {"tx_hash": process_outpoint, "index": "0x0"}}]})
                 }
-            }
-            "send_transaction" => {
-                let tx = &params.as_array().unwrap()[0];
-                assert!(tx.get("hash").is_none(), "hash must be stripped");
-                assert!(
-                    tx.get("process_type_hash").is_none(),
-                    "process_type_hash must be stripped"
-                );
-                serde_json::from_value::<ckb_jsonrpc_types::Transaction>(tx.clone())
-                    .expect("create→send payload must be a Transaction");
-                *saw_send_c.lock().unwrap() = true;
-                json!(tx_hash_c.clone())
-            }
-            _ => json!({"error": {"code": -1, "message": "unknown"}}),
-        },
-    ))));
+                "get_live_cell" => {
+                    let txh = params[0]["tx_hash"].as_str().unwrap_or("");
+                    if txh.eq_ignore_ascii_case(&cid_tx) {
+                        live_typed_cell(&cid_type)
+                    } else if txh == process_outpoint {
+                        let mut live = live_typed_cell(&process_type);
+                        live["cell"]["output"]["lock"]["args"] = json!(state_lock_args);
+                        live
+                    } else {
+                        live_untyped_cell()
+                    }
+                }
+                "send_transaction" => {
+                    let tx = &params[0];
+                    for field in ["hash", "process_type_hash", "example_process_type_script"] {
+                        assert!(tx.get(field).is_none(), "{field} must be stripped");
+                    }
+                    serde_json::from_value::<ckb_jsonrpc_types::Transaction>(tx.clone())
+                        .expect("create→send payload must be a Transaction");
+                    *saw_send_c.lock().unwrap() = true;
+                    json!(tx_hash_c.clone())
+                }
+                _ => json!({"error": {"code": -1, "message": "unknown"}}),
+            },
+        ))));
 
-    let opts = SendOptions {
-        rpc_url: url,
-        network: "testnet".into(),
-        genesis_hash: genesis,
-    };
-    let hash = send_signed_transaction(&opts, &created).unwrap();
-    assert_eq!(hash, tx_hash);
-    assert!(*saw_send.lock().unwrap());
+        let opts = SendOptions {
+            rpc_url: url,
+            network: "testnet".into(),
+            genesis_hash: genesis,
+        };
+        let result = send_signed_transaction(&opts, &created);
+        if binding_matches || legacy {
+            assert_eq!(result.unwrap(), tx_hash);
+            assert!(*saw_send.lock().unwrap());
+        } else {
+            assert!(
+                matches!(result, Err(CliError::NetworkGuard(ref msg)) if msg.contains("live example Process state")),
+                "{result:?}"
+            );
+            assert!(!*saw_send.lock().unwrap());
+        }
+    }
 }
 
 #[test]
@@ -629,19 +660,21 @@ fn send_rejects_process_create_echoed_lock_args_mismatch() {
     let secret = key(0x42);
     let req = fixture_process_request(&secret);
     let mut created = create_signed_process_state(&req, &secret).unwrap();
-    created.as_object_mut().unwrap().insert(
-        "process_lock_args".into(),
+    for invalid in [
+        Value::Null,
         json!(format!("0x{}", hex::encode([0xABu8; 34]))),
-    );
-    let (opts, _) = send_opts_with_live_code_deps(&req, &created);
-    let err = send_signed_transaction(&opts, &created).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            CliError::NetworkGuard(ref msg) if msg.contains("echoed process_lock_args")
-        ),
-        "{err}"
-    );
+    ] {
+        created["process_lock_args"] = invalid;
+        let (opts, _) = send_opts_with_live_code_deps(&req, &created);
+        let err = send_signed_transaction(&opts, &created).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CliError::NetworkGuard(ref msg) if msg.contains("echoed process_lock_args")
+            ),
+            "{err}"
+        );
+    }
 }
 
 #[test]

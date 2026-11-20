@@ -96,7 +96,7 @@ Host wrapper: `cid_process_example_calculator::process_filter`.
 | `FILTER_MALFORMED_CELL` | 1 | Packed `CellOutput` / framing invalid |
 | `FILTER_RESERVED_2` | 2 | Reserved (was ownership / not-Intention) |
 | `FILTER_RESERVED_3` | 3 | Reserved (was process mismatch) |
-| `FILTER_UNSUPPORTED_ASSET` | 4 | Typed asset not supported (e.g. non-xUDT) |
+| `FILTER_UNSUPPORTED_ASSET` | 4 | Unsupported type or asset data (empty CKB data with capacity above occupied, or a nonzero xUDT amount required) |
 | `FILTER_DEPOSIT_BELOW_MINIMUM` | 5 | CKB deposit below Process minimum |
 | `FILTER_MALFORMED_DIGEST` | 6 | Payload / digest undecodable for this Process |
 | `FILTER_UNSUPPORTED_ACTION` | 7 | Action not supported (reserved) |

@@ -125,9 +125,9 @@ the owner updates it post-redeploy.
 on-chain and off-chain. Pack height is the block that committed the Intention;
 judge height is the newest header dep.
 
-**Intention capacity / Process deposits:** Intention creates size capacity to
-`max(requested, occupied)`. Protocol / CID impose **no** Intention or deposit
-floor — each Process owns its own minima. The example Process uses a
+**Intention capacity / Process deposits:** CKB Intentions require at least one
+shannon above occupied capacity. xUDT Intentions can use their occupied
+capacity. Each Process owns its deposit minima. The example Process uses a
 Process-owned `MIN_DEPOSIT_CAPACITY` = **600 CKB** (single source in
 `crates/cid-process-example-policy`, used on-chain + calculator/CLI) and rejects
 smaller CKB DigestOk Intentions for **its own** process_type_hash

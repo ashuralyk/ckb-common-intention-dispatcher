@@ -20,7 +20,7 @@ Lean host binary in this contract repo that:
 | Concern | Choice |
 |---------|--------|
 | Asset | CKB only (no xUDT) |
-| Intention capacity | Defaults to the example Process minimum (**600 CKB**). The CLI sizes the output to `max(requested, occupied)` (protocol / CID impose no Intention floor). When `enforce_example_process_deposit_minimum` is `true` (default), it rejects an effective capacity below the **example** Process 600 CKB floor. Set that flag to `false` for other Processes that own a lower (or zero) deposit minimum. |
+| Intention capacity | Defaults to the example Process minimum (**600 CKB**). The CLI sizes the CKB output to `max(requested, occupied + 1 shannon)` so the CID lock can consume it. When `enforce_example_process_deposit_minimum` is `true` (default), it rejects an effective capacity below the **example** Process 600 CKB floor. Set that flag to `false` for other Processes that own a lower (or zero) deposit minimum. |
 | Inputs | Explicit funding outpoint + deps in offline request JSON (pinned by outpoint; not address scan) |
 | Process identity | Process state cell’s built-in **TYPE_ID type script** `{TYPE_ID, type, args}` → `calc_script_hash` (= Intention `process_type_hash`); Process contract is the state-cell **lock** |
 | CID lock identity | Intention lock always references the CID code cell by **Type ID**: `lock.code_hash = hash(cid_lock_dep.type_script)`, `lock.hash_type = type`. Data-hash (`data1`) referencing is rejected. |
@@ -100,6 +100,14 @@ whose script hash equals the lock `code_hash`. Other `hash_type=type` locks
 raw-transaction send stays usable. The CID check catches a correct live
 outpoint paired with mistyped Type ID args in the offline request (create
 alone cannot see the chain).
+
+For an example Process request (`enforce_example_process_deposit_minimum: true`),
+the signed bundle also carries `example_process_type_script`. Before broadcast,
+`send` resolves that TYPE_ID with the node's indexer, checks that the state is
+live, and compares its CID binding with the signed Intention lock. Keep the
+metadata in the bundle and use an RPC with the Indexer module enabled. Legacy
+example states with short opaque lock args have no CID binding to check.
+For other Processes use `enforce_example_process_deposit_minimum: false`.
 
 ## Process state create (`create-process`)
 

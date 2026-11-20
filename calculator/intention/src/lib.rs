@@ -157,9 +157,9 @@ impl<T: RPC> Operation<T> for AddInputAssetDeps {
 
 /// Create an Intention cell. Lock Create does **not** run CID Verify.
 ///
-/// Effective capacity is `max(requested, occupied)`. Protocol / CID impose no
-/// Intention capacity floor; Process deposit minima (if any) are enforced at
-/// deposit time, not here.
+/// CKB-only Intentions need at least one shannon above occupied capacity to be
+/// spendable. xUDT Intentions can use exactly their occupied capacity. Process
+/// deposit minima are enforced separately at deposit time.
 ///
 /// `xudt`: when set, attach the official xUDT type + 16-byte amount and the
 /// xUDT celldep. CKB-only path uses empty data and `type_script = None`.
@@ -193,7 +193,7 @@ pub fn create_intention<T: RPC>(
     Instruction::new(ops)
 }
 
-/// Size Intention capacity to `max(requested, occupied)`.
+/// Size the output without creating a CKB-only Intention with zero spendable capacity.
 struct AddIntentionOutput {
     lock_script: ScriptEx,
     type_script: Option<ScriptEx>,
@@ -218,7 +218,8 @@ impl<T: RPC> Operation<T> for AddIntentionOutput {
             .type_(typ.pack())
             .build();
         let occupied = occupied_capacity_shannons(&draft, self.data.len());
-        let cap = self.capacity.max(occupied);
+        let minimum = occupied + u64::from(draft.type_().to_opt().is_none());
+        let cap = self.capacity.max(minimum);
         let output = draft.as_builder().capacity(cap).build();
         skeleton.output(CellOutputEx::new(output, self.data));
         Ok(())

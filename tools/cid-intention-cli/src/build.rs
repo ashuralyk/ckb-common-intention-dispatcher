@@ -428,14 +428,13 @@ fn create_signed_intention_bundle_inner(
         add_named_dep(&rpc, &mut skeleton, dep)?;
     }
 
-    // Size Intention to max(requested, occupied) once the CID Type ID lock can
-    // be resolved against seeded deps. Protocol has no Intention floor.
+    // The CID lock requires a CKB-only Intention to exceed occupied capacity.
     let intention_lock = cid_lock(args.clone())
         .to_script(&skeleton)
         .map_err(|e| CliError::Calculator(e.to_string()))?;
     let draft = CellOutput::new_builder().lock(intention_lock).build();
     let occupied = occupied_capacity_shannons(&draft, 0);
-    let intention_capacity = req.intention_capacity.max(occupied);
+    let intention_capacity = req.intention_capacity.max(occupied + 1);
     // Example Process deposit floor is opt-in via the request flag. Other
     // Processes own their own minima; protocol / CID impose none.
     if req.enforce_example_process_deposit_minimum && intention_capacity < MIN_DEPOSIT_CAPACITY {
@@ -579,6 +578,12 @@ fn create_signed_intention_bundle_inner(
             "process_type_hash".into(),
             Value::String(encode_hex(&process_type_hash)),
         );
+        if req.enforce_example_process_deposit_minimum {
+            obj.insert(
+                "example_process_type_script".into(),
+                serde_json::to_value(&req.process_type_script)?,
+            );
+        }
     }
     // Belt-and-suspenders: ensure privkey hex is not present.
     let dumped = serde_json::to_string(&value)?;
