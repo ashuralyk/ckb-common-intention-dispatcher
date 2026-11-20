@@ -10,6 +10,7 @@ use cid_intention_filter::{
     decode_filter_request, encode_filter_response, read_capped_from, FILTER_ACCEPTED,
     FILTER_STDIN_MAX,
 };
+use cid_process_example_policy::fee_from_tx_molecule_len;
 use cid_protocol::CidArgs;
 use ckb_cinnabar_verifier::ssri::{SsriArgs, SsriSource};
 use ckb_std::ckb_types::packed::{Byte32, Bytes, CellOutput, RawTransaction, Script, Transaction};
@@ -18,8 +19,6 @@ use ckb_std::ckb_types::prelude::*;
 const BATCH_MIN: u32 = 1;
 const BATCH_MAX: u32 = 4;
 
-/// Process-owned fee rate (shannons per kB), matching testnet `min_fee_rate`.
-const FEE_RATE: u64 = 1000;
 const SHANNONS_PER_BYTE: u64 = 100_000_000;
 
 // Default lock code_hash for beneficiary outputs (placeholder for raw lock_args tests)
@@ -205,7 +204,7 @@ pub fn assemble_handler(
         .build();
 
     // Weight matches CKB `serialized_size_in_block` (= molecule len + 4).
-    let fee = fee_from_tx_size(sized.as_slice().len() as u64);
+    let fee = fee_from_tx_molecule_len(sized.as_slice().len() as u64);
     let process_cap: u64 = process.cell.output.capacity().unpack();
     let occupied = occupied_capacity_shannons(&process.cell.output, process.cell.data.len());
     let recreate_cap = process_cap
@@ -261,14 +260,6 @@ fn push_beneficiaries(
         outputs.push(output.build());
         outputs_data.push(intention.data.clone());
     }
-}
-
-fn fee_from_tx_size(molecule_len: u64) -> u64 {
-    // CKB min-fee weight is `serialized_size_in_block` = molecule len + 4
-    // (molecule NUMBER_SIZE offset in the block). Match `FeeRate::fee` (floor)
-    // so assemble never underpays the node min fee at `FEE_RATE`.
-    let weight = molecule_len.saturating_add(4);
-    weight.saturating_mul(FEE_RATE) / 1000
 }
 
 fn occupied_capacity_shannons(output: &CellOutput, data_len: usize) -> u64 {

@@ -5,6 +5,7 @@ use crate::{Context, ProcessError};
 use alloc::vec;
 use alloc::vec::Vec;
 use cid_intention_filter::FILTER_ACCEPTED;
+use cid_process_example_policy::{fee_from_tx_molecule_len, is_supported_script_hash_type};
 use cid_protocol::{
     is_standard_xudt, is_type_id_script, CidArgs, Script as CidScript, PROCESS_TYPE_HASH_LEN,
     XUDT_AMOUNT_LEN,
@@ -20,7 +21,8 @@ use ckb_std::{
         prelude::{Builder, Entity, Pack, Unpack},
     },
     high_level::{
-        load_cell_capacity, load_cell_data, load_cell_lock, load_cell_type, load_script, QueryIter,
+        load_cell_capacity, load_cell_data, load_cell_lock, load_cell_type, load_script,
+        load_transaction, QueryIter,
     },
 };
 
@@ -44,6 +46,7 @@ fn verify_process() -> Result<Option<&'static str>> {
         ScriptPattern::Create => verify_create(),
         ScriptPattern::Transfer => {
             verify_lock_pair()?;
+            verify_state_fee_budget()?;
             verify_intention_batch_and_beneficiaries()?;
             Ok(None)
         }
@@ -86,6 +89,31 @@ fn verify_lock_pair() -> Result<Option<&'static str>> {
         return Err(ProcessError::TypeIdInvalid.into());
     }
     forbid_type_id_on_non_process_outputs(&in_hash)?;
+    Ok(None)
+}
+
+/// Bound Process state-cell capacity debit by the shared fee policy.
+///
+/// Assemble deducts at most `fee_from_tx_molecule_len(tx)`; consensus must not
+/// allow excess state-capacity loss beyond that budget.
+fn verify_state_fee_budget() -> Result<Option<&'static str>> {
+    let input_indices = this_script_indices(Source::Input, ScriptPlace::Lock)?;
+    let output_indices = this_script_indices(Source::Output, ScriptPlace::Lock)?;
+    if input_indices.len() != 1 || output_indices.len() != 1 {
+        return Err(ProcessError::ProcessPairInvalid.into());
+    }
+    let in_cap = load_cell_capacity(input_indices[0], Source::Input)
+        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let out_cap = load_cell_capacity(output_indices[0], Source::Output)
+        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+    if in_cap > out_cap {
+        let debit = in_cap - out_cap;
+        let tx = load_transaction().map_err(|_| ProcessError::ProcessPairInvalid)?;
+        let max_fee = fee_from_tx_molecule_len(tx.as_slice().len() as u64);
+        if debit > max_fee {
+            return Err(ProcessError::CapacityInsufficient.into());
+        }
+    }
     Ok(None)
 }
 
@@ -368,6 +396,10 @@ fn is_example_process_lock(lock: &Script, ours: &Script) -> bool {
 }
 
 fn packed_script(script: &CidScript) -> core::result::Result<Script, ProcessError> {
+    // Same hash_type allow-list as `classify_intention` / assemble.
+    if !is_supported_script_hash_type(script.hash_type) {
+        return Err(ProcessError::BeneficiaryMissing);
+    }
     let hash_type = match script.hash_type {
         0 => ScriptHashType::Data,
         1 => ScriptHashType::Type,

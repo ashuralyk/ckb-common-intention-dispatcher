@@ -1546,6 +1546,69 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_beneficiary_hash_type_rejected_by_filter_and_assemble() {
+        use cid_process_example_policy::classify_intention;
+        use cid_process_executor::ExecutorError;
+
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/release");
+        if !std::path::Path::new(&format!("{bin_dir}/{PROCESS_CONTRACT_NAME}")).exists() {
+            eprintln!("Skipping test: binary not built");
+            return;
+        }
+        let (process, _) = sample_process_and_intention();
+        let pth: [u8; 32] = process.type_script.calc_script_hash().unpack();
+        let cid_tid = [0xC1; 32];
+        let bad_payload = Payload::from_script(&CidScript {
+            code_hash: [0xBE; 32],
+            hash_type: 3, // not a CKB ScriptHashType
+            args: vec![0x01],
+        })
+        .unwrap();
+        let lock_args = CidArgs::new(pth, CidScript::default(), bad_payload)
+            .encode()
+            .unwrap();
+        let lock = Script::new_builder()
+            .code_hash(cid_tid.pack())
+            .hash_type(ScriptHashType::Type)
+            .args(lock_args.clone().pack())
+            .build();
+        let intention = IntentionCell {
+            out_point: fake_outpoint(),
+            lock_args,
+            capacity: MIN_DEPOSIT_CAPACITY,
+            data: vec![],
+            type_script: None,
+            lock: Some(lock.clone()),
+        };
+
+        let cid_lock = CidScript {
+            code_hash: lock.code_hash().unpack(),
+            hash_type: lock.hash_type().into(),
+            args: intention.lock_args.clone(),
+        };
+        assert_eq!(
+            classify_intention(&cid_lock, MIN_DEPOSIT_CAPACITY, None, &[]),
+            FILTER_MALFORMED_DIGEST
+        );
+
+        let reasons = process_filter(std::slice::from_ref(&intention), bin_dir).expect("filter");
+        assert_eq!(reasons, vec![FILTER_MALFORMED_DIGEST]);
+
+        let extras = AssembleExtras {
+            funding_cells: vec![],
+            cell_deps: vec![sample_code_dep()],
+        };
+        let (draft, known) =
+            build_draft_and_known(std::slice::from_ref(&intention), &process, &extras).unwrap();
+        let executor = ProcessExecutor::new(load_process_binary(bin_dir).unwrap());
+        let result = executor.assemble(&draft, seed_mock_from_known(&known).unwrap());
+        assert!(
+            matches!(result, Err(ExecutorError::Incompatible(32))),
+            "assemble must reject unsupported hash_type via BeneficiaryMissing(32): {result:?}"
+        );
+    }
+
+    #[test]
     fn test_filter_accepted_equals_business_classify_mixed_corpus() {
         use cid_process_example_policy::classify_intention;
         use cid_protocol::Script as CidScript;
