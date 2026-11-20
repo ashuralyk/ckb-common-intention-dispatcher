@@ -42,6 +42,7 @@ const MAX_CYCLES: u64 = 50_000_000;
 const ERROR_BENEFICIARY_MISSING: i8 = 32;
 const ERROR_BENEFICIARY_AMOUNT_MISMATCH: i8 = 33;
 const ERROR_TYPE_ID_INVALID: i8 = 35;
+const ERROR_CAPACITY_INSUFFICIENT: i8 = 37;
 const ERROR_DEPOSIT_BELOW_MINIMUM: i8 = 39;
 
 fn require_binaries() {
@@ -128,7 +129,13 @@ fn mock_process_type_id() -> Script {
 
 fn mock_intention(i: u32, process_type_hash: [u8; 32]) -> IntentionCell {
     let _ = i;
-    let lock_args = encode_cid_args(process_type_hash, CidScript::default(), Payload::default());
+    let payload = Payload::from_script(&CidScript {
+        code_hash: [0xBE; 32],
+        hash_type: 1,
+        args: vec![0x01],
+    })
+    .unwrap();
+    let lock_args = encode_cid_args(process_type_hash, CidScript::default(), payload);
     IntentionCell {
         out_point: fake_outpoint(),
         lock_args,
@@ -156,8 +163,10 @@ fn dest_script_data2() -> Script {
         .build()
 }
 
+/// Default fixture: CID code celldep carries a Type ID so Intention locks
+/// resolve as `hash_type=type` — required for shared classify / filter ownership.
 fn prepared_process_skeleton(rpc: &FakeRpcClient) -> TransactionSkeleton {
-    prepared_process_skeleton_with_cid_type_id(rpc, None)
+    prepared_process_skeleton_with_cid_type_id(rpc, Some([0x71u8; 32]))
 }
 
 /// When `cid_type_id_args` is set, the CID code celldep carries a Type ID type
@@ -1204,11 +1213,241 @@ async fn assemble_and_verify_data2_beneficiary() {
 }
 
 #[tokio::test]
+async fn reject_unsupported_beneficiary_hash_type() {
+    // Shared policy / filter / assemble / verify all reject hash_type=3.
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
+    let bad_payload = Payload::from_script(&CidScript {
+        code_hash: [0xBE; 32],
+        hash_type: 3,
+        args: vec![0x01],
+    })
+    .unwrap();
+    let args = encode_cid_args(process_hash, user_lock_cid(), bad_payload);
+    let intention = seed_intention(&mut rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("unsupported beneficiary hash_type must fail");
+    assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
+}
+
+#[tokio::test]
+async fn reject_excess_process_state_capacity_debit() {
+    // State-cell debit must be bounded by the shared fee policy (not unlimited).
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = apply_transfer(&mut rpc, dest_lock(), CKB_CAPACITY, vec![]);
+    // ConsumeProcess recreates Process as outputs[0] at full input capacity; drain
+    // far beyond any plausible FeeRate(1000) fee for this tx.
+    let drain = 50_0000_0000u64; // 50 CKB
+    assert!(drain > 1_000_000, "drain must exceed any tiny fee budget");
+    let process_out = &mut skeleton.outputs[0];
+    let before = process_out.capacity_shannons();
+    process_out.output = process_out
+        .output
+        .clone()
+        .as_builder()
+        .capacity(before - drain)
+        .build();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("excess Process state debit must fail");
+    assert_eq!(exit(err), ERROR_CAPACITY_INSUFFICIENT);
+}
+
+#[tokio::test]
+async fn reject_diverted_process_state_debit_not_paid_as_fee() {
+    // Debit Process state by a small amount (<= fee allowance) but give that
+    // capacity to the beneficiary so net tx_fee does not cover the debit.
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = apply_transfer(&mut rpc, dest_lock(), CKB_CAPACITY, vec![]);
+    assert!(skeleton.outputs.len() >= 2);
+    let process_before = skeleton.outputs[0].capacity_shannons();
+    let bene_before = skeleton.outputs[1].capacity_shannons();
+    let divert = 10_000u64; // tiny vs fee allowance, still must be paid as fee
+    skeleton.outputs[0].output = skeleton.outputs[0]
+        .output
+        .clone()
+        .as_builder()
+        .capacity(process_before - divert)
+        .build();
+    skeleton.outputs[1].output = skeleton.outputs[1]
+        .output
+        .clone()
+        .as_builder()
+        .capacity(bene_before + divert)
+        .build();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("diverted Process debit must fail when tx_fee < debit");
+    assert_eq!(exit(err), ERROR_CAPACITY_INSUFFICIENT);
+}
+
+#[tokio::test]
+async fn reject_process_debit_diverted_to_peer_process_lock_group() {
+    // Process A debited by D (within fee allowance) while Process B (same
+    // Process code_hash+hash_type, different lock_args) is credited by D so
+    // net tx_fee == 0. Global code_hash netting would hide this; per-lock-group
+    // positive debits must still require tx_fee >= D → CapacityInsufficient.
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
+    let type_b = process_example_type_script(b"process-type-id-v1".to_vec());
+    let lock_a = process_example_lock_script_with(ScriptHashType::Data1, vec![0xA1]);
+    let lock_b = process_example_lock_script_with(ScriptHashType::Data1, vec![0xB2]);
+    let process_a = seed_process_example_cell(&mut rpc, lock_a, type_a.clone());
+    let process_b = seed_process_example_cell(&mut rpc, lock_b, type_b.clone());
+    let dest_a = dest_script();
+    let dest_b = always_success_script(vec![0xBD]);
+    let int_a = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_a), &dest_a),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let int_b = seed_intention(
+        &mut rpc,
+        &skeleton,
+        beneficiary_args(process_example_type_hash(&type_b), &dest_b),
+        CKB_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+
+    let first = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&int_a),
+        outpoint_ids(&process_a),
+        Some(AddOutputCell {
+            lock_script: dest_a.into(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    let second = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&int_b),
+        outpoint_ids(&process_b),
+        Some(AddOutputCell {
+            lock_script: dest_b.into(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(first)
+        .instruction(second)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+
+    // Locate Process recreate outputs by lock args (A=0xA1, B=0xB2).
+    let mut idx_a = None;
+    let mut idx_b = None;
+    for (i, out) in skeleton.outputs.iter().enumerate() {
+        let args = out.lock_script().args().raw_data();
+        if args.as_ref() == [0xA1] {
+            idx_a = Some(i);
+        } else if args.as_ref() == [0xB2] {
+            idx_b = Some(i);
+        }
+    }
+    let idx_a = idx_a.expect("Process A recreate output");
+    let idx_b = idx_b.expect("Process B recreate output");
+    let divert = 10_000u64;
+    let cap_a = skeleton.outputs[idx_a].capacity_shannons();
+    let cap_b = skeleton.outputs[idx_b].capacity_shannons();
+    skeleton.outputs[idx_a].output = skeleton.outputs[idx_a]
+        .output
+        .clone()
+        .as_builder()
+        .capacity(cap_a - divert)
+        .build();
+    skeleton.outputs[idx_b].output = skeleton.outputs[idx_b]
+        .output
+        .clone()
+        .as_builder()
+        .capacity(cap_b + divert)
+        .build();
+
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("Process A debit diverted to Process B must fail when tx_fee < debit");
+    assert_eq!(exit(err), ERROR_CAPACITY_INSUFFICIENT);
+}
+
+#[tokio::test]
+async fn reject_beneficiary_using_process_lock_code_hash() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process_lock = process_example_lock_script();
+    let process = seed_process_example_cell(&mut rpc, process_lock.clone(), type_script);
+    // Beneficiary reuses Process binary code_hash (Verify skips such outputs).
+    let bad_bene = process_lock
+        .as_builder()
+        .args([0xEEu8, 0xFFu8].pack())
+        .build();
+    let args = beneficiary_args(process_hash, &bad_bene);
+    let intention = seed_intention(&mut rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: ScriptEx::from(bad_bene),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("Process-lock-code_hash beneficiary must fail");
+    assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
+}
+
+#[tokio::test]
 async fn assemble_and_verify_xudt_beneficiary() {
     require_binaries();
     let mut rpc = FakeRpcClient::default();
     seed_fakenet_xudt_cell(&mut rpc);
-    let skeleton = prepared_process_skeleton(&rpc);
+    // CID lock Type-ID referenced (`hash_type=type`) as on live deployments.
+    let skeleton = prepared_process_skeleton_with_cid_type_id(&rpc, Some([0x71u8; 32]));
     let xudt = xudt_type_script();
     let xudt_packed = xudt.clone().to_script(&skeleton).expect("xudt script");
     let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
@@ -1294,7 +1533,7 @@ async fn assemble_and_verify_xudt_beneficiary() {
         .expect("assembled full tx must verify on-chain as-is");
 
     // Also confirm digest_ok path with assembled beneficiary still works.
-    let mut verify_skel = prepared_process_skeleton(&rpc);
+    let mut verify_skel = prepared_process_skeleton_with_cid_type_id(&rpc, Some([0x71u8; 32]));
     let ix = digest_ok::<FakeRpcClient>(
         outpoint_ids(&intention),
         outpoint_ids(&process),

@@ -37,10 +37,10 @@ cd tests && cargo test process_example -- --nocapture
 ## SSRI
 
 - **Process.batch** — `(min, max)` = `(1, 4)` as 8 LE bytes  
-- **Process.assemble** — stdin = molecule `Transaction` draft (Intention + Process
-  inputs and required code `cell_deps`); stdout =
-  complete molecule `Transaction` (inputs, outputs, outputs_data, cell_deps,
-  header_deps, witnesses). Cells are loaded via ckb-ssri-std host queries
+- **Process.assemble** — stdin = molecule `Transaction` draft (Intention +
+  Process inputs and required code `cell_deps`); stdout = complete molecule
+  `Transaction` (inputs, outputs, outputs_data, cell_deps, header_deps,
+  witnesses). Cells are loaded via ckb-ssri-std host queries
   (`find_cell_by_out_point`, …). Extra funding inputs return
   `UnsupportedFundingLock` (38). The Process state pays the fee.
 
@@ -75,6 +75,19 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 | 38 | `UnsupportedFundingLock` (extra funding input) |
 | 39 | `DepositBelowMinimum` (CKB Intention capacity &lt; Process `MIN_DEPOSIT_CAPACITY`) |
 
+## Intention filter (`Process.filter`)
+
+SSRI method for the Sequencer to pre-select Intentions before assemble:
+
+1. Sequencer **routes** with `cid_intention_filter::intention_process_type_id`
+   / `intention_belongs_to_process` (ownership is Sequencer-only).
+2. Calls `Process.filter` (host: `process_filter`) on the routed batch.
+3. Filter judges **business compliance only** (deposit / asset / digest) from
+   `cid-process-example-policy` — it does **not** re-check ownership.
+4. Assemble only the accepted cells.
+
+Reason codes and wire format: [ssri-backend-interface.md](ssri-backend-interface.md).
+
 ## CKB deposit minimum (Intention consume)
 
 CKB Intention creation uses `max(requested, occupied + 1 shannon)` because the
@@ -108,9 +121,16 @@ User Lock.
 
 `Process.assemble` computes fee as `FeeRate(FEE_RATE).fee(serialized_size_in_block)`
 — i.e. `floor((molecule_len + 4) × FEE_RATE / 1000)` with Process-owned
-`FEE_RATE = 1000` (testnet `min_fee_rate`) — and deducts it from the recreated
-state cell. The `+ 4` matches CKB `serialized_size_in_block` (molecule
-`NUMBER_SIZE` in the block), so the fee is never below the node min fee. If the
-result would be below occupied capacity, assemble errors. Draft must include
-CID, Process, and applicable xUDT cell_deps; the example copies them through.
-Submit returned molecule bytes unchanged.
+`FEE_RATE = 1000` (testnet `min_fee_rate`, shared via
+`cid-process-example-policy`) — and deducts it from the recreated state cell.
+The `+ 4` matches CKB `serialized_size_in_block` (molecule `NUMBER_SIZE` in the
+block), so the fee is never below the node min fee. If the result would be
+below occupied capacity, assemble errors. On-chain Transfer verify (1) caps
+each Process state-cell debit by that fee formula and (2) requires
+`tx_fee = Σ(input caps) − Σ(output caps)` to cover the **sum of per-lock-group
+positive debits** across Process locks sharing this binary’s
+`code_hash`/`hash_type` (group = full lock script; a credit on Process B does
+**not** offset a debit on Process A — rejects diverted drains with
+`CapacityInsufficient` / 37). Draft must include CID, Process, and applicable
+xUDT cell_deps; the example copies them through. Submit returned molecule bytes
+unchanged.

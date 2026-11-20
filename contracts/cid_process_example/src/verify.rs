@@ -1,8 +1,11 @@
 extern crate alloc;
 
+use crate::classify::{classify_live_intention_excluding, filter_reason_to_process_error};
 use crate::{Context, ProcessError};
 use alloc::vec;
 use alloc::vec::Vec;
+use cid_intention_filter::FILTER_ACCEPTED;
+use cid_process_example_policy::{fee_from_tx_molecule_len, is_supported_script_hash_type};
 use cid_protocol::{
     is_standard_xudt, is_type_id_script, CidArgs, Script as CidScript, PROCESS_TYPE_HASH_LEN,
     XUDT_AMOUNT_LEN,
@@ -18,7 +21,8 @@ use ckb_std::{
         prelude::{Builder, Entity, Pack, Unpack},
     },
     high_level::{
-        load_cell_capacity, load_cell_data, load_cell_lock, load_cell_type, load_script, QueryIter,
+        load_cell_capacity, load_cell_data, load_cell_lock, load_cell_type, load_script,
+        load_transaction, QueryIter,
     },
 };
 
@@ -42,6 +46,7 @@ fn verify_process() -> Result<Option<&'static str>> {
         ScriptPattern::Create => verify_create(),
         ScriptPattern::Transfer => {
             verify_lock_pair()?;
+            verify_state_fee_budget()?;
             verify_intention_batch_and_beneficiaries()?;
             Ok(None)
         }
@@ -85,6 +90,134 @@ fn verify_lock_pair() -> Result<Option<&'static str>> {
     }
     forbid_type_id_on_non_process_outputs(&in_hash)?;
     Ok(None)
+}
+
+/// Bound Process state-cell capacity debits and require they fund the tx fee.
+///
+/// 1. This lock-group pair's debit is capped by `fee_from_tx_molecule_len(tx)`.
+/// 2. `tx_fee = sum(all input caps) - sum(all output caps)` (fail closed on
+///    underflow) must cover the **aggregate of per-lock-group positive
+///    debits** across every Process state cell that shares this lock
+///    `code_hash` + `hash_type`. Groups are keyed by full lock script
+///    (`calc_script_hash`); a credit on Process B must **not** offset a debit
+///    on Process A. Diverting a debit into another Process (or any output)
+///    without paying fee is rejected.
+fn verify_state_fee_budget() -> Result<Option<&'static str>> {
+    let input_indices = this_script_indices(Source::Input, ScriptPlace::Lock)?;
+    let output_indices = this_script_indices(Source::Output, ScriptPlace::Lock)?;
+    if input_indices.len() != 1 || output_indices.len() != 1 {
+        return Err(ProcessError::ProcessPairInvalid.into());
+    }
+    let in_cap = load_cell_capacity(input_indices[0], Source::Input)
+        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let out_cap = load_cell_capacity(output_indices[0], Source::Output)
+        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let this_debit = in_cap.saturating_sub(out_cap);
+    let tx = load_transaction().map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let max_fee = fee_from_tx_molecule_len(tx.as_slice().len() as u64);
+    if this_debit > max_fee {
+        return Err(ProcessError::CapacityInsufficient.into());
+    }
+
+    let ours = load_script().map_err(|_| ProcessError::ProcessPairInvalid)?;
+    let our_code = ours.code_hash();
+    let our_ht = ours.hash_type();
+
+    let aggregate_debit = sum_positive_lock_group_debits(&our_code, our_ht)?;
+
+    let all_in = sum_capacity_all(Source::Input)?;
+    let all_out = sum_capacity_all(Source::Output)?;
+    let tx_fee = all_in
+        .checked_sub(all_out)
+        .ok_or(ProcessError::CapacityInsufficient)?;
+    if tx_fee < aggregate_debit {
+        return Err(ProcessError::CapacityInsufficient.into());
+    }
+    Ok(None)
+}
+
+fn sum_capacity_all(source: Source) -> core::result::Result<u64, ProcessError> {
+    let mut sum = 0u64;
+    for i in 0.. {
+        match load_cell_capacity(i, source) {
+            Ok(c) => {
+                sum = sum
+                    .checked_add(c)
+                    .ok_or(ProcessError::CapacityInsufficient)?;
+            }
+            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
+            Err(_) => return Err(ProcessError::ProcessPairInvalid),
+        }
+    }
+    Ok(sum)
+}
+
+/// Sum positive capacity debits **per full Process lock group**.
+///
+/// Only locks with `code_hash`/`hash_type` matching this Process binary are
+/// considered. Groups are identified by `lock.calc_script_hash()` (full lock
+/// script, including args). For each group that appears in **inputs**, the
+/// debit is `in_cap.saturating_sub(out_cap)` — credits on a different group
+/// (or a newly minted Process-code output) never offset another group's
+/// debit. Aggregate uses checked addition (fail closed on overflow).
+fn sum_positive_lock_group_debits(
+    code_hash: &ckb_std::ckb_types::packed::Byte32,
+    hash_type: ckb_std::ckb_types::packed::Byte,
+) -> core::result::Result<u64, ProcessError> {
+    // (lock_hash, in_cap_sum, out_cap_sum) — only groups seen on inputs.
+    let mut groups: Vec<([u8; 32], u64, u64)> = Vec::new();
+
+    for i in 0.. {
+        match load_cell_lock(i, Source::Input) {
+            Ok(lock) => {
+                if &lock.code_hash() == code_hash && lock.hash_type() == hash_type {
+                    let hash: [u8; 32] = lock.calc_script_hash().unpack();
+                    let c = load_cell_capacity(i, Source::Input)
+                        .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                    match groups.iter_mut().find(|(h, _, _)| h == &hash) {
+                        Some((_, in_sum, _)) => {
+                            *in_sum = in_sum
+                                .checked_add(c)
+                                .ok_or(ProcessError::CapacityInsufficient)?;
+                        }
+                        None => groups.push((hash, c, 0)),
+                    }
+                }
+            }
+            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
+            Err(_) => return Err(ProcessError::ProcessPairInvalid),
+        }
+    }
+
+    for i in 0.. {
+        match load_cell_lock(i, Source::Output) {
+            Ok(lock) => {
+                if &lock.code_hash() == code_hash && lock.hash_type() == hash_type {
+                    let hash: [u8; 32] = lock.calc_script_hash().unpack();
+                    if let Some((_, _, out_sum)) = groups.iter_mut().find(|(h, _, _)| h == &hash) {
+                        let c = load_cell_capacity(i, Source::Output)
+                            .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                        *out_sum = out_sum
+                            .checked_add(c)
+                            .ok_or(ProcessError::CapacityInsufficient)?;
+                    }
+                    // Output-only Process locks (credits / mints) are ignored —
+                    // they must not offset another group's debit.
+                }
+            }
+            Err(ckb_std::error::SysError::IndexOutOfBound) => break,
+            Err(_) => return Err(ProcessError::ProcessPairInvalid),
+        }
+    }
+
+    let mut aggregate = 0u64;
+    for (_, in_sum, out_sum) in groups {
+        let debit = in_sum.saturating_sub(out_sum);
+        aggregate = aggregate
+            .checked_add(debit)
+            .ok_or(ProcessError::CapacityInsufficient)?;
+    }
+    Ok(aggregate)
 }
 
 fn require_type_id_type(index: usize, source: Source) -> Result<[u8; 32]> {
@@ -149,6 +282,8 @@ fn collect_output_obligations(
 ) -> core::result::Result<(Vec<OutputObligation>, Vec<OutputObligation>), ProcessError> {
     // Intention `process_type_hash` is the TYPE_ID type-script hash of this
     // Process state cell — not the Process lock script hash.
+    // Scoping matches bd11d44: `ours_prefix` only (no CID Type-ID ownership
+    // re-check — that is Sequencer-side via cid-intention-filter).
     let our_type_hash = our_process_type_id()?;
     let digest_ok_hashes = type_hashes_in_both_io()?;
 
@@ -172,25 +307,42 @@ fn collect_output_obligations(
         let digest_ok = digest_ok_hashes.iter().any(|h| h == &cid.process_type_hash);
 
         if digest_ok {
-            let transfer = match parse_payment(i, &cid) {
-                Ok(Some(t)) => t,
-                Ok(None) if ours_prefix => return Err(ProcessError::BeneficiaryMissing),
-                Ok(None) => continue,
-                Err(e) => return Err(e),
-            };
-            // Deposit floor is Process-local: only this Process's Intentions.
-            if ours_prefix
-                && !crate::deposit::ckb_deposit_capacity_ok(
-                    transfer.capacity,
-                    transfer.type_script.is_some(),
-                )
-            {
-                return Err(ProcessError::DepositBelowMinimum);
-            }
             if ours_prefix {
+                // Shared business classify (deposit / asset / digest) — same SoT
+                // as assemble. Ownership is not re-checked here. Pass Process
+                // lock code_hash so a Process-binary beneficiary is rejected
+                // (claim_output would skip it as a recreate cell).
+                let capacity = load_cell_capacity(i, Source::Input)
+                    .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let data = load_cell_data(i, Source::Input)
+                    .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let type_script = load_cell_type(i, Source::Input)
+                    .map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let process_script = load_script().map_err(|_| ProcessError::ProcessPairInvalid)?;
+                let process_code: [u8; 32] = process_script.code_hash().unpack();
+                let reason = classify_live_intention_excluding(
+                    &lock,
+                    capacity,
+                    type_script.as_ref(),
+                    &data,
+                    Some(&process_code),
+                );
+                if reason != FILTER_ACCEPTED {
+                    return Err(filter_reason_to_process_error(reason)
+                        .unwrap_or(ProcessError::IncompatibleBatch));
+                }
+                let transfer = match parse_payment(i, &cid)? {
+                    Some(t) => t,
+                    None => return Err(ProcessError::BeneficiaryMissing),
+                };
                 ours.push(transfer.clone());
+                obligations.push(transfer);
+            } else {
+                match parse_payment(i, &cid)? {
+                    Some(t) => obligations.push(t),
+                    None => continue,
+                }
             }
-            obligations.push(transfer);
         } else {
             // Refund branch (DigestIncompatible and TimeoutBurn): unique-assign
             // the user_lock output, never the payload. TimeoutBurn still requires
@@ -357,6 +509,10 @@ fn is_example_process_lock(lock: &Script, ours: &Script) -> bool {
 }
 
 fn packed_script(script: &CidScript) -> core::result::Result<Script, ProcessError> {
+    // Same hash_type allow-list as `classify_intention` / assemble.
+    if !is_supported_script_hash_type(script.hash_type) {
+        return Err(ProcessError::BeneficiaryMissing);
+    }
     let hash_type = match script.hash_type {
         0 => ScriptHashType::Data,
         1 => ScriptHashType::Type,

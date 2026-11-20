@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need PR base commit available for check-cid-unchanged worktree.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: riscv64imac-unknown-none-elf
@@ -26,12 +29,34 @@ jobs:
         run: cargo build --locked
       - name: Build RISC-V contract
         run: make build CLANG=clang-18 CARGO_ARGS=--locked
+      # Never run the absolute CID_LOCK_SHA256 pin on GHA — that hash is
+      # deploy/agent-env specific and differs on ubuntu runners for the same
+      # source. Always rebuild the comparison ref with the same toolchain and
+      # require a byte-identical CID lock (PR base, or push `before` SHA).
+      - name: Guard CID lock binary unchanged
+        run: |
+          set -euo pipefail
+          ZERO=0000000000000000000000000000000000000000
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+          fi
+          if [ -z "${BASE_SHA}" ] || [ "${BASE_SHA}" = "${ZERO}" ]; then
+            echo "No usable base SHA for CID unchanged check (before/base='${BASE_SHA}')."
+            echo "Failing closed: refuse to skip the CID lock binary guard on new-branch / missing-before pushes."
+            exit 1
+          fi
+          echo "Comparing CID lock to BASE_SHA=${BASE_SHA}"
+          make check-cid-unchanged BASE_SHA="${BASE_SHA}" CLANG=clang-18 CARGO_ARGS=--locked
       - name: Host default tests
         run: cargo test --locked
       - name: Lint host crates
-        run: cargo clippy --locked -p cid-protocol -p ckb_common_intention_dispatcher-calculator -p cid_process_example-calculator -p cid-process-executor -p ckb_common_intention_dispatcher-tests -p cid-intention-cli --all-targets -- -D warnings
+        run: cargo clippy --locked -p cid-protocol -p cid-intention-filter -p ckb_common_intention_dispatcher-calculator -p cid_process_example-calculator -p cid-process-executor -p ckb_common_intention_dispatcher-tests -p cid-intention-cli --all-targets -- -D warnings
       - name: Protocol tests
         run: cargo test --locked -p cid-protocol
+      - name: Intention filter / route tests
+        run: cargo test --locked -p cid-intention-filter
       - name: Intention CLI tests
         run: cargo test --locked -p cid-intention-cli
       - name: Lint contract

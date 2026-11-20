@@ -45,12 +45,72 @@ The backend **must not** rewrite or fill anything in the molecule transaction
 returned by `Process.assemble` — including witnesses. Capacity balance and fee
 are Process responsibilities; submit the returned bytes unchanged.
 
+## Sequencer flow (scan → route → filter → assemble)
+
+1. **Scan** live Intention cells (indexer / node).
+2. **Route** with the Process-independent helper
+   [`intention_process_type_id`](../crates/cid-intention-filter/src/route.rs)
+   (crate `cid-intention-filter`, not linked into the CID lock): require CID
+   lock `hash_type = type` and `code_hash =` the Sequencer's CID code Type ID
+   script hash; extract `process_type_hash`. Group Intentions by that Process
+   Type ID. Non-Intentions / malformed cells get a typed
+   [`IntentionRouteError`]. **Ownership is solely the Sequencer's job.**
+3. **Filter** per Process: call SSRI `Process.filter` with the already-routed
+   cell batch. The filter judges **Process business compliance only**
+   (malformed cell/digest, unsupported asset/action, deposit below Process
+   minimum, …) — it does **not** re-check CID Type-ID ownership.
+4. **Assemble** with the accepted Intentions + live Process state via
+   `Process.assemble` (plain molecule `Transaction` draft).
+
+Host wrapper: `cid_process_example_calculator::process_filter`.
+
 ## SSRI methods
 
 ### `Process.batch`
 
 - **stdin:** empty  
 - **stdout:** 8 bytes LE = `batch_min` ‖ `batch_max` (example: `1` / `4`)
+
+### `Process.filter`
+
+- **stdin:** [`FilterRequest`](../crates/cid-intention-filter/src/filter.rs) via
+  `encode_filter_request`:
+  - `count:u32 LE` then per cell: length-prefixed packed `OutPoint`, packed
+    `CellOutput`, and `data` (same molecule cell encoding as elsewhere)
+  - empty stdin or `count = 0` → empty verdict list
+  - soft cap: `FILTER_MAX_CELLS` (64)
+  - **Callers must route first** — no `process_type_hash` /
+    `cid_code_type_id_hash` in the request
+- **stdout:** `count:u32 LE || reason:i8 * count` (same order as input)
+- **Semantics:** per-cell; one bad cell does **not** abort the batch.
+  Process-owned business rules only (deposit min, supported assets, digest).
+
+| Reason | Code | Meaning |
+|--------|------|---------|
+| `FILTER_ACCEPTED` | 0 | Meets this Process's business requirements |
+| `FILTER_MALFORMED_CELL` | 1 | Packed `CellOutput` / framing invalid |
+| `FILTER_RESERVED_2` | 2 | Reserved (was ownership / not-Intention) |
+| `FILTER_RESERVED_3` | 3 | Reserved (was process mismatch) |
+| `FILTER_UNSUPPORTED_ASSET` | 4 | Typed asset not supported (e.g. non-xUDT) |
+| `FILTER_DEPOSIT_BELOW_MINIMUM` | 5 | CKB deposit below Process minimum |
+| `FILTER_MALFORMED_DIGEST` | 6 | Payload / digest undecodable for this Process |
+| `FILTER_UNSUPPORTED_ACTION` | 7 | Action not supported (reserved) |
+
+Example Process **business** classification is shared with assemble / on-chain
+verify via `crates/cid-process-example-policy` (`classify_intention`). On-chain
+Verify keeps `ours_prefix` scoping separately (bd11d44 semantics); it does not
+re-check CID Type-ID ownership.
+
+`Process.filter` has no Process state cell and cannot learn its own lock
+`code_hash`, so it does **not** reject beneficiaries that reuse the Process
+binary as lock. Assemble and Verify do (via
+`classify_intention_excluding_process_lock`). Sequencers that know the live
+Process lock `code_hash` should pre-check with that helper before assemble.
+
+On-chain Transfer also requires `tx_fee = Σ(input caps) − Σ(output caps)` to
+cover the aggregate positive Process state-cell debit for every lock sharing
+this Process `code_hash`/`hash_type` (in addition to the per-cell fee-budget
+cap), so diverted state capacity cannot masquerade as fee.
 
 ### `Process.assemble`
 

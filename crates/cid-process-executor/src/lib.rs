@@ -36,6 +36,26 @@ impl ProcessExecutor {
             .and_then(|response| parse_batch_bounds(&response))
     }
 
+    /// Classify Intention candidates via SSRI `Process.filter`.
+    ///
+    /// `request` is [`cid_intention_filter::encode_filter_request`] bytes. Returns
+    /// per-cell reason codes in request order (`0` = accepted). Empty request
+    /// (or empty cell list) yields an empty reason list. Does not use host
+    /// queries — cell payloads are embedded in the request.
+    ///
+    /// Response reason count must equal the request cell count; otherwise
+    /// [`ExecutorError::InvalidResponse`].
+    pub fn filter(&self, request: &[u8]) -> Result<Vec<i8>, ExecutorError> {
+        if self.binary.is_empty() {
+            return Err(ExecutorError::VmError("empty binary".into()));
+        }
+        let response = vm::call_ssri_method(&self.binary, "Process.filter", request)?;
+        let reasons = cid_intention_filter::decode_filter_response(&response)
+            .map_err(|e| ExecutorError::InvalidResponse(format!("filter response: {:?}", e)))?;
+        check_filter_response_count(request, &reasons)?;
+        Ok(reasons)
+    }
+
     /// Assemble a complete digest transaction via SSRI `Process.assemble`.
     ///
     /// `draft_tx` is a packed molecule `Transaction` whose inputs are the
@@ -83,6 +103,31 @@ fn parse_batch_bounds(response: &[u8]) -> Result<(u32, u32), ExecutorError> {
     let max = u32::from_le_bytes(response[4..8].try_into().unwrap());
 
     Ok((min, max))
+}
+
+/// Ensure filter stdout reason count matches the request cell count.
+fn check_filter_response_count(request: &[u8], reasons: &[i8]) -> Result<(), ExecutorError> {
+    let expected = if request.is_empty() {
+        0
+    } else {
+        cid_intention_filter::decode_filter_request(request)
+            .map_err(|e| {
+                ExecutorError::InvalidResponse(format!(
+                    "filter request decode for count check: {:?}",
+                    e
+                ))
+            })?
+            .cells
+            .len()
+    };
+    if reasons.len() != expected {
+        return Err(ExecutorError::InvalidResponse(format!(
+            "filter response count {} != request cell count {}",
+            reasons.len(),
+            expected
+        )));
+    }
+    Ok(())
 }
 
 /// Build a CKB-only Intention draft cell (lock args + capacity + data).
@@ -186,6 +231,38 @@ mod tests {
         let msg = format!("{}", err);
         assert!(msg.contains("Process rejected batch"));
         assert!(msg.contains("42"));
+    }
+
+    #[test]
+    fn test_filter_response_count_rejects_short_and_long() {
+        use cid_intention_filter::{encode_filter_request, FilterCell, FilterRequest};
+
+        let req = encode_filter_request(&FilterRequest {
+            cells: vec![
+                FilterCell {
+                    out_point: vec![1],
+                    output: vec![2],
+                    data: vec![],
+                },
+                FilterCell {
+                    out_point: vec![3],
+                    output: vec![4],
+                    data: vec![],
+                },
+            ],
+        })
+        .unwrap();
+
+        assert!(matches!(
+            check_filter_response_count(&req, &[0]),
+            Err(ExecutorError::InvalidResponse(ref msg)) if msg.contains("count")
+        ));
+        assert!(matches!(
+            check_filter_response_count(&req, &[0, 0, 0]),
+            Err(ExecutorError::InvalidResponse(ref msg)) if msg.contains("count")
+        ));
+        assert!(check_filter_response_count(&req, &[0, 1]).is_ok());
+        assert!(check_filter_response_count(&[], &[]).is_ok());
     }
 
     #[test]
@@ -355,13 +432,16 @@ mod tests {
             vec![],
         ));
         for i in 0..n {
-            let lock_args = cid_protocol::CidArgs::new(
-                pth,
-                cid_protocol::Script::default(),
-                cid_protocol::Payload::default(),
-            )
-            .encode()
+            let payload = cid_protocol::Payload::from_script(&cid_protocol::Script {
+                code_hash: [0xBE; 32],
+                hash_type: 1,
+                args: vec![0x01],
+            })
             .unwrap();
+            let lock_args =
+                cid_protocol::CidArgs::new(pth, cid_protocol::Script::default(), payload)
+                    .encode()
+                    .unwrap();
             cells.push(intention_draft_cell(
                 OutPoint::new_builder()
                     .tx_hash(Byte32::from_slice(&[0x10 + i as u8; 32]).unwrap())
@@ -770,13 +850,15 @@ mod tests {
         let executor = ProcessExecutor::new(binary);
         let type_id = type_id_script(b"process-type-id-v0");
         let pth: [u8; 32] = type_id.calc_script_hash().unpack();
-        let lock_args = cid_protocol::CidArgs::new(
-            pth,
-            cid_protocol::Script::default(),
-            cid_protocol::Payload::default(),
-        )
-        .encode()
+        let payload = cid_protocol::Payload::from_script(&cid_protocol::Script {
+            code_hash: [0xBE; 32],
+            hash_type: 1,
+            args: vec![0x01],
+        })
         .unwrap();
+        let lock_args = cid_protocol::CidArgs::new(pth, cid_protocol::Script::default(), payload)
+            .encode()
+            .unwrap();
         // Mirror Process guest occupied formula: pin capacity exactly at floor
         // so any nonzero fee leaves recreate below occupied.
         let process_lock = process_lock_script();

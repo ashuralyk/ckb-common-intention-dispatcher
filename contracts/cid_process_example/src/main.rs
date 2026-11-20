@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod classify;
 mod deposit;
 mod host;
 mod ssri;
@@ -46,6 +47,7 @@ cinnabar_main!(
     (TREE_ROOT, verify::Root),
     SSRI {
         "Process.batch" => ssri::batch_handler,
+        "Process.filter" => ssri::filter_handler,
         "Process.assemble" => ssri::assemble_handler,
     },
 );
