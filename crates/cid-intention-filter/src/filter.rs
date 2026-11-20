@@ -2,6 +2,10 @@
 //!
 //! Wire format is Process-protocol (shared by every Process implementation).
 //! Application rules that produce these codes are Process-owned.
+//!
+//! **Callers must route first** with [`crate::intention_process_type_id`] /
+//! [`crate::intention_belongs_to_process`]. `Process.filter` does **not** verify
+//! CID Type-ID ownership — that is solely the Sequencer's responsibility.
 
 use alloc::vec::Vec;
 use cid_protocol::CodecError;
@@ -10,10 +14,10 @@ use cid_protocol::CodecError;
 pub const FILTER_ACCEPTED: i8 = 0;
 /// Packed `CellOutput` / framing for this cell could not be parsed.
 pub const FILTER_MALFORMED_CELL: i8 = 1;
-/// Lock is not a CID Type-ID Intention (wrong hash_type, code_hash, or args).
-pub const FILTER_NOT_INTENTION: i8 = 2;
-/// Valid CID Intention whose `process_type_hash` is not this Process.
-pub const FILTER_PROCESS_MISMATCH: i8 = 3;
+/// Reserved (was ownership / not-Intention). Ownership is Sequencer-only.
+pub const FILTER_RESERVED_2: i8 = 2;
+/// Reserved (was process mismatch). Ownership is Sequencer-only.
+pub const FILTER_RESERVED_3: i8 = 3;
 /// Typed asset is not supported by this Process (e.g. non-official xUDT).
 pub const FILTER_UNSUPPORTED_ASSET: i8 = 4;
 /// CKB deposit capacity below this Process's minimum.
@@ -36,13 +40,10 @@ pub struct FilterCell {
 
 /// `Process.filter` stdin payload.
 ///
-/// - `process_type_hash`: this Process instance's TYPE_ID script hash.
-/// - `cid_code_type_id_hash`: CID lock code Type ID script hash (ownership).
-/// - `cells`: Intentions (Sequencer should pre-route; filter still verifies ownership).
+/// Cells only — Sequencer must already have routed Intentions to this Process.
+/// No `process_type_hash` / `cid_code_type_id_hash` (ownership is not re-checked).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilterRequest {
-    pub process_type_hash: [u8; 32],
-    pub cid_code_type_id_hash: [u8; 32],
     pub cells: Vec<FilterCell>,
 }
 
@@ -75,16 +76,13 @@ fn read_bytes(bytes: &[u8], off: &mut usize) -> Result<Vec<u8>, CodecError> {
 /// Encode a [`FilterRequest`] for SSRI stdin.
 ///
 /// Layout (little-endian lengths):
-/// `process_type_hash[32] || cid_code_type_id_hash[32] || count:u32
-///  || repeated (out_point_len:u32 || out_point || output_len:u32 || output
+/// `count:u32 || repeated (out_point_len:u32 || out_point || output_len:u32 || output
 ///               || data_len:u32 || data)`
 pub fn encode_filter_request(req: &FilterRequest) -> Result<Vec<u8>, CodecError> {
     if req.cells.len() > FILTER_MAX_CELLS as usize {
         return Err(CodecError::Encode);
     }
     let mut out = Vec::new();
-    out.extend_from_slice(&req.process_type_hash);
-    out.extend_from_slice(&req.cid_code_type_id_hash);
     push_u32(&mut out, req.cells.len() as u32);
     for cell in &req.cells {
         push_u32(&mut out, cell.out_point.len() as u32);
@@ -99,14 +97,7 @@ pub fn encode_filter_request(req: &FilterRequest) -> Result<Vec<u8>, CodecError>
 
 /// Decode a [`FilterRequest`] from SSRI stdin.
 pub fn decode_filter_request(bytes: &[u8]) -> Result<FilterRequest, CodecError> {
-    if bytes.len() < 64 {
-        return Err(CodecError::TooShort);
-    }
-    let mut process_type_hash = [0u8; 32];
-    let mut cid_code_type_id_hash = [0u8; 32];
-    process_type_hash.copy_from_slice(&bytes[0..32]);
-    cid_code_type_id_hash.copy_from_slice(&bytes[32..64]);
-    let mut off = 64;
+    let mut off = 0;
     let count = read_u32(bytes, &mut off)?;
     if count > FILTER_MAX_CELLS {
         return Err(CodecError::Decode);
@@ -122,11 +113,7 @@ pub fn decode_filter_request(bytes: &[u8]) -> Result<FilterRequest, CodecError> 
     if off != bytes.len() {
         return Err(CodecError::Decode);
     }
-    Ok(FilterRequest {
-        process_type_hash,
-        cid_code_type_id_hash,
-        cells,
-    })
+    Ok(FilterRequest { cells })
 }
 
 /// Encode filter stdout: `count:u32 LE || reason:i8 * count` (order = request order).
@@ -167,11 +154,7 @@ mod tests {
 
     #[test]
     fn request_roundtrip_empty() {
-        let req = FilterRequest {
-            process_type_hash: [0x11; 32],
-            cid_code_type_id_hash: [0x22; 32],
-            cells: vec![],
-        };
+        let req = FilterRequest { cells: vec![] };
         let bytes = encode_filter_request(&req).unwrap();
         assert_eq!(decode_filter_request(&bytes).unwrap(), req);
         let resp = encode_filter_response(&[]).unwrap();
@@ -181,8 +164,6 @@ mod tests {
     #[test]
     fn request_response_roundtrip() {
         let req = FilterRequest {
-            process_type_hash: [0x11; 32],
-            cid_code_type_id_hash: [0x22; 32],
             cells: vec![
                 FilterCell {
                     out_point: vec![1, 2, 3],
@@ -198,18 +179,14 @@ mod tests {
         };
         let bytes = encode_filter_request(&req).unwrap();
         assert_eq!(decode_filter_request(&bytes).unwrap(), req);
-        let reasons = vec![FILTER_ACCEPTED, FILTER_PROCESS_MISMATCH];
+        let reasons = vec![FILTER_ACCEPTED, FILTER_DEPOSIT_BELOW_MINIMUM];
         let resp = encode_filter_response(&reasons).unwrap();
         assert_eq!(decode_filter_response(&resp).unwrap(), reasons);
     }
 
     #[test]
     fn decode_rejects_trailing_bytes() {
-        let req = FilterRequest {
-            process_type_hash: [0x11; 32],
-            cid_code_type_id_hash: [0x22; 32],
-            cells: vec![],
-        };
+        let req = FilterRequest { cells: vec![] };
         let mut bytes = encode_filter_request(&req).unwrap();
         bytes.push(0xFF);
         assert_eq!(decode_filter_request(&bytes), Err(CodecError::Decode));
@@ -217,38 +194,36 @@ mod tests {
 
     #[test]
     fn decode_rejects_oversize_count() {
-        let mut bytes = vec![0u8; 64];
+        let mut bytes = Vec::new();
         bytes.extend_from_slice(&(FILTER_MAX_CELLS + 1).to_le_bytes());
         assert_eq!(decode_filter_request(&bytes), Err(CodecError::Decode));
     }
 
     #[test]
     fn decode_rejects_truncated_after_count() {
-        let mut bytes = vec![0u8; 64];
+        let mut bytes = Vec::new();
         bytes.extend_from_slice(&1u32.to_le_bytes());
-        // count=1 but no cell payloads
         assert_eq!(decode_filter_request(&bytes), Err(CodecError::TooShort));
     }
 
     #[test]
     fn decode_rejects_truncated_length_prefix() {
-        let mut bytes = vec![0u8; 64];
+        let mut bytes = Vec::new();
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.extend_from_slice(&4u32.to_le_bytes());
-        bytes.extend_from_slice(&[1, 2]); // claims 4 bytes, only 2 follow
+        bytes.extend_from_slice(&[1, 2]);
         assert_eq!(decode_filter_request(&bytes), Err(CodecError::TooShort));
     }
 
     #[test]
     fn decode_rejects_short_header() {
-        assert_eq!(decode_filter_request(&[0u8; 63]), Err(CodecError::TooShort));
+        assert_eq!(decode_filter_request(&[]), Err(CodecError::TooShort));
     }
 
     #[test]
     fn decode_rejects_length_overflow_on_offset() {
-        let mut bytes = vec![0u8; 64];
+        let mut bytes = Vec::new();
         bytes.extend_from_slice(&1u32.to_le_bytes());
-        // out_point length = u32::MAX → checked_add fails
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(decode_filter_request(&bytes), Err(CodecError::TooShort));
     }
@@ -263,7 +238,7 @@ mod tests {
     #[test]
     fn decode_response_rejects_truncated() {
         assert_eq!(
-            decode_filter_response(&[1, 0, 0, 0]), // count=1, no reason byte
+            decode_filter_response(&[1, 0, 0, 0]),
             Err(CodecError::TooShort)
         );
     }

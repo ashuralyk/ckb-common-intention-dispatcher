@@ -1216,8 +1216,7 @@ async fn assemble_and_verify_xudt_beneficiary() {
     require_binaries();
     let mut rpc = FakeRpcClient::default();
     seed_fakenet_xudt_cell(&mut rpc);
-    // CID lock must be Type-ID referenced (`hash_type=type`) for Process.filter /
-    // assemble ownership checks.
+    // CID lock Type-ID referenced (`hash_type=type`) as on live deployments.
     let skeleton = prepared_process_skeleton_with_cid_type_id(&rpc, Some([0x71u8; 32]));
     let xudt = xudt_type_script();
     let xudt_packed = xudt.clone().to_script(&skeleton).expect("xudt script");
@@ -1270,7 +1269,6 @@ async fn assemble_and_verify_xudt_beneficiary() {
         AssembleExtras {
             funding_cells: vec![],
             cell_deps: deps,
-            cid_code_type_id_hash: None,
         },
         CONTRACT_BIN,
     )

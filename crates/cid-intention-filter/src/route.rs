@@ -1,11 +1,9 @@
 //! Intention ownership / Process Type ID extraction (Process-independent).
 //!
-//! Used by:
-//! - the **Sequencer** to group scanned Intentions by Process Type ID before
-//!   calling each Process's `Process.filter`;
-//! - each **Process filter** (via the same helper) to verify an Intention is
-//!   owned by that Process (CID Type-ID lock + matching `process_type_hash`),
-//!   consistent with on-chain `ours_prefix` scoping.
+//! Used by the **Sequencer** to group scanned Intentions by Process Type ID
+//! before calling each Process's `Process.filter`. Ownership is **solely** the
+//! Sequencer's responsibility — `Process.filter` / assemble do not re-check it.
+//! On-chain Process Verify keeps its own `ours_prefix` scoping.
 //!
 //! Single source of truth for CID Intention lock shape and Process identity
 //! extraction. Does not run Process application logic.

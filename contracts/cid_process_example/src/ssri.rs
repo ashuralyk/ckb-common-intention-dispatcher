@@ -17,8 +17,6 @@ use ckb_std::ckb_types::prelude::*;
 
 const BATCH_MIN: u32 = 1;
 const BATCH_MAX: u32 = 4;
-/// Assemble stdin prefix: expected CID lock code Type ID script hash.
-const ASSEMBLE_CID_TID_LEN: usize = 32;
 
 /// Process-owned fee rate (shannons per kB), matching testnet `min_fee_rate`.
 const FEE_RATE: u64 = 1000;
@@ -47,9 +45,10 @@ pub fn batch_handler(
 /// Stdin: [`cid_intention_filter::FilterRequest`] bytes (`encode_filter_request`).
 /// Stdout: `count:u32 LE || reason:i8 * count` (request order).
 ///
-/// Per-cell; never aborts the batch because one cell fails. Ownership is a
-/// **required** check (CID Type-ID lock + Process Type ID) via the protocol
-/// helper, consistent with on-chain `ours_prefix`.
+/// Per-cell; never aborts the batch because one cell fails. Judges **Process
+/// business compliance only** (malformed cell/digest, asset, deposit, …).
+/// Callers **must route first** via `intention_process_type_id` — this handler
+/// does not verify CID Type-ID ownership.
 pub fn filter_handler(
     _src: &SsriSource,
     _args: SsriArgs,
@@ -62,12 +61,7 @@ pub fn filter_handler(
     let req = decode_filter_request(&raw).map_err(|_| ProcessError::ReadFailed)?;
     let mut reasons = Vec::with_capacity(req.cells.len());
     for cell in &req.cells {
-        reasons.push(classify_packed_intention(
-            &req.process_type_hash,
-            &req.cid_code_type_id_hash,
-            &cell.output,
-            &cell.data,
-        ));
+        reasons.push(classify_packed_intention(&cell.output, &cell.data));
     }
     encode_filter_response(&reasons).map_err(|_| ProcessError::ReadFailed)
 }
@@ -85,25 +79,19 @@ struct IntentionView {
 
 /// SSRI handler for Process.assemble
 ///
-/// Stdin: `cid_code_type_id_hash[32] ||` packed molecule `Transaction` draft
-/// (Intention + Process state inputs; caller supplies cell_deps the Process
-/// documents — CID, Process, and any xUDT code). The 32-byte prefix is the same
-/// expected CID Type ID the Sequencer passes to `Process.filter` — every
-/// Intention is classified against that single value (not each cell's own
-/// `lock.code_hash`). Guest resolves inputs via host queries and returns a
-/// complete molecule `Transaction` the backend submits unchanged.
+/// Stdin: packed molecule `Transaction` draft (Intention + Process state inputs;
+/// caller supplies cell_deps the Process documents — CID, Process, and any xUDT
+/// code). Guest resolves inputs via host queries and returns a complete
+/// molecule `Transaction` the backend submits unchanged.
+///
+/// Business classification matches `Process.filter` (deposit / asset / digest);
+/// ownership is not re-checked (Sequencer routes before assemble).
 pub fn assemble_handler(
     _src: &SsriSource,
     _args: SsriArgs,
 ) -> core::result::Result<Vec<u8>, ProcessError> {
-    let raw_stdin = read_stdin()?;
-    if raw_stdin.len() < ASSEMBLE_CID_TID_LEN {
-        return Err(ProcessError::ReadFailed);
-    }
-    let mut cid_tid = [0u8; 32];
-    cid_tid.copy_from_slice(&raw_stdin[..ASSEMBLE_CID_TID_LEN]);
-    let draft = Transaction::from_slice(&raw_stdin[ASSEMBLE_CID_TID_LEN..])
-        .map_err(|_| ProcessError::ReadFailed)?;
+    let draft_bytes = read_stdin()?;
+    let draft = Transaction::from_slice(&draft_bytes).map_err(|_| ProcessError::ReadFailed)?;
     let raw = draft.raw();
 
     let mut loaded = Vec::new();
@@ -144,30 +132,22 @@ pub fn assemble_handler(
     }
 
     let process = &loaded[process_idx];
-    let typ = process
+    let _ = process
         .cell
         .output
         .type_()
         .to_opt()
         .ok_or(ProcessError::ReadFailed)?;
-    let process_type_hash: [u8; 32] = typ.calc_script_hash().unpack();
 
-    // Same classification as Process.filter: one expected CID Type ID for the
-    // whole batch (Sequencer-supplied prefix), ownership + deposit + asset + digest.
+    // Same business classification as Process.filter (no ownership re-check).
     let mut intentions = Vec::with_capacity(intention_idxs.len());
     for &idx in &intention_idxs {
         let item = &loaded[idx];
         let lock = item.cell.output.lock();
         let capacity: u64 = item.cell.output.capacity().unpack();
         let type_script = item.cell.output.type_().to_opt();
-        let reason = classify_live_intention(
-            &process_type_hash,
-            &cid_tid,
-            &lock,
-            capacity,
-            type_script.as_ref(),
-            &item.cell.data,
-        );
+        let reason =
+            classify_live_intention(&lock, capacity, type_script.as_ref(), &item.cell.data);
         if reason != FILTER_ACCEPTED {
             return Err(
                 filter_reason_to_process_error(reason).unwrap_or(ProcessError::IncompatibleBatch)
