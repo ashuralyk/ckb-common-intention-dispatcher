@@ -1,7 +1,7 @@
 extern crate alloc;
 
 use crate::classify::{
-    classify_live_intention, classify_packed_intention, filter_reason_to_process_error,
+    classify_live_intention_excluding, classify_packed_intention, filter_reason_to_process_error,
 };
 use crate::host::{self, HostCell};
 use crate::ProcessError;
@@ -48,6 +48,11 @@ pub fn batch_handler(
 /// business compliance only** (malformed cell/digest, asset, deposit, …).
 /// Callers **must route first** via `intention_process_type_id` — this handler
 /// does not verify CID Type-ID ownership.
+///
+/// Filter has no Process state / `load_script()`, so it cannot exclude
+/// beneficiaries that reuse the Process lock `code_hash` (Verify / assemble
+/// do). Sequencers that know the live Process lock identity should pre-check
+/// with `classify_intention_excluding_process_lock(..., Some(code_hash))`.
 pub fn filter_handler(
     _src: &SsriSource,
     _args: SsriArgs,
@@ -160,7 +165,10 @@ pub fn assemble_handler(
     let expected_cid = ProcessLockArgs::decode(&process.cell.output.lock().args().raw_data())
         .map_err(|_| ProcessError::ProcessLockArgsInvalid)?;
 
-    // Business classify (same as filter) + Intention lock must match embedded CID identity.
+    // Business classify + forbid beneficiaries locked to this Process binary
+    // (parity with on-chain claim_output / is_example_process_lock).
+    // Intention lock must also match embedded CID identity.
+    let process_lock_code: [u8; 32] = process.cell.output.lock().code_hash().unpack();
     let mut intentions = Vec::with_capacity(intention_idxs.len());
     for &idx in &intention_idxs {
         let item = &loaded[idx];
@@ -172,8 +180,13 @@ pub fn assemble_handler(
         }
         let capacity: u64 = item.cell.output.capacity().unpack();
         let type_script = item.cell.output.type_().to_opt();
-        let reason =
-            classify_live_intention(&lock, capacity, type_script.as_ref(), &item.cell.data);
+        let reason = classify_live_intention_excluding(
+            &lock,
+            capacity,
+            type_script.as_ref(),
+            &item.cell.data,
+            Some(&process_lock_code),
+        );
         if reason != FILTER_ACCEPTED {
             return Err(
                 filter_reason_to_process_error(reason).unwrap_or(ProcessError::IncompatibleBatch)

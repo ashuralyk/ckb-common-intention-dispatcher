@@ -106,6 +106,17 @@ verify via `crates/cid-process-example-policy` (`classify_intention`). On-chain
 Verify keeps `ours_prefix` scoping separately (bd11d44 semantics); it does not
 re-check CID Type-ID ownership.
 
+`Process.filter` has no Process state cell and cannot learn its own lock
+`code_hash`, so it does **not** reject beneficiaries that reuse the Process
+binary as lock. Assemble and Verify do (via
+`classify_intention_excluding_process_lock`). Sequencers that know the live
+Process lock `code_hash` should pre-check with that helper before assemble.
+
+On-chain Transfer also requires `tx_fee = Σ(input caps) − Σ(output caps)` to
+cover the aggregate positive Process state-cell debit for every lock sharing
+this Process `code_hash`/`hash_type` (in addition to the per-cell fee-budget
+cap), so diverted state capacity cannot masquerade as fee.
+
 ### `Process.assemble`
 
 - **stdin:** packed molecule `Transaction` **draft**. Each Process defines its

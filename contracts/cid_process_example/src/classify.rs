@@ -8,7 +8,7 @@ use cid_intention_filter::{
     FILTER_ACCEPTED, FILTER_DEPOSIT_BELOW_MINIMUM, FILTER_MALFORMED_CELL, FILTER_MALFORMED_DIGEST,
     FILTER_UNSUPPORTED_ASSET,
 };
-use cid_process_example_policy::classify_intention;
+use cid_process_example_policy::classify_intention_excluding_process_lock;
 use cid_protocol::Script as CidScript;
 use ckb_std::ckb_types::packed::{CellOutput, Script};
 use ckb_std::ckb_types::prelude::*;
@@ -26,7 +26,18 @@ fn packed_to_cid_script(script: &Script) -> CidScript {
 }
 
 /// Classify one packed Intention cell for Process business rules only.
+///
+/// `process_lock_code_hash` is `None` for `Process.filter` (no state / no
+/// `load_script()`). Assemble / Verify pass the Process lock `code_hash`.
 pub fn classify_packed_intention(output_bytes: &[u8], data: &[u8]) -> i8 {
+    classify_packed_intention_excluding(output_bytes, data, None)
+}
+
+pub fn classify_packed_intention_excluding(
+    output_bytes: &[u8],
+    data: &[u8],
+    process_lock_code_hash: Option<&[u8; 32]>,
+) -> i8 {
     let Ok(output) = CellOutput::from_slice(output_bytes) else {
         return FILTER_MALFORMED_CELL;
     };
@@ -38,7 +49,13 @@ pub fn classify_packed_intention(output_bytes: &[u8], data: &[u8]) -> i8 {
         (code_hash, hash_type)
     });
     let typ_ref = type_script.as_ref().map(|(h, ht)| (h, *ht));
-    classify_intention(&lock, capacity, typ_ref, data)
+    classify_intention_excluding_process_lock(
+        &lock,
+        capacity,
+        typ_ref,
+        data,
+        process_lock_code_hash,
+    )
 }
 
 /// Map filter reason → assemble / on-chain ProcessError (batch-aborting path).
@@ -54,11 +71,22 @@ pub fn filter_reason_to_process_error(reason: i8) -> Option<ProcessError> {
 }
 
 /// Classify a live packed lock + capacity + optional type for assemble/verify.
+#[allow(dead_code)]
 pub fn classify_live_intention(
     lock: &Script,
     capacity: u64,
     type_script: Option<&Script>,
     data: &[u8],
+) -> i8 {
+    classify_live_intention_excluding(lock, capacity, type_script, data, None)
+}
+
+pub fn classify_live_intention_excluding(
+    lock: &Script,
+    capacity: u64,
+    type_script: Option<&Script>,
+    data: &[u8],
+    process_lock_code_hash: Option<&[u8; 32]>,
 ) -> i8 {
     let cid_lock = packed_to_cid_script(lock);
     let typ = type_script.map(|t| {
@@ -67,5 +95,11 @@ pub fn classify_live_intention(
         (code_hash, hash_type)
     });
     let typ_ref = typ.as_ref().map(|(h, ht)| (h, *ht));
-    classify_intention(&cid_lock, capacity, typ_ref, data)
+    classify_intention_excluding_process_lock(
+        &cid_lock,
+        capacity,
+        typ_ref,
+        data,
+        process_lock_code_hash,
+    )
 }

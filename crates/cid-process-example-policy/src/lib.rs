@@ -141,11 +141,30 @@ impl ProcessLockArgs {
 /// Returns a `FILTER_*` reason (`FILTER_ACCEPTED` on success). Does **not**
 /// verify CID Type-ID ownership or `process_type_hash` — callers must route
 /// first (Sequencer) or use on-chain `ours_prefix` scoping (Verify).
+///
+/// When `process_lock_code_hash` is `Some`, rejects beneficiaries whose
+/// `code_hash` equals that value (parity with on-chain Verify, which skips
+/// every output locked by this Process binary). `Process.filter` SSRI has no
+/// Process state / `load_script()`, so it passes `None`; Sequencers that know
+/// the live Process lock `code_hash` should call this helper (or
+/// [`classify_intention_excluding_process_lock`]) before assemble.
 pub fn classify_intention(
     lock: &Script,
     capacity: u64,
     type_script: Option<(&[u8; 32], u8)>,
     data: &[u8],
+) -> i8 {
+    classify_intention_excluding_process_lock(lock, capacity, type_script, data, None)
+}
+
+/// Like [`classify_intention`], optionally forbidding beneficiaries that use
+/// the Process lock `code_hash` (same exclusion as on-chain `claim_output`).
+pub fn classify_intention_excluding_process_lock(
+    lock: &Script,
+    capacity: u64,
+    type_script: Option<(&[u8; 32], u8)>,
+    data: &[u8],
+    process_lock_code_hash: Option<&[u8; 32]>,
 ) -> i8 {
     let Ok(cid) = CidArgs::decode(&lock.args) else {
         return FILTER_MALFORMED_DIGEST;
@@ -157,6 +176,11 @@ pub fn classify_intention(
     };
     if !is_supported_script_hash_type(beneficiary.hash_type) {
         return FILTER_MALFORMED_DIGEST;
+    }
+    if let Some(forbidden) = process_lock_code_hash {
+        if &beneficiary.code_hash == forbidden {
+            return FILTER_MALFORMED_DIGEST;
+        }
     }
 
     match type_script {
@@ -299,6 +323,33 @@ mod tests {
         assert_eq!(
             classify_intention(&lock, 1, Some((&fake, 2)), &[0u8; 16]),
             FILTER_UNSUPPORTED_ASSET
+        );
+    }
+
+    #[test]
+    fn rejects_beneficiary_matching_process_lock_code_hash() {
+        let process_code = [0xB1; 32];
+        let lock = lock_for_beneficiary(
+            [0xA1; 32],
+            Script {
+                code_hash: process_code,
+                hash_type: 1,
+                args: alloc::vec![0x01],
+            },
+        );
+        assert_eq!(
+            classify_intention(&lock, MIN_DEPOSIT_CAPACITY, None, &[]),
+            FILTER_ACCEPTED
+        );
+        assert_eq!(
+            classify_intention_excluding_process_lock(
+                &lock,
+                MIN_DEPOSIT_CAPACITY,
+                None,
+                &[],
+                Some(&process_code),
+            ),
+            FILTER_MALFORMED_DIGEST
         );
     }
 
