@@ -474,7 +474,10 @@ fn create_process_state_shape_type_id_registry_and_no_key_leak() {
         lock["code_hash"].as_str().unwrap(),
         format!("0x{}", hex::encode(expected_lock_code))
     );
-    assert_eq!(lock["args"].as_str().unwrap(), "0x01");
+    assert_eq!(
+        lock["args"].as_str().unwrap(),
+        req.process_lock_args.as_str()
+    );
 
     let typ = &outputs[0]["type"];
     assert_eq!(
@@ -530,9 +533,27 @@ fn create_process_rejects_empty_lock_args() {
     req.process_lock_args = "0x".into();
     let err = create_signed_process_state(&req, &secret).unwrap_err();
     match err {
-        CliError::InvalidRequest(msg) => assert!(msg.contains("non-empty"), "{msg}"),
+        CliError::InvalidRequest(msg) => assert!(
+            msg.contains("process_lock_args invalid") || msg.contains("TooShort"),
+            "{msg}"
+        ),
         other => panic!("expected InvalidRequest, got {other:?}"),
     }
+}
+
+#[test]
+fn create_process_rejects_unsupported_cid_hash_type_in_lock_args() {
+    let secret = key(0x42);
+    let mut req = fixture_process_request(&secret);
+    let mut b = vec![0xC1u8; 32];
+    b.push(3); // unsupported ScriptHashType
+    b.push(0x01);
+    req.process_lock_args = format!("0x{}", hex::encode(b));
+    let err = create_signed_process_state(&req, &secret).unwrap_err();
+    assert!(
+        matches!(err, CliError::InvalidRequest(ref msg) if msg.contains("process_lock_args invalid")),
+        "{err}"
+    );
 }
 
 #[test]

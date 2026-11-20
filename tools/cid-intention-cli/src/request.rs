@@ -45,7 +45,9 @@ pub struct CreateProcessRequest {
     /// Process state capacity in shannons. Default: 300 CKB when omitted.
     #[serde(default = "default_process_capacity")]
     pub process_capacity: u64,
-    /// Distinct Process lock args for this instance (must be non-empty).
+    /// Process state lock args: `cid_code_hash[32] || cid_hash_type[1] || salt`.
+    /// `cid_*` must match the live CID Intention lock identity; `salt` keeps
+    /// instances distinct when they share Process code + CID identity.
     pub process_lock_args: String,
     pub funding: FundingCell,
     /// Live CID lock **code** cell (Type ID required; live-verified on `send`).

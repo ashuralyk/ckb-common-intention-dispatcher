@@ -4,8 +4,8 @@ use std::path::Path;
 
 use cid_process_example_calculator::{
     assembled_tx_round_trip_bytes, process_digest_ok, process_digest_ok_with_extras,
-    process_digest_ok_with_process, AssembleExtras, DraftCellDep, IntentionCell, ProcessStateCell,
-    MIN_DEPOSIT_CAPACITY, PROCESS_CONTRACT_NAME,
+    process_digest_ok_with_process, AssembleExtras, DraftCellDep, IntentionCell, ProcessLockArgs,
+    ProcessStateCell, MIN_DEPOSIT_CAPACITY, PROCESS_CONTRACT_NAME,
 };
 use ckb_cinnabar_calculator::{
     address::{Address, AddressPayload},
@@ -44,6 +44,27 @@ const ERROR_BENEFICIARY_AMOUNT_MISMATCH: i8 = 33;
 const ERROR_TYPE_ID_INVALID: i8 = 35;
 const ERROR_CAPACITY_INSUFFICIENT: i8 = 37;
 const ERROR_DEPOSIT_BELOW_MINIMUM: i8 = 39;
+const ERROR_CID_LOCK_MISMATCH: i8 = 40;
+const ERROR_PROCESS_LOCK_ARGS_INVALID: i8 = 41;
+
+/// Default CID Type ID args on the prepared skeleton (`prepared_process_skeleton`).
+const DEFAULT_CID_TYPE_ID_ARGS: [u8; 32] = [0x71u8; 32];
+
+fn cid_code_hash_for_type_id_args(type_id_args: [u8; 32]) -> [u8; 32] {
+    let typ = Script::new_builder()
+        .code_hash(TYPE_ID_CODE_HASH.pack())
+        .hash_type(ScriptHashType::Type)
+        .args(type_id_args.to_vec().pack())
+        .build();
+    typ.calc_script_hash().unpack()
+}
+
+fn default_process_lock_args(salt: u8) -> Vec<u8> {
+    let cid_code = cid_code_hash_for_type_id_args(DEFAULT_CID_TYPE_ID_ARGS);
+    ProcessLockArgs::new(cid_code, 1, vec![salt])
+        .encode()
+        .expect("process lock args")
+}
 
 fn require_binaries() {
     let cid_path = format!("{CONTRACT_BIN}/{CID_CONTRACT_NAME}");
@@ -80,9 +101,9 @@ fn process_example_binary() -> Vec<u8> {
     std::fs::read(format!("{CONTRACT_BIN}/{PROCESS_CONTRACT_NAME}")).unwrap()
 }
 
-/// Process example binary as the state-cell **lock**.
+/// Process example binary as the state-cell **lock** (CID identity in args).
 fn process_example_lock_script() -> Script {
-    process_example_lock_script_with(ScriptHashType::Data1, Vec::new())
+    process_example_lock_script_with(ScriptHashType::Data1, default_process_lock_args(0x01))
 }
 
 fn process_example_lock_script_with(hash_type: ScriptHashType, args: Vec<u8>) -> Script {
@@ -94,7 +115,10 @@ fn process_example_lock_script_with(hash_type: ScriptHashType, args: Vec<u8>) ->
 }
 
 fn process_example_lock_ex() -> ScriptEx {
-    ScriptEx::new_code(blake2b_256(process_example_binary()), vec![])
+    ScriptEx::new_code(
+        blake2b_256(process_example_binary()),
+        default_process_lock_args(0x01),
+    )
 }
 
 /// Built-in TYPE_ID type of the Process state cell (Process Type ID).
@@ -147,9 +171,13 @@ fn mock_intention(i: u32, process_type_hash: [u8; 32]) -> IntentionCell {
 }
 
 fn mock_process_state() -> ProcessStateCell {
+    // Offline assemble defaults Intention locks to code_hash=[0xC1;32]/type.
+    let args = ProcessLockArgs::new([0xC1; 32], 1, vec![0x01])
+        .encode()
+        .unwrap();
     ProcessStateCell {
         out_point: fake_outpoint(),
-        lock: process_example_lock_script(),
+        lock: process_example_lock_script_with(ScriptHashType::Data1, args),
         type_script: mock_process_type_id(),
         capacity: CKB_CAPACITY,
         data: vec![],
@@ -742,8 +770,10 @@ async fn reject_two_processes_sharing_one_beneficiary() {
     let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
     let type_b = process_example_type_script(b"process-type-id-v1".to_vec());
     // Distinct lock args → distinct Process lock groups (1→1 each).
-    let lock_a = process_example_lock_script_with(ScriptHashType::Data1, vec![0xA1]);
-    let lock_b = process_example_lock_script_with(ScriptHashType::Data1, vec![0xB2]);
+    let lock_a =
+        process_example_lock_script_with(ScriptHashType::Data1, default_process_lock_args(0xA1));
+    let lock_b =
+        process_example_lock_script_with(ScriptHashType::Data1, default_process_lock_args(0xB2));
     let process_a = seed_process_example_cell(&mut rpc, lock_a, type_a.clone());
     let process_b = seed_process_example_cell(&mut rpc, lock_b, type_b.clone());
     let int_a = seed_intention(
@@ -1132,8 +1162,10 @@ async fn reject_data1_data2_processes_sharing_one_beneficiary() {
     let mut skeleton = prepared_process_skeleton(&rpc);
     let type_a = process_example_type_script(b"process-type-id-v0".to_vec());
     let type_b = process_example_type_script(b"process-type-id-v1".to_vec());
-    let lock_a = process_example_lock_script_with(ScriptHashType::Data1, vec![0xA1]);
-    let lock_b = process_example_lock_script_with(ScriptHashType::Data2, vec![0xB2]);
+    let lock_a =
+        process_example_lock_script_with(ScriptHashType::Data1, default_process_lock_args(0xA1));
+    let lock_b =
+        process_example_lock_script_with(ScriptHashType::Data2, default_process_lock_args(0xB2));
     let process_a = seed_process_example_cell(&mut rpc, lock_a, type_a.clone());
     let process_b = seed_process_example_cell(&mut rpc, lock_b, type_b.clone());
     let int_a = seed_intention(
@@ -1570,4 +1602,155 @@ async fn reject_type_id_dropped_on_process_recreate() {
         .await
         .expect_err("Process recreate without TYPE_ID must fail");
     assert_eq!(exit(err), ERROR_TYPE_ID_INVALID);
+}
+
+#[tokio::test]
+async fn reject_forged_non_cid_lock_with_matching_args() {
+    // Forged lock: CID-shaped args + our process_type_hash, but wrong code_hash.
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
+    let args = beneficiary_args(process_hash, &dest_script());
+    // Seed a cell that looks like an Intention in args but uses AlwaysSuccess lock.
+    let forged_lock = always_success_script(args.clone());
+    let forged = {
+        let cell = CellOutputEx::new_from_scripts(forged_lock, None, vec![], Some(CKB_CAPACITY))
+            .expect("forged cell");
+        let op = fake_outpoint();
+        rpc.insert_fake_cell(op.clone(), cell, Some(fake_header_view(PACK_BLOCK, 1, 1)));
+        op
+    };
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&forged),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("forged non-CID lock must not count as ours");
+    assert_eq!(exit(err), ERROR_CID_LOCK_MISMATCH);
+}
+
+#[tokio::test]
+async fn accept_correct_cid_lock_identity() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let skeleton = apply_transfer(&mut rpc, dest_lock(), CKB_CAPACITY, vec![]);
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("matching CID lock identity + Process TYPE_ID must pass");
+}
+
+#[tokio::test]
+async fn reject_wrong_intention_hash_type() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
+    let args = beneficiary_args(process_hash, &dest_script());
+    // Same code_hash as live CID Type ID, but hash_type=data1 instead of type.
+    let cid_code = cid_code_hash_for_type_id_args(DEFAULT_CID_TYPE_ID_ARGS);
+    let wrong_ht_lock = Script::new_builder()
+        .code_hash(cid_code.pack())
+        .hash_type(ScriptHashType::Data1)
+        .args(args.clone().pack())
+        .build();
+    let intention = {
+        let cell = CellOutputEx::new_from_scripts(wrong_ht_lock, None, vec![], Some(CKB_CAPACITY))
+            .expect("wrong-ht intention");
+        let op = fake_outpoint();
+        rpc.insert_fake_cell(op.clone(), cell, Some(fake_header_view(PACK_BLOCK, 1, 1)));
+        op
+    };
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("wrong Intention hash_type must fail");
+    assert_eq!(exit(err), ERROR_CID_LOCK_MISMATCH);
+}
+
+#[tokio::test]
+async fn reject_changed_process_lock_args_on_recreate() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = apply_transfer(&mut rpc, dest_lock(), CKB_CAPACITY, vec![]);
+    // Swap recreate lock args to a different salt (same CID identity shape).
+    let new_args = default_process_lock_args(0xEE);
+    let old = skeleton.outputs[0].lock_script();
+    skeleton.outputs[0].output = skeleton.outputs[0]
+        .output
+        .clone()
+        .as_builder()
+        .lock(old.as_builder().args(new_args.pack()).build())
+        .build();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("changing Process lock args on recreate must fail");
+    // Different args → input lock group has no matching output (Burn) or pair fail.
+    assert_eq!(exit(err), 30); // ProcessPairInvalid
+}
+
+#[tokio::test]
+async fn reject_malformed_process_lock_args() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    // Too-short args: not valid ProcessLockArgs.
+    let bad_lock = process_example_lock_script_with(ScriptHashType::Data1, vec![0x01]);
+    let process = seed_process_example_cell(&mut rpc, bad_lock, type_script);
+    let args = beneficiary_args(process_hash, &dest_script());
+    let intention = seed_intention(&mut rpc, &skeleton, args, CKB_CAPACITY, None, PACK_BLOCK);
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("malformed Process lock args must fail");
+    assert_eq!(exit(err), ERROR_PROCESS_LOCK_ARGS_INVALID);
 }

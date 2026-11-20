@@ -410,9 +410,16 @@ mod tests {
     }
 
     fn process_lock_script() -> Script {
+        // Intention draft cells use code_hash=[0xC1;32], hash_type=type.
+        // ProcessLockArgs: cid_code_hash[32] || cid_hash_type[1] || salt.
+        let mut args = Vec::with_capacity(34);
+        args.extend_from_slice(&[0xC1; 32]);
+        args.push(1);
+        args.push(0x01);
         Script::new_builder()
             .code_hash(Byte32::from_slice(&[0xAA; 32]).unwrap())
             .hash_type(2u8.into())
+            .args(args.pack())
             .build()
     }
 

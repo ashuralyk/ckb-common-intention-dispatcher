@@ -265,10 +265,11 @@ pub fn create_signed_process_state_bundle(
         req.process_capacity
     };
     let lock_args = decode_hex(&req.process_lock_args)?;
-    if lock_args.is_empty() || cid_protocol::CidArgs::decode(&lock_args).is_ok() {
-        return Err(CliError::InvalidRequest(
-            "process_lock_args must be non-empty and distinct from CID Intention encoding".into(),
-        ));
+    // Layout: cid_code_hash[32] || cid_hash_type[1] || instance_salt[0..]
+    if let Err(e) = cid_process_example_calculator::ProcessLockArgs::decode(&lock_args) {
+        return Err(CliError::InvalidRequest(format!(
+            "process_lock_args invalid ({e:?}): need cid_code_hash[32]||cid_hash_type[1]||salt (not CID Intention encoding)"
+        )));
     }
 
     let funding_lock = packed_script(&req.funding.lock)?;

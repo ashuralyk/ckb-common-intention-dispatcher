@@ -21,6 +21,8 @@ const ERROR_HOST_QUERY_FAILED: i8 = 36;
 const ERROR_CAPACITY_INSUFFICIENT: i8 = 37;
 const ERROR_UNSUPPORTED_FUNDING_LOCK: i8 = 38;
 const ERROR_DEPOSIT_BELOW_MINIMUM: i8 = 39;
+const ERROR_CID_LOCK_MISMATCH: i8 = 40;
+const ERROR_PROCESS_LOCK_ARGS_INVALID: i8 = 41;
 
 define_errors!(ProcessError, {
     ReadFailed = CUSTOM_ERROR_START,  // 20
@@ -37,6 +39,10 @@ define_errors!(ProcessError, {
     UnsupportedFundingLock = ERROR_UNSUPPORTED_FUNDING_LOCK, // 38
     // CKB deposit Intention capacity below Process MIN_DEPOSIT_CAPACITY.
     DepositBelowMinimum = ERROR_DEPOSIT_BELOW_MINIMUM, // 39
+    // Intention lock code_hash/hash_type ≠ Process lock args CID identity.
+    CidLockMismatch = ERROR_CID_LOCK_MISMATCH, // 40
+    // Process state lock args malformed / unsupported hash_type.
+    ProcessLockArgsInvalid = ERROR_PROCESS_LOCK_ARGS_INVALID, // 41
 });
 
 #[derive(Default)]

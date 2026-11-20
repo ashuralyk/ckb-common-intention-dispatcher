@@ -10,7 +10,7 @@ use cid_intention_filter::{
     decode_filter_request, encode_filter_response, read_capped_from, FILTER_ACCEPTED,
     FILTER_STDIN_MAX,
 };
-use cid_process_example_policy::fee_from_tx_molecule_len;
+use cid_process_example_policy::{fee_from_tx_molecule_len, ProcessLockArgs};
 use cid_protocol::CidArgs;
 use ckb_cinnabar_verifier::ssri::{SsriArgs, SsriSource};
 use ckb_std::ckb_types::packed::{Byte32, Bytes, CellOutput, RawTransaction, Script, Transaction};
@@ -161,13 +161,20 @@ pub fn assemble_handler(
         }
     }
 
-    // Business classify + forbid beneficiaries locked to this Process binary
-    // (parity with on-chain claim_output / is_example_process_lock).
+    // CID lock identity from Process state lock args (no backend CID Type ID).
+    let expected_cid = ProcessLockArgs::decode(&process.cell.output.lock().args().raw_data())
+        .map_err(|_| ProcessError::ProcessLockArgsInvalid)?;
+    // Forbid beneficiaries locked to this Process binary (parity with Verify).
     let process_lock_code: [u8; 32] = process.cell.output.lock().code_hash().unpack();
     let mut intentions = Vec::with_capacity(intention_idxs.len());
     for &idx in &intention_idxs {
         let item = &loaded[idx];
         let lock = item.cell.output.lock();
+        let code_hash: [u8; 32] = lock.code_hash().unpack();
+        let hash_type: u8 = lock.hash_type().into();
+        if !expected_cid.matches_intention_lock(&code_hash, hash_type) {
+            return Err(ProcessError::CidLockMismatch);
+        }
         let capacity: u64 = item.cell.output.capacity().unpack();
         let type_script = item.cell.output.type_().to_opt();
         let reason = classify_live_intention_excluding(
