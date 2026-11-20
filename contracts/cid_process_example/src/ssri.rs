@@ -1,5 +1,6 @@
 extern crate alloc;
 
+use crate::deposit::ckb_deposit_capacity_ok;
 use crate::host::{self, HostCell};
 use crate::ProcessError;
 use alloc::vec::Vec;
@@ -99,6 +100,14 @@ pub fn assemble_handler(
     let count = intentions.len() as u32;
     if !(BATCH_MIN..=BATCH_MAX).contains(&count) {
         return Err(ProcessError::IncompatibleBatch);
+    }
+
+    // CKB deposit Intentions must clear the Process minimum so assemble can
+    // fund the beneficiary by consuming Intention capacity alone.
+    for intention in &intentions {
+        if !ckb_deposit_capacity_ok(intention.capacity, intention.type_script.is_some()) {
+            return Err(ProcessError::DepositBelowMinimum);
+        }
     }
 
     let process_idx = process_idx.ok_or(ProcessError::ReadFailed)?;

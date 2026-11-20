@@ -178,6 +178,15 @@ fn collect_output_obligations(
                 Ok(None) => continue,
                 Err(e) => return Err(e),
             };
+            // Deposit floor is Process-local: only this Process's Intentions.
+            if ours_prefix
+                && !crate::deposit::ckb_deposit_capacity_ok(
+                    transfer.capacity,
+                    transfer.type_script.is_some(),
+                )
+            {
+                return Err(ProcessError::DepositBelowMinimum);
+            }
             if ours_prefix {
                 ours.push(transfer.clone());
             }

@@ -9,7 +9,16 @@ pub struct CreateRequest {
     /// `testnet` or `fake` (unit tests). Mainnet rejected in v1.
     pub network: String,
     pub fee_shannons: u64,
+    /// Requested Intention capacity (shannons). Defaults to the example Process
+    /// deposit minimum when [`Self::enforce_example_process_deposit_minimum`] is
+    /// true. CKB Intention capacity is at least `occupied + 1 shannon`.
+    #[serde(default = "default_intention_capacity")]
     pub intention_capacity: u64,
+    /// When `true` (default), reject effective capacity below the **example**
+    /// Process `MIN_DEPOSIT_CAPACITY` (600 CKB). Set `false` for other Processes
+    /// that own a lower (or zero) deposit floor.
+    #[serde(default = "default_enforce_example_deposit_minimum")]
+    pub enforce_example_process_deposit_minimum: bool,
     pub funding: FundingCell,
     /// Live CID lock **code** cell. Must include Type ID `type_script` so the
     /// Intention lock resolves as `hash_type=type` (no data-hash fallback).
@@ -49,6 +58,15 @@ pub struct CreateProcessRequest {
 
 fn default_process_capacity() -> u64 {
     cid_process_example_calculator::DEFAULT_PROCESS_STATE_CAPACITY
+}
+
+fn default_intention_capacity() -> u64 {
+    // Example Process deposit min (600 CKB). Protocol has no Intention floor.
+    cid_process_example_calculator::MIN_DEPOSIT_CAPACITY
+}
+
+fn default_enforce_example_deposit_minimum() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

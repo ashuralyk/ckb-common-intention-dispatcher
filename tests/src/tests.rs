@@ -10,7 +10,7 @@ use ckb_cinnabar_calculator::{
     instruction::Instruction,
     operation::basic::AddOutputCell,
     re_exports::ckb_types::{
-        core::ScriptHashType,
+        core::{Capacity, ScriptHashType},
         packed::Script,
         prelude::{Builder, Entity, Pack, Unpack},
         H256,
@@ -102,7 +102,8 @@ async fn create_ckb_intention_skeleton() {
     seed_user_cell(&mut rpc, CKB_CAPACITY);
     let mut skeleton = prepared_skeleton(&rpc);
     let args = cid_args(process_type_hash(), b"hello");
-    let ix = create_intention::<FakeRpcClient>(user_address(), args.clone(), CKB_CAPACITY, None);
+    // A CKB Intention must carry capacity above the occupied bytes.
+    let ix = create_intention::<FakeRpcClient>(user_address(), args.clone(), 1, None);
     TransactionCalculator::default()
         .instruction(ix)
         .apply_skeleton(&rpc, &mut skeleton)
@@ -112,13 +113,31 @@ async fn create_ckb_intention_skeleton() {
     let out = &skeleton.outputs[0];
     assert!(out.data.is_empty(), "CKB Intention data is empty");
     assert!(out.type_script().is_none(), "CKB Intention has no type");
-    assert_eq!(out.capacity_shannons(), CKB_CAPACITY);
+    let occupied = out
+        .output
+        .occupied_capacity(Capacity::bytes(out.data.len()).unwrap())
+        .unwrap()
+        .as_u64();
+    assert_eq!(out.capacity_shannons(), occupied + 1);
     let expected = cid_lock(args).to_script(&skeleton).expect("cid lock");
     assert_eq!(out.lock_script().as_slice(), expected.as_slice());
 
+    let created_output = out.clone();
     verify(&rpc, skeleton, vec![])
         .await
         .expect("create does not run CID; payer lock succeeds");
+
+    let intention = ckb_cinnabar_calculator::simulation::fake_outpoint();
+    rpc.insert_fake_cell(intention.clone(), created_output, None);
+    let refund = digest_incompatible::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        user_lock(),
+        occupied + 1,
+        None,
+    );
+    verify(&rpc, prepared_skeleton(&rpc), vec![refund])
+        .await
+        .expect("a minimum-sized CKB Intention can be refunded");
 }
 
 #[tokio::test]
@@ -128,7 +147,7 @@ async fn create_xudt_intention_skeleton() {
     seed_fakenet_xudt_cell(&mut rpc);
     seed_user_cell(&mut rpc, CKB_CAPACITY);
     let mut skeleton = prepared_skeleton(&rpc);
-    let args = cid_args(process_type_hash(), b"xudt");
+    let args = cid_args(process_type_hash(), &[0x42; 512]);
     let xudt = xudt_type_script();
     rpc.insert_fake_cell(
         ckb_cinnabar_calculator::simulation::fake_outpoint(),
@@ -144,7 +163,7 @@ async fn create_xudt_intention_skeleton() {
     let ix = create_intention::<FakeRpcClient>(
         user_address(),
         args,
-        CKB_CAPACITY,
+        1, // below occupied; create bumps to occupied only
         Some((xudt.clone(), XUDT_AMOUNT)),
     );
     TransactionCalculator::default()
@@ -155,6 +174,13 @@ async fn create_xudt_intention_skeleton() {
     assert_eq!(skeleton.outputs.len(), 1);
     let out = &skeleton.outputs[0];
     assert_eq!(out.data, XUDT_AMOUNT.to_le_bytes().to_vec());
+    let occupied = out
+        .output
+        .occupied_capacity(Capacity::bytes(out.data.len()).unwrap())
+        .unwrap()
+        .as_u64();
+    assert!(occupied > 1);
+    assert_eq!(out.capacity_shannons(), occupied);
     let typ = out.type_script().expect("xUDT type");
     assert_eq!(typ.code_hash().as_slice(), XUDT_CODE_HASH.as_slice());
     let ht: u8 = typ.hash_type().into();

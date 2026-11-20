@@ -96,7 +96,11 @@ fn create_signed_tx_shape_fee_witness_and_args() {
         16,
     )
     .unwrap();
-    assert_eq!(cap, 200_000_000_000);
+    assert_eq!(
+        cap,
+        cid_process_example_calculator::MIN_DEPOSIT_CAPACITY,
+        "CLI default Intention capacity is the example Process deposit min"
+    );
 
     let args = transaction["outputs"][0]["lock"]["args"].as_str().unwrap();
     let args_bytes = hex::decode(args.trim_start_matches("0x")).unwrap();
@@ -369,6 +373,62 @@ fn create_intention_fee_covers_rate_1000_serialized_size_in_block() {
     assert!(paid >= need, "paid={paid} need={need} size={size}");
     // Requested fee_shannons=10000 should win over min when larger.
     assert_eq!(paid, req.fee_shannons.max(need));
+}
+
+#[test]
+fn create_rejects_intention_below_example_deposit_minimum() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    assert!(req.enforce_example_process_deposit_minimum);
+    let minimum = cid_process_example_calculator::MIN_DEPOSIT_CAPACITY;
+
+    for capacity in [minimum / 2, minimum - 1] {
+        req.intention_capacity = capacity;
+        let err = create_signed_intention(&req, &secret).unwrap_err();
+        assert!(
+            matches!(err, CliError::InvalidRequest(ref message)
+                if message.contains("intention_capacity") && message.contains(&minimum.to_string())),
+            "unexpected error for requested capacity {capacity}: {err}"
+        );
+    }
+}
+
+#[test]
+fn create_allows_sub_example_min_when_example_deposit_policy_disabled() {
+    // Non-example Process: no protocol floor — only occupied capacity applies.
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    req.enforce_example_process_deposit_minimum = false;
+    let minimum = cid_process_example_calculator::MIN_DEPOSIT_CAPACITY;
+    // Below example 600 CKB, but well above typical occupied (~61 CKB + args).
+    req.intention_capacity = minimum / 2; // 300 CKB
+    assert!(req.intention_capacity < minimum);
+    let bundle = create_signed_intention_bundle(&req, &secret).expect(
+        "non-example Process must accept deposit below example 600 CKB when above occupied",
+    );
+    let effective = bundle.skeleton.outputs[0].capacity_shannons();
+    assert!(effective >= req.intention_capacity);
+    assert!(effective < minimum);
+}
+
+#[test]
+fn create_checks_funding_against_occupied_capacity() {
+    let secret = key(0x42);
+    let mut req = fixture_request(&secret);
+    req.beneficiary_lock.args = format!("0x{}", "ab".repeat(512));
+    let bundle = create_signed_intention_bundle(&req, &secret).unwrap();
+    let output = &bundle.skeleton.outputs[0];
+    assert_eq!(
+        output.capacity_shannons(),
+        output.occupied_capacity().as_u64() + 1
+    );
+    assert!(output.capacity_shannons() > req.intention_capacity);
+
+    // Enough for the requested capacity, but not the same output at its
+    // occupied capacity.
+    req.funding.capacity = req.intention_capacity + req.fee_shannons + 61_0000_0000;
+    let err = create_signed_intention(&req, &secret).unwrap_err();
+    assert!(matches!(err, CliError::InsufficientFunds), "{err}");
 }
 
 #[test]

@@ -73,6 +73,36 @@ becomes N→N and fails `ProcessPairInvalid` instead of running two 1→1 pairs.
 | 36 | `HostQueryFailed` |
 | 37 | `CapacityInsufficient` (fee would drop state below occupied capacity) |
 | 38 | `UnsupportedFundingLock` (extra funding input) |
+| 39 | `DepositBelowMinimum` (CKB Intention capacity &lt; Process `MIN_DEPOSIT_CAPACITY`) |
+
+## CKB deposit minimum (Intention consume)
+
+CKB Intention creation uses `max(requested, occupied + 1 shannon)` because the
+CID lock requires spendable capacity. xUDT creation uses
+`max(requested, occupied)`. Each Process owns its deposit minima.
+
+This example Process treats DigestOk **CKB** Intentions **for its own**
+`process_type_hash` as deposits fulfilled by consuming the Intention into the
+beneficiary, and rejects capacities below its Process-local minimum:
+
+| Constant | Value | Where |
+|----------|-------|--------|
+| `MIN_DEPOSIT_CAPACITY` | 600 CKB | `crates/cid-process-example-policy` (shared by on-chain contract + calculator/CLI) |
+
+Enforced in Process lock Verify (own DigestOk only), `Process.assemble`, and the
+calculator draft path. xUDT Intentions are not subject to this CKB deposit
+minimum (token amount rules are separate).
+
+### Upgrading an existing Process deployment
+
+Replacing the example Process binary at the same code Type ID applies the new
+minimum to existing Intention cells that target its live Process state. Pause
+new deposits and check for live CKB Intentions below 600 CKB for every Process
+instance using that code Type ID. Settle them using the previous assembler
+and deployed binary, or refund them before replacing the code cell. After the
+upgrade, any remaining sub-minimum Intention fails DigestOk with error 39. Use
+the CID refund path without a matching Process pair to return capacity to its
+User Lock.
 
 ## Capacity / fee (example assemble)
 

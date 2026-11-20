@@ -9,6 +9,7 @@ default-members = [
   "calculator/intention",
   "calculator/process",
   "crates/cid-process-executor",
+  "crates/cid-process-example-policy",
 ]
 
 members = [
@@ -19,6 +20,7 @@ members = [
   "contracts/ckb_common_intention_dispatcher",
   "contracts/cid_process_example",
   "crates/cid-process-executor",
+  "crates/cid-process-example-policy",
   "runner",
   "tools/cid-intention-cli",
 ]

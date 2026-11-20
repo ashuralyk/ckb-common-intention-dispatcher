@@ -5,7 +5,7 @@ use std::path::Path;
 use cid_process_example_calculator::{
     assembled_tx_round_trip_bytes, process_digest_ok, process_digest_ok_with_extras,
     process_digest_ok_with_process, AssembleExtras, DraftCellDep, IntentionCell, ProcessStateCell,
-    PROCESS_CONTRACT_NAME,
+    MIN_DEPOSIT_CAPACITY, PROCESS_CONTRACT_NAME,
 };
 use ckb_cinnabar_calculator::{
     address::{Address, AddressPayload},
@@ -42,6 +42,7 @@ const MAX_CYCLES: u64 = 50_000_000;
 const ERROR_BENEFICIARY_MISSING: i8 = 32;
 const ERROR_BENEFICIARY_AMOUNT_MISMATCH: i8 = 33;
 const ERROR_TYPE_ID_INVALID: i8 = 35;
+const ERROR_DEPOSIT_BELOW_MINIMUM: i8 = 39;
 
 fn require_binaries() {
     let cid_path = format!("{CONTRACT_BIN}/{CID_CONTRACT_NAME}");
@@ -523,6 +524,207 @@ async fn transfer_matching_beneficiary_succeeds() {
         .expect("matching beneficiary Script/capacity/data must pass");
 }
 
+/// Happy path: CKB deposit is fulfilled by consuming the Intention cell's
+/// capacity into the beneficiary (no extra funding input).
+#[tokio::test]
+async fn deposit_fulfilled_by_consuming_intention() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let skeleton = apply_transfer(&mut rpc, dest_lock(), MIN_DEPOSIT_CAPACITY, vec![]);
+    assert_eq!(
+        skeleton.inputs[0].output.capacity_shannons(),
+        MIN_DEPOSIT_CAPACITY,
+        "Intention input carries the deposit"
+    );
+    assert_eq!(
+        skeleton.outputs[1].capacity_shannons(),
+        MIN_DEPOSIT_CAPACITY,
+        "beneficiary is funded from Intention capacity"
+    );
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("deposit via Intention consume must pass on-chain");
+}
+
+/// Rejection: createable Intention capacity below the Process deposit minimum
+/// cannot DigestOk.
+#[tokio::test]
+async fn reject_deposit_below_process_minimum() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
+    let args = beneficiary_args(process_hash, &dest_script());
+    // Well above typical occupied capacity, but below Process MIN_DEPOSIT.
+    let below_min = MIN_DEPOSIT_CAPACITY / 2;
+    let intention = seed_intention(&mut rpc, &skeleton, args, below_min, None, PACK_BLOCK);
+
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: below_min,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("deposit below Process min must fail");
+    assert_eq!(exit(err), ERROR_DEPOSIT_BELOW_MINIMUM);
+}
+
+/// Edge: capacity exactly one shannon below MIN_DEPOSIT_CAPACITY is rejected.
+#[tokio::test]
+async fn reject_deposit_one_below_minimum() {
+    require_binaries();
+    let below = MIN_DEPOSIT_CAPACITY - 1;
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
+    let args = beneficiary_args(process_hash, &dest_script());
+    let intention = seed_intention(&mut rpc, &skeleton, args, below, None, PACK_BLOCK);
+
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: below,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("MIN_DEPOSIT_CAPACITY - 1 must fail");
+    assert_eq!(exit(err), ERROR_DEPOSIT_BELOW_MINIMUM);
+}
+
+/// Batch: one of N CKB deposits below the minimum fails the whole Process verify.
+#[tokio::test]
+async fn reject_batch_when_one_deposit_below_minimum() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
+    let args_ok = beneficiary_args(process_hash, &dest_script());
+    let other_dest = always_success_script(vec![0xBD]);
+    let args_bad = beneficiary_args(process_hash, &other_dest);
+    let int_ok = seed_intention(
+        &mut rpc,
+        &skeleton,
+        args_ok,
+        MIN_DEPOSIT_CAPACITY,
+        None,
+        PACK_BLOCK,
+    );
+    let below = MIN_DEPOSIT_CAPACITY - 1;
+    let int_bad = seed_intention(&mut rpc, &skeleton, args_bad, below, None, PACK_BLOCK);
+
+    // Manual multi-intention DigestOk: Process + two Intentions → two beneficiaries.
+    let ix_a = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&int_ok),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: None,
+            data: vec![],
+            capacity: MIN_DEPOSIT_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix_a)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    // Add the under-min Intention as an extra input + matching beneficiary.
+    skeleton
+        .input(
+            ckb_cinnabar_calculator::skeleton::CellInputEx::new_from_outpoint(
+                &rpc,
+                outpoint_ids(&int_bad).0,
+                outpoint_ids(&int_bad).1,
+                None,
+                true,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .witness(Default::default());
+    skeleton.output(CellOutputEx::new_from_scripts(other_dest, None, vec![], Some(below)).unwrap());
+
+    let err = verify(&rpc, skeleton, vec![])
+        .await
+        .expect_err("batch with one sub-min deposit must fail");
+    assert_eq!(exit(err), ERROR_DEPOSIT_BELOW_MINIMUM);
+}
+
+/// xUDT DigestOk Intentions are not CKB deposits: capacity below MIN_DEPOSIT is OK.
+#[tokio::test]
+async fn xudt_intention_exempt_from_ckb_deposit_minimum() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    seed_fakenet_xudt_cell(&mut rpc);
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let xudt = xudt_type_script();
+    let type_script = process_example_type_script(b"process-type-id-v0".to_vec());
+    let process_hash = process_example_type_hash(&type_script);
+    let process = seed_process_example_cell(&mut rpc, process_example_lock_script(), type_script);
+    let args = beneficiary_args(process_hash, &dest_script());
+    // Below Process CKB deposit min but above typical xUDT occupied capacity.
+    let cap = MIN_DEPOSIT_CAPACITY / 2;
+    assert!(cap < MIN_DEPOSIT_CAPACITY);
+    let intention = seed_intention(
+        &mut rpc,
+        &skeleton,
+        args,
+        cap,
+        Some((xudt.clone(), XUDT_AMOUNT)),
+        PACK_BLOCK,
+    );
+
+    let ix = digest_ok::<FakeRpcClient>(
+        outpoint_ids(&intention),
+        outpoint_ids(&process),
+        Some(AddOutputCell {
+            lock_script: dest_lock(),
+            type_script: Some(xudt),
+            data: XUDT_AMOUNT.to_le_bytes().to_vec(),
+            capacity: cap,
+            absolute_capacity: true,
+            type_id: false,
+        }),
+    );
+    TransactionCalculator::default()
+        .instruction(ix)
+        .apply_skeleton(&rpc, &mut skeleton)
+        .unwrap();
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("xUDT Intention below CKB deposit min must still verify");
+}
+
 #[tokio::test]
 async fn reject_two_processes_sharing_one_beneficiary() {
     require_binaries();
@@ -575,6 +777,62 @@ async fn reject_two_processes_sharing_one_beneficiary() {
         .await
         .expect_err("two Processes must not share one beneficiary output");
     assert_eq!(exit(err), ERROR_BENEFICIARY_MISSING);
+}
+
+#[tokio::test]
+async fn digest_ok_accepts_subminimum_deposit_for_another_process() {
+    require_binaries();
+    let mut rpc = FakeRpcClient::default();
+    let mut skeleton = prepared_process_skeleton(&rpc);
+    let example_type = process_example_type_script(b"example-process".to_vec());
+    let other_type = process_example_type_script(b"other-process".to_vec());
+    let other_dest = always_success_script(vec![0xBD]);
+
+    let example_digest = (
+        process_example_lock_script(),
+        example_type,
+        dest_script(),
+        MIN_DEPOSIT_CAPACITY,
+    );
+    let other_digest = (
+        always_success_script(vec![0xB2]),
+        other_type,
+        other_dest,
+        MIN_DEPOSIT_CAPACITY / 2,
+    );
+
+    for (process_lock, type_script, beneficiary, capacity) in [example_digest, other_digest] {
+        let process_hash = process_example_type_hash(&type_script);
+        let process = seed_process_example_cell(&mut rpc, process_lock, type_script);
+        let intention = seed_intention(
+            &mut rpc,
+            &skeleton,
+            beneficiary_args(process_hash, &beneficiary),
+            capacity,
+            None,
+            PACK_BLOCK,
+        );
+        let digest = digest_ok::<FakeRpcClient>(
+            outpoint_ids(&intention),
+            outpoint_ids(&process),
+            Some(AddOutputCell {
+                lock_script: beneficiary.into(),
+                type_script: None,
+                data: vec![],
+                capacity,
+                absolute_capacity: true,
+                type_id: false,
+            }),
+        );
+        TransactionCalculator::default()
+            .instruction(digest)
+            .apply_skeleton(&rpc, &mut skeleton)
+            .unwrap();
+    }
+
+    verify(&rpc, skeleton, vec![])
+        .await
+        .expect("example Process applies its deposit minimum only to its own Intentions");
 }
 
 #[tokio::test]

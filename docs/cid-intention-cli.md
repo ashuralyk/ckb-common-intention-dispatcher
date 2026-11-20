@@ -20,6 +20,7 @@ Lean host binary in this contract repo that:
 | Concern | Choice |
 |---------|--------|
 | Asset | CKB only (no xUDT) |
+| Intention capacity | Defaults to the example Process minimum (**600 CKB**). The CLI sizes the CKB output to `max(requested, occupied + 1 shannon)` so the CID lock can consume it. When `enforce_example_process_deposit_minimum` is `true` (default), it rejects an effective capacity below the **example** Process 600 CKB floor. Set that flag to `false` for other Processes that own a lower (or zero) deposit minimum. |
 | Inputs | Explicit funding outpoint + deps in offline request JSON (pinned by outpoint; not address scan) |
 | Process identity | Process state cell’s built-in **TYPE_ID type script** `{TYPE_ID, type, args}` → `calc_script_hash` (= Intention `process_type_hash`); Process contract is the state-cell **lock** |
 | CID lock identity | Intention lock always references the CID code cell by **Type ID**: `lock.code_hash = hash(cid_lock_dep.type_script)`, `lock.hash_type = type`. Data-hash (`data1`) referencing is rejected. |
@@ -36,7 +37,8 @@ Lean host binary in this contract repo that:
 {
   "network": "testnet",
   "fee_shannons": 10000,
-  "intention_capacity": 200000000000,
+  "intention_capacity": 60000000000,
+  "enforce_example_process_deposit_minimum": true,
   "funding": {
     "tx_hash": "0x…",
     "index": 0,

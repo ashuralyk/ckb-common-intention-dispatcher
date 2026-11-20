@@ -3,10 +3,12 @@
 //! Calculate assembles; it does not re-implement Verify predicates.
 
 use cid_protocol::XUDT_AMOUNT_LEN;
+
 use ckb_cinnabar_calculator::{
     address::Address,
     indexer::{CellQueryOptions, GetCellsIter, SearchMode},
     instruction::Instruction,
+    occupied_capacity_shannons,
     operation::{
         basic::{
             AddHeaderDepByBlockNumber, AddHeaderDepByInputIndex, AddInputCellByAddress,
@@ -15,7 +17,10 @@ use ckb_cinnabar_calculator::{
         udt::AddXudtCelldep,
         Log, Operation,
     },
-    re_exports::ckb_types::prelude::Unpack,
+    re_exports::ckb_types::{
+        packed::CellOutput,
+        prelude::{Builder, Entity, Pack, Unpack},
+    },
     rpc::RPC,
     skeleton::{CellInputEx, CellOutputEx, ScriptEx, TransactionSkeleton},
     types::Hash256,
@@ -152,6 +157,10 @@ impl<T: RPC> Operation<T> for AddInputAssetDeps {
 
 /// Create an Intention cell. Lock Create does **not** run CID Verify.
 ///
+/// CKB-only Intentions need at least one shannon above occupied capacity to be
+/// spendable. xUDT Intentions can use exactly their occupied capacity. Process
+/// deposit minima are enforced separately at deposit time.
+///
 /// `xudt`: when set, attach the official xUDT type + 16-byte amount and the
 /// xUDT celldep. CKB-only path uses empty data and `type_script = None`.
 pub fn create_intention<T: RPC>(
@@ -175,15 +184,46 @@ pub fn create_intention<T: RPC>(
         }
         None => (None, Vec::new()),
     };
-    ops.push(Box::new(AddOutputCell {
+    ops.push(Box::new(AddIntentionOutput {
         lock_script: cid_lock(args),
         type_script,
         data,
         capacity,
-        absolute_capacity: true,
-        type_id: false,
     }));
     Instruction::new(ops)
+}
+
+/// Size the output without creating a CKB-only Intention with zero spendable capacity.
+struct AddIntentionOutput {
+    lock_script: ScriptEx,
+    type_script: Option<ScriptEx>,
+    data: Vec<u8>,
+    capacity: u64,
+}
+
+impl<T: RPC> Operation<T> for AddIntentionOutput {
+    fn run(
+        self: Box<Self>,
+        _rpc: &T,
+        skeleton: &mut TransactionSkeleton,
+        _: &mut Log,
+    ) -> Result<()> {
+        let lock = self.lock_script.to_script(skeleton)?;
+        let typ = self
+            .type_script
+            .map(|t| t.to_script(skeleton))
+            .transpose()?;
+        let draft = CellOutput::new_builder()
+            .lock(lock)
+            .type_(typ.pack())
+            .build();
+        let occupied = occupied_capacity_shannons(&draft, self.data.len());
+        let minimum = occupied + u64::from(draft.type_().to_opt().is_none());
+        let cap = self.capacity.max(minimum);
+        let output = draft.as_builder().capacity(cap).build();
+        skeleton.output(CellOutputEx::new(output, self.data));
+        Ok(())
+    }
 }
 
 // Consume the Process cell and recreate its state, rather than referencing it.
