@@ -213,6 +213,24 @@ Usage: [docs/process-example-usage.md](docs/process-example-usage.md)
 cd tests && cargo test process_example -- --nocapture
 ```
 
+## Intention creation with CID v0.1.4
+
+The CID lock checks the asset when the cell is spent, before selecting
+DigestOk, DigestIncompatible or TimeoutBurn. Use the following shapes when
+creating an Intention:
+
+- For CKB, use no type script, empty data and capacity strictly above occupied
+  capacity. The CLI and SDK raise a small requested capacity to occupied
+  capacity plus one shannon.
+- For xUDT, use the official xUDT code data hash with `hash_type=data1` and a
+  nonzero little-endian `u128` in the first 16 bytes of data. The SDK emits
+  exactly 16 bytes and collects tokens by the complete type script. A Type
+  reference changes the script identity and fails CID's asset check even when
+  the dep contains identical ELF bytes.
+- Use CID args with the Process Type Hash and a decodable CID entry of the
+  supported version. The embedded User Lock accepts `data`, `type` and
+  `data1`. The SDK preserves custom Process payload bytes.
+
 ## Optional Intention CLI
 
 CKB-only offline Intention creator (non-default member). See

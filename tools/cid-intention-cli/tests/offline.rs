@@ -261,6 +261,439 @@ fn malformed_cell_hex_rejected() {
     assert!(create_signed_intention(&req, &secret).is_err());
 }
 
+fn cli_create_transaction(input: &str, key_hex: &str) -> serde_json::Value {
+    let dir = tempfile::tempdir().unwrap();
+    let request_path = dir.path().join("request.json");
+    let output_path = dir.path().join("transaction.json");
+    std::fs::write(&request_path, input).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cid-intention-cli"))
+        .arg("create")
+        .arg("--request")
+        .arg(request_path)
+        .arg("--output")
+        .arg(&output_path)
+        .env(PRIVKEY_ENV, key_hex)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&std::fs::read(output_path).unwrap()).unwrap()
+}
+
+#[test]
+fn cli_create_ignores_non_asset_aliases() {
+    let secret = key(0x42);
+    let key_hex = hex::encode(secret.secret_bytes());
+    let request = serde_json::to_value(fixture_request(&secret)).unwrap();
+    let baseline = cli_create_transaction(&request.to_string(), &key_hex);
+
+    for (scope, aliases) in [
+        (
+            "",
+            &[
+                "NETWORK",
+                "feeShannons",
+                "Enforce.Example.Process.Deposit.Minimum",
+                "FUNDING",
+                "cidLockDep",
+                "sighash-deps",
+                "processTypeScript",
+                "beneficiaryLock",
+            ][..],
+        ),
+        ("funding", &["txHash", "INDEX", "LOCK"][..]),
+    ] {
+        let mut with_aliases = request.clone();
+        let object = if scope.is_empty() {
+            &mut with_aliases
+        } else {
+            &mut with_aliases[scope]
+        };
+        for alias in aliases {
+            object[*alias] = json!("ignored alias");
+        }
+        assert_eq!(
+            cli_create_transaction(&with_aliases.to_string(), &key_hex),
+            baseline,
+            "{scope:?}"
+        );
+    }
+}
+
+#[test]
+fn request_and_funding_deserialize_with_integer_field_indices() {
+    use serde::de::{
+        value::{MapDeserializer, U64Deserializer},
+        DeserializeOwned,
+    };
+    use serde::Serialize;
+
+    fn assert_indexed_fields<T: DeserializeOwned + Serialize>(request: &T, fields: &[&str]) {
+        let expected = serde_json::to_value(request).unwrap();
+        let indexed = fields.iter().enumerate().map(|(index, field)| {
+            (
+                U64Deserializer::<serde_json::Error>::new(index as u64),
+                expected[field].clone(),
+            )
+        });
+        let parsed = T::deserialize(MapDeserializer::new(indexed)).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), expected);
+    }
+
+    let request = fixture_request(&key(0x42));
+    assert_indexed_fields(
+        &request,
+        &[
+            "network",
+            "fee_shannons",
+            "intention_capacity",
+            "enforce_example_process_deposit_minimum",
+            "funding",
+            "cid_lock_dep",
+            "sighash_deps",
+            "process_type_script",
+            "beneficiary_lock",
+        ],
+    );
+    assert_indexed_fields(
+        &request.funding,
+        &["tx_hash", "index", "capacity", "lock", "data"],
+    );
+}
+
+#[test]
+fn cli_create_accepts_extra_request_and_funding_metadata() {
+    let secret = key(0x42);
+    let key_hex = hex::encode(secret.secret_bytes());
+    let request = fixture_request(&secret);
+    let baseline = create_signed_intention(&request, &secret).unwrap();
+    let request = serde_json::to_value(&request).unwrap();
+
+    for scope in ["", "funding"] {
+        let mut with_metadata = request.clone();
+        let object = if scope.is_empty() {
+            &mut with_metadata
+        } else {
+            &mut with_metadata[scope]
+        };
+        for field in [
+            "tokenizer",
+            "typescript_version",
+            "asset_label",
+            "budget_amount",
+            "output_data_format",
+            "request_id",
+            "note",
+            "memo",
+            "label",
+            "description",
+        ] {
+            object[field] = json!("create-metadata");
+        }
+        let with_text = with_metadata.to_string();
+        let with_large_number = with_text.replace(r#""create-metadata""#, "1e400");
+        let with_nested_metadata =
+            with_text.replace(r#""create-metadata""#, r#"{"output_capacity": 1e400}"#);
+        for input in [with_text, with_large_number, with_nested_metadata] {
+            assert_eq!(
+                cli_create_transaction(&input, &key_hex),
+                baseline,
+                "{scope:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cli_create_accepts_request_and_funding_in_field_order() {
+    let secret = key(0x42);
+    let key_hex = hex::encode(secret.secret_bytes());
+    let request = serde_json::to_value(fixture_request(&secret)).unwrap();
+    let baseline = cli_create_transaction(&request.to_string(), &key_hex);
+    let funding = &request["funding"];
+    let funding_array = json!([
+        funding["tx_hash"],
+        funding["index"],
+        funding["capacity"],
+        funding["lock"],
+        funding["data"],
+    ]);
+    let request_array = json!([
+        request["network"],
+        request["fee_shannons"],
+        request["intention_capacity"],
+        request["enforce_example_process_deposit_minimum"],
+        funding,
+        request["cid_lock_dep"],
+        request["sighash_deps"],
+        request["process_type_script"],
+        request["beneficiary_lock"],
+    ]);
+    let mut with_funding_array = request;
+    with_funding_array["funding"] = funding_array.clone();
+    let mut with_both_arrays = request_array.clone();
+    with_both_arrays[4] = funding_array;
+    let mut with_unchecked_funding_object = request_array.clone();
+    with_unchecked_funding_object[4]["output_capacity"] = json!(null);
+
+    for (form, input) in [
+        ("request array", request_array),
+        ("funding array", with_funding_array),
+        ("request and funding arrays", with_both_arrays),
+        (
+            "request array skips preflight",
+            with_unchecked_funding_object,
+        ),
+    ] {
+        assert_eq!(
+            cli_create_transaction(&input.to_string(), &key_hex),
+            baseline,
+            "{form}"
+        );
+    }
+}
+
+#[test]
+fn cli_rejects_unsupported_asset_fields_without_writing_output() {
+    let secret = key(0x42);
+    let request = serde_json::to_value(fixture_request(&secret)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let request_path = dir.path().join("request.json");
+    let output_path = dir.path().join("transaction.json");
+    let key_hex = hex::encode(secret.secret_bytes());
+
+    let asset_fields = [
+        "xudtAmount",
+        "tokenAmount",
+        "xUdtAmount",
+        "XUDT_AMOUNT",
+        "TOKEN-BALANCE",
+        "UDT.Amount",
+        "input-xUDT-args",
+        "TOTAL-AMOUNT",
+        "output TYPE-SCRIPT",
+        "raw-OUTPUTS.DATA",
+        "outputs_data",
+        "xudt_type_script",
+        "output",
+        "outputs",
+        "output_capacity",
+        "outputCapacity",
+        "cell_capacity",
+        "output_data",
+        "outputData",
+        "outputsData",
+        "cell_output",
+        "cellOutput",
+        "cell_data",
+        "cellData",
+        "type",
+        "type_script",
+        "typeScript",
+        "cell_type",
+        "cell_type_script",
+        "output_type",
+        "output_type_script",
+        "intention_data",
+        "intention_type",
+        "intention_type_script",
+        "asset",
+        "assets",
+        "asset_data",
+        "asset_type",
+        "asset_amount",
+        "asset_type_script",
+        "amount",
+        "token",
+        "tokens",
+        "token_amount",
+        "token_data",
+        "token_type",
+        "token_type_script",
+        "udt",
+        "udt_amount",
+        "udt_data",
+        "udt_type",
+        "udt_script",
+        "udt_type_script",
+        "sudt",
+        "sudt_amount",
+        "sudt_data",
+        "sudt_type",
+        "sudt_script",
+        "sudt_type_script",
+        "xudt",
+        "xudt_amount",
+        "xudt_type",
+        "xudt_type_args",
+        "xudt_type_hash",
+        "xudt_script",
+        "xudt_args",
+        "xudt_code_hash",
+        "xudt_data",
+        "xudt_hash_type",
+        "xudtTypeScript",
+        "xUdtArgs",
+        "xUdtType",
+        "xUdtTypeScript",
+    ];
+    for scope in ["", "funding"] {
+        let request_fields: &[&str] = if scope.is_empty() {
+            &[
+                "data",
+                "capacity",
+                "intentionCapacity",
+                "intention-capacity",
+                "INTENTION-CAPACITY",
+            ]
+        } else {
+            &[
+                "intention_capacity",
+                "intentionCapacity",
+                "CAPA-CITY",
+                "DATA",
+            ]
+        };
+        for field in asset_fields
+            .into_iter()
+            .chain(request_fields.iter().copied())
+        {
+            let mut invalid = request.clone();
+            if scope.is_empty()
+                && matches!(
+                    field,
+                    "output_capacity"
+                        | "outputCapacity"
+                        | "intentionCapacity"
+                        | "intention-capacity"
+                )
+            {
+                invalid
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("intention_capacity");
+            }
+            let (object, field_path) = if scope.is_empty() {
+                (&mut invalid, field.to_owned())
+            } else {
+                (&mut invalid[scope], format!("{scope}.{field}"))
+            };
+            object[field] = match field {
+                "data" => json!(key_hex),
+                "output_capacity" | "outputCapacity" | "intentionCapacity"
+                | "intention-capacity" => {
+                    json!(500_0000_0000_u64)
+                }
+                "xudtAmount" | "tokenAmount" | "xUdtAmount" | "XUDT_AMOUNT" => json!(42),
+                "outputs_data" | "outputsData" => json!(["0x00"]),
+                "xudt_type_script" | "type_script" => request["process_type_script"].clone(),
+                "xudt" => json!({"amount": 0}),
+                _ => json!(null),
+            };
+            std::fs::write(&request_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            let output = std::process::Command::new(env!("CARGO_BIN_EXE_cid-intention-cli"))
+                .arg("create")
+                .arg("--request")
+                .arg(&request_path)
+                .arg("--output")
+                .arg(&output_path)
+                .env(PRIVKEY_ENV, &key_hex)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let mut diagnostic = format!("unsupported asset field `{field_path}`");
+            let canonical = match (scope, field) {
+                ("", "intentionCapacity" | "intention-capacity" | "INTENTION-CAPACITY") => {
+                    Some("intention_capacity")
+                }
+                ("funding", "CAPA-CITY") => Some("funding.capacity"),
+                ("funding", "DATA") => Some("funding.data"),
+                _ => None,
+            };
+            if let Some(canonical) = canonical {
+                diagnostic.push_str(&format!(" (use `{canonical}`)"));
+            }
+            diagnostic.push_str(" at line ");
+            assert!(!output.status.success(), "{field_path}: {stderr}");
+            assert!(stderr.contains(&diagnostic), "{field_path}: {stderr}");
+            assert!(!stderr.contains(&key_hex), "{field_path}");
+            assert!(!output_path.exists(), "{field_path}");
+        }
+    }
+}
+
+#[test]
+fn cli_asset_field_diagnostic_is_escaped_bounded_and_single_line() {
+    let request = serde_json::to_value(fixture_request(&key(0x42))).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let request_path = dir.path().join("request.json");
+    let output_path = dir.path().join("transaction.json");
+    let long_key = format!("xudt{}amount", "\u{1b}".repeat(1024));
+
+    for (field, expected) in [
+        (
+            "xudt`\t\n\r\u{1b}\u{2028}amount",
+            Some(r"xudt\`\t\n\r\u{1b}\u{2028}amount"),
+        ),
+        (long_key.as_str(), None),
+    ] {
+        let mut invalid = request.clone();
+        invalid["funding"][field] = json!(null);
+        std::fs::write(&request_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_cid-intention-cli"))
+            .arg("create")
+            .arg("--request")
+            .arg(&request_path)
+            .arg("--output")
+            .arg(&output_path)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!output_path.exists());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let line = stderr.strip_suffix('\n').unwrap();
+        assert!(!line.contains(|c: char| c.is_control() || c == '\u{2028}'));
+        let key = line
+            .strip_prefix("cid-intention-cli: json: unsupported asset field `funding.")
+            .and_then(|rest| rest.split_once("` at line "))
+            .unwrap_or_else(|| panic!("unexpected diagnostic: {stderr:?}"))
+            .0;
+        if let Some(expected) = expected {
+            assert_eq!(key, expected);
+        } else {
+            assert!(key.starts_with(r"xudt\u{1b}"));
+            assert!(key.ends_with("..."));
+            assert!(key.len() <= 48);
+        }
+    }
+}
+
+#[test]
+fn create_rejects_data2_user_lock() {
+    let secret = key(0x42);
+    let mut request = fixture_request(&secret);
+    request.funding.lock.hash_type = "data2".into();
+    assert!(
+        matches!(
+            create_signed_intention(&request, &secret),
+            Err(CliError::InvalidRequest(message)) if message.contains("user lock hash_type")
+        ),
+        "expected the CID User Lock validation error"
+    );
+}
+
+#[test]
+fn process_creation_keeps_accepting_extra_funding_metadata() {
+    let secret = key(0x42);
+    let mut request = serde_json::to_value(fixture_process_request(&secret)).unwrap();
+    request["funding"]["note"] = json!("process funding");
+    let request: CreateProcessRequest = serde_json::from_value(request).unwrap();
+    assert!(create_signed_process_state(&request, &secret).is_ok());
+}
+
 #[test]
 fn missing_beneficiary_field_fails_parse() {
     let secret = key(0x42);

@@ -25,7 +25,7 @@ use ckb_cinnabar_calculator::{
     TransactionCalculator, TYPE_ID_CODE_HASH,
 };
 use ckb_common_intention_dispatcher_calculator::{
-    cid_lock, encode_cid_args, Payload, CONTRACT_NAME,
+    cid_lock, encode_cid_args, validate_intention_args, Payload, CONTRACT_NAME,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -99,6 +99,19 @@ impl CliError {
             }
             other => {
                 let raw = other.to_string();
+                if let Some(unknown) = raw.strip_prefix("json: unknown field `") {
+                    // The expected-field list can trip the hex redaction below.
+                    // Echo only short identifier-shaped names from the request.
+                    if let Some((name, _)) = unknown.split_once("`, expected ") {
+                        if !name.is_empty()
+                            && name.len() <= 32
+                            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                        {
+                            return format!("json: unknown field `{name}`");
+                        }
+                    }
+                    return "json: unknown field".into();
+                }
                 if raw.len() > 8 && hex_digit_count(&raw) > 60 {
                     "error (details omitted to avoid leaking hex material)".into()
                 } else {
@@ -368,6 +381,7 @@ fn create_signed_intention_bundle_inner(
         .map_err(|_| CliError::InvalidRequest("beneficiary_lock encode failed".into()))?;
     let user_lock = req.funding.lock.to_cid_script()?;
     let args = encode_cid_args(process_type_hash, user_lock, payload);
+    validate_intention_args(&args).map_err(CliError::InvalidRequest)?;
 
     let funding_out = outpoint(&req.funding.tx_hash, req.funding.index)?;
     let funding_tx_hash = h256_to_hash(&H256(decode_hash32(&req.funding.tx_hash)?));
