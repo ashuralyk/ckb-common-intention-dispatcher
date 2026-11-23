@@ -1,6 +1,7 @@
 //! Off-chain CID v0.1 recipes. Each function is one transition-table row.
 //!
-//! Calculate assembles; it does not re-implement Verify predicates.
+//! Calculate assembles. The create recipe checks the CID input format because
+//! the lock verifier only runs when the Intention is spent.
 
 use cid_protocol::XUDT_AMOUNT_LEN;
 
@@ -50,6 +51,46 @@ fn xudt_data(amount: u128) -> Vec<u8> {
     amount.to_le_bytes()[..XUDT_AMOUNT_LEN].to_vec()
 }
 
+/// Check the CID v0.1.4 args accepted by the creation tools.
+/// Process-specific payload bytes remain opaque.
+pub fn validate_intention_args(args: &[u8]) -> std::result::Result<(), String> {
+    let args =
+        CidArgs::decode(args).map_err(|error| format!("invalid CID args for v0.1.4: {error:?}"))?;
+    let hash_type = args.entry.user_lock.hash_type;
+    if !matches!(hash_type, 0..=2) {
+        return Err(format!(
+            "CID user lock hash_type must be data, type or data1 (got {hash_type})"
+        ));
+    }
+    Ok(())
+}
+
+struct ValidateCreateIntention {
+    args: Vec<u8>,
+    xudt: Option<(ScriptEx, u128)>,
+}
+
+impl<T: RPC> Operation<T> for ValidateCreateIntention {
+    fn run(self: Box<Self>, _: &T, skeleton: &mut TransactionSkeleton, _: &mut Log) -> Result<()> {
+        validate_intention_args(&self.args).map_err(CalculatorError::Other)?;
+        if let Some((type_script, amount)) = self.xudt {
+            if amount == 0 {
+                return Err(CalculatorError::Other(
+                    "Intention xUDT amount must be nonzero".into(),
+                ));
+            }
+            let typ = type_script.to_script(skeleton)?;
+            let code_hash: [u8; 32] = typ.code_hash().unpack();
+            if !cid_protocol::is_standard_xudt(&code_hash, typ.hash_type().into()) {
+                return Err(CalculatorError::Other(
+                    "Intention xUDT type must use the official xUDT Data1 code hash".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 // Collect by the full type script, not by issuer authority. Never mint tokens.
 struct CollectXudt {
     payer: ScriptEx,
@@ -65,12 +106,6 @@ impl<T: RPC> Operation<T> for CollectXudt {
         _: &mut Log,
     ) -> Result<()> {
         let typ = self.type_script.to_script(skeleton)?;
-        let code_hash: [u8; 32] = typ.code_hash().unpack();
-        if self.amount == 0 || !cid_protocol::is_standard_xudt(&code_hash, typ.hash_type().into()) {
-            return Err(CalculatorError::Other(
-                "expected nonzero standard xUDT transfer".into(),
-            ));
-        }
         let payer = self.payer.to_script(skeleton)?;
         let mut query = CellQueryOptions::new_lock(payer.clone());
         query.with_data = Some(true);
@@ -161,17 +196,25 @@ impl<T: RPC> Operation<T> for AddInputAssetDeps {
 /// spendable. xUDT Intentions can use exactly their occupied capacity. Process
 /// deposit minima are enforced separately at deposit time.
 ///
-/// `xudt`: when set, attach the official xUDT type + 16-byte amount and the
-/// xUDT celldep. CKB-only path uses empty data and `type_script = None`.
+/// Applying the instruction validates CID args and the asset before funding.
+/// `xudt` attaches the official Data1 xUDT type, nonzero 16-byte amount and
+/// the xUDT celldep. A named type script must resolve from an existing dep.
+/// The CKB-only path uses empty data and `type_script = None`.
 pub fn create_intention<T: RPC>(
     payer: Address,
     args: Vec<u8>,
     capacity: u64,
     xudt: Option<(ScriptEx, u128)>,
 ) -> Instruction<T> {
-    let mut ops: Vec<Box<dyn Operation<T>>> = vec![Box::new(AddInputCellByAddress {
-        address: payer.clone(),
-    })];
+    let mut ops: Vec<Box<dyn Operation<T>>> = vec![
+        Box::new(ValidateCreateIntention {
+            args: args.clone(),
+            xudt: xudt.clone(),
+        }),
+        Box::new(AddInputCellByAddress {
+            address: payer.clone(),
+        }),
+    ];
     let (type_script, data) = match xudt {
         Some((type_script, amount)) => {
             ops.push(Box::new(AddXudtCelldep {}));
@@ -362,3 +405,65 @@ pub use cid_protocol::{
     ERROR_UNKNOWN_BRANCH, ERROR_UNSUPPORTED_TYPE, ERROR_ZERO_ASSET, HOP_DIGEST_INCOMPATIBLE,
     HOP_DIGEST_OK, HOP_TIMEOUT_BURN, MAX_REFUND_FEE, TIMEOUT_BLOCKS, XUDT_CODE_HASH,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ckb_cinnabar_calculator::{
+        address::AddressPayload, rpc::Network, simulation::FakeRpcClient, TransactionCalculator,
+    };
+
+    fn assert_invalid_create(args: Vec<u8>, asset: Option<(ScriptEx, u128)>, reason: &str) {
+        let mut skeleton = TransactionSkeleton::default();
+        let payer = Address::new(
+            Network::Fake,
+            AddressPayload::from(CellOutput::default().lock()),
+        );
+        let result = TransactionCalculator::default()
+            .instruction(create_intention(payer, args, 1, asset))
+            .apply_skeleton(&FakeRpcClient::default(), &mut skeleton);
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains(reason), "{error}");
+        assert!(skeleton.inputs.is_empty());
+        assert!(skeleton.outputs.is_empty());
+    }
+
+    #[test]
+    fn create_rejects_invalid_cid_args() {
+        let mut wrong_version = CidArgs::new([1; 32], CidScript::default(), Payload::default());
+        wrong_version.entry.version = CID_VERSION + 1;
+        for args in [vec![0; 12], vec![0; 64], wrong_version.encode().unwrap()] {
+            assert_invalid_create(args, None, "invalid CID args");
+        }
+    }
+
+    #[test]
+    fn create_rejects_unsupported_user_lock_hash_type() {
+        for hash_type in [4, 255] {
+            let user_lock = CidScript {
+                hash_type,
+                ..CidScript::default()
+            };
+            let args = encode_cid_args([1; 32], user_lock, Payload::default());
+            assert_invalid_create(args, None, "user lock hash_type");
+        }
+    }
+
+    #[test]
+    fn create_rejects_zero_xudt_amount() {
+        let args = encode_cid_args([1; 32], CidScript::default(), Payload::default());
+        let asset = ScriptEx::new_code(XUDT_CODE_HASH, Vec::new());
+        assert_invalid_create(args, Some((asset, 0)), "xUDT amount must be nonzero");
+    }
+
+    #[test]
+    fn create_rejects_unsupported_xudt_identity() {
+        for asset in [
+            ScriptEx::new_type(XUDT_CODE_HASH, Vec::new()),
+            ScriptEx::new_code([0xAA; 32], Vec::new()),
+        ] {
+            let args = encode_cid_args([1; 32], CidScript::default(), Payload::default());
+            assert_invalid_create(args, Some((asset, 1)), "official xUDT Data1");
+        }
+    }
+}

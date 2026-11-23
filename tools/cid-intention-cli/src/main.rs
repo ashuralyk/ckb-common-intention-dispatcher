@@ -1,5 +1,7 @@
 //! Offline CKB-only CID Intention / Process creator + explicit testnet send (no auto-broadcast).
 
+mod request_json;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -62,6 +64,7 @@ fn run() -> Result<(), CliError> {
     match cli.cmd {
         Command::Create { request, output } => {
             let text = std::fs::read_to_string(&request)?;
+            request_json::preflight_create_request(&text)?;
             let req: CreateRequest = serde_json::from_str(&text)?;
             let key = load_privkey_from_env()?;
             let tx = create_signed_intention(&req, &key)?;

@@ -8,7 +8,7 @@ use std::path::Path;
 use ckb_cinnabar_calculator::{
     assert_verify,
     instruction::Instruction,
-    operation::basic::AddOutputCell,
+    operation::basic::{AddInputCellByOutPoint, AddOutputCell},
     re_exports::ckb_types::{
         core::{Capacity, ScriptHashType},
         packed::Script,
@@ -16,10 +16,11 @@ use ckb_cinnabar_calculator::{
         H256,
     },
     simulation::{
-        always_success_script, AddFakeAlwaysSuccessCelldep, AddFakeInputCell, FakeRpcClient,
-        TransactionSimulator,
+        always_success_script, fake_header_view, fake_outpoint, AddFakeAlwaysSuccessCelldep,
+        AddFakeInputCell, FakeRpcClient, TransactionSimulator,
     },
-    CalculatorError, TransactionCalculator,
+    skeleton::{CellOutputEx, ScriptEx},
+    CalculatorError, TransactionCalculator, TYPE_ID_CODE_HASH,
 };
 use ckb_common_intention_dispatcher_calculator::{
     cid_lock, create_intention, digest_incompatible, digest_ok, encode_cid_args, timeout_burn,
@@ -1123,6 +1124,118 @@ async fn timeout_burn_at_threshold() {
     verify(&rpc, skeleton, vec![ix])
         .await
         .expect("timeout_burn at exact TIMEOUT_BLOCKS");
+}
+
+#[tokio::test]
+async fn unsupported_asset_is_rejected_before_each_cid_burn_hop() {
+    require_binary();
+    let mut rpc = FakeRpcClient::default();
+    seed_user_cell(&mut rpc, USER_CELL_CAPACITY);
+    let process = seed_process_cell(&mut rpc);
+    let judge = PACK_BLOCK + TIMEOUT_BLOCKS;
+    seed_header(&mut rpc, judge);
+    let mut skeleton = prepared_skeleton(&rpc);
+
+    // Exercise Type-based code resolution with the real CID and xUDT
+    // binaries. The Type IDs are local simulator fixtures.
+    for (name, tag) in [(CONTRACT_NAME, 0xA1u8), ("xudt", 0xA2)] {
+        let dep = skeleton
+            .celldeps
+            .iter_mut()
+            .find(|dep| dep.name == name)
+            .unwrap();
+        let type_id = Script::new_builder()
+            .code_hash(TYPE_ID_CODE_HASH.pack())
+            .hash_type(ScriptHashType::Type)
+            .args([tag; 32].as_slice().pack())
+            .build();
+        dep.output.output = dep
+            .output
+            .output
+            .clone()
+            .as_builder()
+            .type_(Some(type_id).pack())
+            .build();
+    }
+    let xudt = ScriptEx::Reference(
+        "xudt".into(),
+        xudt_type_script()
+            .to_script(&skeleton)
+            .unwrap()
+            .args()
+            .raw_data()
+            .to_vec(),
+    );
+    for (case, type_script, data) in [
+        ("untyped nonempty data", None, vec![0]),
+        (
+            "xUDT referenced by Type",
+            Some(xudt),
+            XUDT_AMOUNT.to_le_bytes().to_vec(),
+        ),
+    ] {
+        let args = cid_args(process_type_hash(), case.as_bytes());
+        let lock = cid_lock(args).to_script(&skeleton).unwrap();
+        assert_eq!(u8::from(lock.hash_type()), ScriptHashType::Type as u8);
+        let packed_type = type_script
+            .clone()
+            .map(|script| script.to_script(&skeleton).unwrap());
+        let cell =
+            CellOutputEx::new_from_scripts(lock, packed_type, data.clone(), Some(CKB_CAPACITY))
+                .unwrap();
+        let intention = fake_outpoint();
+        rpc.insert_fake_cell(
+            intention.clone(),
+            cell,
+            Some(fake_header_view(PACK_BLOCK, PACK_BLOCK, PACK_BLOCK)),
+        );
+        let outpoint = outpoint_ids(&intention);
+
+        let refund = || AddOutputCell {
+            lock_script: user_lock(),
+            type_script: type_script.clone(),
+            data: data.clone(),
+            capacity: CKB_CAPACITY,
+            absolute_capacity: true,
+            type_id: false,
+        };
+        let digest = digest_ok::<FakeRpcClient>(outpoint, outpoint_ids(&process), Some(refund()));
+        let incompatible = Instruction::new(vec![
+            Box::new(AddInputCellByOutPoint {
+                tx_hash: outpoint.0,
+                index: outpoint.1,
+                since: None,
+            }),
+            Box::new(refund()),
+        ]);
+        let timeout = timeout_burn::<FakeRpcClient>(
+            outpoint,
+            user_address(),
+            user_lock(),
+            CKB_CAPACITY,
+            type_script.map(|script| (script, XUDT_AMOUNT)),
+            judge,
+        );
+
+        for (hop, instruction) in [
+            ("DigestOk", digest),
+            ("DigestIncompatible", incompatible),
+            ("TimeoutBurn", timeout),
+        ] {
+            let mut candidate = skeleton.clone();
+            TransactionCalculator::default()
+                .instruction(instruction)
+                .apply_skeleton(&rpc, &mut candidate)
+                .expect("construct local, unsigned transaction");
+            // The timeout recipe emits empty data on the untyped path. Preserve
+            // the original byte here to test an otherwise exact refund.
+            candidate.outputs.last_mut().unwrap().data.clone_from(&data);
+            let error = verify(&rpc, candidate, vec![])
+                .await
+                .expect_err("CID must reject the spend");
+            assert_eq!(exit(error), ERROR_UNSUPPORTED_TYPE, "{case}: {hop}");
+        }
+    }
 }
 
 #[tokio::test]

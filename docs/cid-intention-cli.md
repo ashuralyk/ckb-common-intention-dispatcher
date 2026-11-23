@@ -19,19 +19,65 @@ Lean host binary in this contract repo that:
 
 | Concern | Choice |
 |---------|--------|
-| Asset | CKB only (no xUDT) |
+| Asset | CKB only, with no output type script and empty output data |
 | Intention capacity | Defaults to the example Process minimum (**600 CKB**). The CLI sizes the CKB output to `max(requested, occupied + 1 shannon)` so the CID lock can consume it. When `enforce_example_process_deposit_minimum` is `true` (default), it rejects an effective capacity below the **example** Process 600 CKB floor. Set that flag to `false` for other Processes that own a lower (or zero) deposit minimum. |
 | Inputs | Explicit funding outpoint + deps in offline request JSON (pinned by outpoint; not address scan) |
 | Process identity | Process state cell’s built-in **TYPE_ID type script** `{TYPE_ID, type, args}` → `calc_script_hash` (= Intention `process_type_hash`); Process contract is the state-cell **lock** |
 | CID lock identity | Intention lock always references the CID code cell by **Type ID**: `lock.code_hash = hash(cid_lock_dep.type_script)`, `lock.hash_type = type`. Data-hash (`data1`) referencing is rejected. |
 | Payload | Required beneficiary lock → `Payload::from_script` (Process example semantics) |
-| User lock | Funding lock (= payer) |
+| User lock | Funding lock (= payer), using `data`, `type` or `data1` |
 | Fee / change | Explicit `fee_shannons` (Intention) or rate **1000** (Process); sized on `serialized_size_in_block` (= molecule + 4) **after** change + sighash witness placeholders; change to payer via skeleton `balance` |
 | Signing | `CID_INTENTION_PRIVKEY` env (32-byte hex); never CLI flags / files / `.env` / logs / JSON |
 | Broadcast | `send` subcommand only; requires `--network testnet` + `--genesis-hash`; strips `hash`/`process_type_hash` then validates as RPC `Transaction`; fail-closed on mainnet / missing-empty-unknown chain (whitelist `ckb_testnet`) / genesis mismatch; `safe_message` keeps structured genesis hashes actionable while omitting hex-flooded guard/RPC strings |
 | Coin selection | Not in v1 (no online UTXO gather) |
 
 ## Request JSON (create)
+
+`create` accepts objects or positional arrays for both the full request and
+`funding`. Arrays follow the field order shown in the example below.
+
+The `create` command checks asset field names in the top-level request object
+and in the funding object. For positional requests, it checks the fifth
+element when that element is a funding object. The Rust request types use
+standard Serde deserialization and ignore unknown fields.
+
+Use `intention_capacity` for the requested output capacity. `funding.capacity`
+and the optional `funding.data` describe the existing input cell. For each
+extra key in a checked object, `create` lowercases the name and removes
+non-alphanumeric characters, including underscores and hyphens. It rejects
+the key only if the result exactly matches the normalized form of one of the
+following names, even when the value is `null`.
+
+- Capacity and cell output fields: `capacity`, `cell_capacity`,
+  `intention_capacity`, `output_capacity`, `output`, `outputs`, `cell_output`,
+  `data`, `cell_data`, `intention_data`, `output_data`, `outputs_data`,
+  `raw_outputs_data`, `type`, `type_script`, `cell_type`, `cell_type_script`,
+  `intention_type`, `intention_type_script`, `output_type`, `output_type_script`.
+- Amounts and asset or token fields: `amount`, `total_amount`, `asset`,
+  `assets`, `asset_amount`, `asset_data`, `asset_type`, `asset_type_script`,
+  `token`, `tokens`, `token_amount`, `token_balance`, `token_data`, `token_type`,
+  `token_type_script`.
+- UDT fields: `udt`, `udt_amount`, `udt_data`, `udt_type`, `udt_script`,
+  `udt_type_script`, `sudt`, `sudt_amount`, `sudt_data`, `sudt_type`,
+  `sudt_script`, `sudt_type_script`, `xudt`, `xudt_amount`, `xudt_data`,
+  `xudt_type`, `xudt_script`, `xudt_type_script`, `xudt_args`, `xudt_code_hash`,
+  `xudt_hash_type`, `xudt_type_args`, `xudt_type_hash`, `input_xudt_args`.
+
+For example, `intentionCapacity`, `intention-capacity`, `outputCapacity`, and
+`XUDT_AMOUNT` all fail before `create` writes a transaction. When a rejected
+key matches a declared asset field at that level, the diagnostic suggests
+the canonical name, such as `intention_capacity` or `funding.capacity`. The
+diagnostic escapes the key into a single line and displays at most 48 bytes
+of the escaped key, including the `...` suffix when truncated.
+
+Other extra keys such as `feeShannons`, `funding.txHash`, `tokenizer`,
+`typescript_version`, `request_id`, and `note` are ignored. Their values can be
+any valid JSON, including `1e400` or an object like `{"value": 1e400}`. Use
+`fee_shannons` and `funding.tx_hash` for the actual fee and input transaction
+hash.
+
+See the CID v0.1.4 asset and User Lock rules in the
+[README](../README.md#intention-creation-with-cid-v014).
 
 ```json
 {
