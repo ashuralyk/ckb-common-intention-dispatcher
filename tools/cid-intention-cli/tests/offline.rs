@@ -436,16 +436,16 @@ fn cli_create_accepts_request_and_funding_in_field_order() {
     with_funding_array["funding"] = funding_array.clone();
     let mut with_both_arrays = request_array.clone();
     with_both_arrays[4] = funding_array;
-    let mut with_unchecked_funding_object = request_array.clone();
-    with_unchecked_funding_object[4]["output_capacity"] = json!(null);
+    let mut with_funding_metadata = request_array.clone();
+    with_funding_metadata[4]["request_id"] = json!("metadata");
 
     for (form, input) in [
         ("request array", request_array),
         ("funding array", with_funding_array),
         ("request and funding arrays", with_both_arrays),
         (
-            "request array skips preflight",
-            with_unchecked_funding_object,
+            "request array with funding metadata",
+            with_funding_metadata.clone(),
         ),
     ] {
         assert_eq!(
@@ -453,6 +453,31 @@ fn cli_create_accepts_request_and_funding_in_field_order() {
             baseline,
             "{form}"
         );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let request_path = dir.path().join("request.json");
+    let output_path = dir.path().join("transaction.json");
+    for field in ["type_script", "output_capacity"] {
+        let mut input = with_funding_metadata.clone();
+        input[4][field] = json!(null);
+        std::fs::write(&request_path, input.to_string()).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_cid-intention-cli"))
+            .arg("create")
+            .arg("--request")
+            .arg(&request_path)
+            .arg("--output")
+            .arg(&output_path)
+            .env(PRIVKEY_ENV, &key_hex)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{field}");
+        assert!(
+            stderr.contains(&format!("unsupported asset field `funding.{field}`")),
+            "{stderr}"
+        );
+        assert!(!output_path.exists(), "{field}");
     }
 }
 

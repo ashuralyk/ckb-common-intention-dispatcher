@@ -36,10 +36,10 @@ Lean host binary in this contract repo that:
 `create` accepts objects or positional arrays for both the full request and
 `funding`. Arrays follow the field order shown in the example below.
 
-For a top-level object, the `create` command checks the keys of that object
-and of its `funding` object, if present. A top-level positional array skips
-this check. The Rust request types use standard Serde deserialization and
-ignore unknown fields.
+The `create` command checks asset field names in the top-level request object
+and in the funding object. For positional requests, it checks the fifth
+element when that element is a funding object. The Rust request types use
+standard Serde deserialization and ignore unknown fields.
 
 Use `intention_capacity` for the requested output capacity. `funding.capacity`
 and the optional `funding.data` describe the existing input cell. For each

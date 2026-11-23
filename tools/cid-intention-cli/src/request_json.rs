@@ -8,12 +8,12 @@ use serde::{
 };
 
 pub(super) fn preflight_create_request(text: &str) -> Result<(), serde_json::Error> {
-    if !text.trim_start().starts_with('{') {
-        return Ok(());
-    }
-
     let mut deserializer = serde_json::Deserializer::from_str(text);
-    deserializer.deserialize_map(AssetFields::Request)?;
+    match text.trim_start().chars().next() {
+        Some('{') => deserializer.deserialize_map(AssetFields::Request)?,
+        Some('[') => deserializer.deserialize_seq(AssetFields::Request)?,
+        _ => return Ok(()),
+    }
     deserializer.end()
 }
 
@@ -51,6 +51,15 @@ impl<'de> Visitor<'de> for AssetFields {
     }
 
     fn visit_seq<S: SeqAccess<'de>>(self, mut seq: S) -> Result<(), S::Error> {
+        if matches!(self, Self::Request) {
+            // CreateRequest's positional form puts funding after four fields.
+            for _ in 0..4 {
+                if seq.next_element::<IgnoredAny>()?.is_none() {
+                    return Ok(());
+                }
+            }
+            seq.next_element_seed(Self::Funding)?;
+        }
         while seq.next_element::<IgnoredAny>()?.is_some() {}
         Ok(())
     }
